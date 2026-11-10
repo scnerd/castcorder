@@ -1,0 +1,39 @@
+name: Release
+
+# Stub. Triggered by a version tag; for now it only proves the workspace builds in release
+# mode on all three platforms.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+
+      - name: Build the workspace (release)
+        working-directory: castcorder
+        run: cargo build --workspace --release --locked
+
+      # TODO: build the Tauri installers (Windows, macOS, Linux) and attach them to the GitHub
+      # release. Builds are unsigned (docs/design.md, "Repository and delivery").
+      # TODO: build the Leptos web client with Trunk and publish it to its own versioned path on
+      # the static site, so the call links of this release can pin it (ADR 0002).

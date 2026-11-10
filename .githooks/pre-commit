@@ -1,0 +1,48 @@
+#!/usr/bin/env sh
+# Project pre-commit hook: runs beads' hook, then the pre-commit tool's hooks.
+#
+# Why this file exists. `bd init` sets core.hooksPath to .beads/hooks, which
+# makes git ignore .git/hooks entirely. That in turn makes `pre-commit install`
+# refuse to run at all:
+#
+#     cowardly refusing to install hooks with core.hooksPath set
+#
+# So beads and pre-commit each want to own the repo's hooks, and whichever is
+# configured last silently disables the other. Rather than fight beads for
+# ownership of its own directory, core.hooksPath points at THIS directory and
+# this hook chains both. Neither tool has to know the other exists.
+#
+# The consequence worth remembering: `pre-commit install` is never run in this
+# repo, and running it would fail. `task hooks` wires everything instead. The
+# pre-commit tool is still what runs the hygiene hooks -- it is just invoked
+# from here rather than from a hook it installed itself.
+#
+# ASCII only -- Windows terminals break on unicode.
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+# --- 1. Beads: delegate to its managed hook, if present ----------------------
+exec_beads() {
+    if [ -x "$REPO_ROOT/.beads/hooks/pre-commit" ]; then
+        "$REPO_ROOT/.beads/hooks/pre-commit" "$@"
+    elif [ -f "$REPO_ROOT/.beads/hooks/pre-commit" ]; then
+        sh "$REPO_ROOT/.beads/hooks/pre-commit" "$@"
+    fi
+}
+exec_beads "$@"
+
+# --- 2. pre-commit: hygiene hooks --------------------------------------------
+# `--hook-stage pre-commit` runs against staged files, which is what a real
+# pre-commit run does; `--all-files` here would check the whole tree on every
+# commit and would be far too slow to keep.
+#
+# Always through uv, with pre-commit-uv so hook environments are installed by
+# uv rather than pip. Never pip/python directly.
+if command -v uvx >/dev/null 2>&1; then
+    uvx --with pre-commit-uv pre-commit run --hook-stage pre-commit
+else
+    echo >&2 "NOTE: uv not available; hygiene hooks skipped this commit."
+    echo >&2 "Install uv and run 'task hooks' to restore them."
+fi

@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# Shared delegator: forwards one git hook invocation to beads' managed hook of
+# the same name in .beads/hooks/, if beads has installed one.
+#
+# Why this exists as its own file rather than being copy-pasted into each of
+# post-checkout / post-merge / pre-push / prepare-commit-msg: those four
+# delegators are otherwise identical, and four copies of the same six lines is
+# the kind of duplication that drifts -- one gets fixed, the others do not.
+# The thin wrappers in this directory just call this with their own name.
+#
+# Uses `git rev-parse --show-toplevel` rather than a path relative to this
+# script, so it resolves correctly from any worktree.
+#
+# ASCII only -- Windows terminals break on unicode.
+
+set -e
+
+HOOK_NAME="$1"
+shift
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+BEADS_HOOK="$REPO_ROOT/.beads/hooks/$HOOK_NAME"
+
+if [ -x "$BEADS_HOOK" ]; then
+    "$BEADS_HOOK" "$@"
+elif [ -f "$BEADS_HOOK" ]; then
+    sh "$BEADS_HOOK" "$@"
+fi

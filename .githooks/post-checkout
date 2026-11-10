@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# Delegates to .beads/hooks/post-checkout. See _beads-dispatch for why this is a
+# thin wrapper rather than duplicated logic, and .githooks/pre-commit for why
+# core.hooksPath points at this directory instead of .beads/hooks.
+#
+# ASCII only -- Windows terminals break on unicode.
+set -e
+REPO_ROOT=$(git rev-parse --show-toplevel)
+exec "$REPO_ROOT/.githooks/_beads-dispatch" post-checkout "$@"

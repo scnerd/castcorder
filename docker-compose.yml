@@ -1,0 +1,18 @@
+# Local dev only. Placeholder services; the real rendezvous image arrives with M1.
+services:
+  rendezvous:
+    # TODO: replace with a build of castcorder/crates/castcorder-rendezvous once it does something.
+    image: busybox:1.37
+    command: ["sh", "-c", "echo rendezvous placeholder; sleep infinity"]
+    profiles: ["rendezvous"]
+    ports:
+      - "8080:8080"
+
+  coturn:
+    image: coturn/coturn:4.6
+    # Host networking is the practical way to run a TURN server locally (large UDP relay range).
+    # It only works on Linux Docker; on Docker Desktop publish the ports instead.
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]

@@ -1,0 +1,20 @@
+# Normalize line endings for text files to LF everywhere (CI runs on Linux;
+# Windows developers work without autocrlf=true).
+* text=auto eol=lf
+
+# Binaries: never touch line endings.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.tar binary
+*.gz binary
+*.zip binary
+*.wasm binary
+*.pdf binary

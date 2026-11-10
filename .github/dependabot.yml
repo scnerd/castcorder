@@ -1,0 +1,32 @@
+# Weekly version bumps. Minor and patch updates are grouped per ecosystem to keep the PR count
+# low; majors stay separate.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+  # The workspace under castcorder/ (one Cargo.lock). Spikes are excluded from the workspace.
+  - package-ecosystem: cargo
+    directory: /castcorder
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  # rust-toolchain.toml channel.
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule:
+      interval: weekly
+
+  # Hook revs in .pre-commit-config.yaml.
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly

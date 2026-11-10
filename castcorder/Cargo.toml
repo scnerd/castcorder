@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# Spikes are throwaway experiments with their own manifests; keep them out of the workspace.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jexmax/castcorder"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.dependencies]
+castcorder-protocol = { path = "crates/castcorder-protocol" }
+castcorder-core = { path = "crates/castcorder-core" }
+castcorder-client = { path = "crates/castcorder-client" }

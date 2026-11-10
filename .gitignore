@@ -1,0 +1,44 @@
+# Rust
+target/
+**/target/
+
+# Trunk / web build output
+dist/
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# go-task checksum cache
+.task/
+
+# Python (hook tooling run via uv)
+__pycache__/
+.venv/
+
+# Node
+node_modules/
+npm-debug.log
+test-results/
+playwright-report/
+
+# Local recordings and libraries produced while developing
+/library/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*

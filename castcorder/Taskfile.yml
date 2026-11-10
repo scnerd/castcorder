@@ -1,0 +1,39 @@
+version: "3"
+
+# The Rust workspace tasks. Included (flattened) by the root Taskfile.yml, so run
+# them from the repo root: `task check`. Never touches castcorder/spikes/, which is
+# excluded from the workspace.
+
+tasks:
+  fmt:
+    desc: Format all Rust code
+    cmds:
+      - cargo fmt --all
+
+  fmt:check:
+    desc: Check Rust formatting without rewriting files
+    cmds:
+      - cargo fmt --all --check
+
+  clippy:
+    desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
+    cmds:
+      - cargo clippy --workspace --all-targets --locked -- -D warnings
+      - cargo clippy -p castcorder-protocol -p castcorder-core --lib --target wasm32-unknown-unknown --locked -- -D warnings
+
+  lint:
+    desc: Formatting and clippy (what the CI check job runs)
+    cmds:
+      - task: fmt:check
+      - task: clippy
+
+  test:unit:
+    desc: Tiers 1-2 - unit, simulation, and doc tests (no Docker)
+    cmds:
+      - cargo test --workspace --locked
+
+  check:
+    desc: Formatting, clippy, and tiers 1-2 tests; no Docker needed
+    cmds:
+      - task: lint
+      - task: test:unit

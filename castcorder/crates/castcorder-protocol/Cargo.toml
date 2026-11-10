@@ -1,0 +1,12 @@
+[package]
+name = "castcorder-protocol"
+description = "Typed requests, responses, and events shared by every Castcorder component"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

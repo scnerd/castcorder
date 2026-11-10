@@ -1,0 +1,64 @@
+version: "3"
+
+# Taskfile is the single entry point: humans, agents, and CI all call these
+# tasks. Each service keeps its own taskfile and is included here.
+
+includes:
+  # flatten: the Rust workspace tasks (fmt, clippy, lint, check, ...) are available
+  # from the repo root without a namespace.
+  castcorder:
+    taskfile: ./castcorder/Taskfile.yml
+    dir: ./castcorder
+    flatten: true
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  hooks:
+    desc: Wire (or repair) the git hook chain so beads and pre-commit both run
+    summary: |
+      Points core.hooksPath at .githooks/, which chains beads' hooks and the
+      pre-commit tool's hooks. Never run `pre-commit install` here -- it fails
+      by design once core.hooksPath is set. Run this after `bd init`, after a
+      beads upgrade, and in any new worktree.
+    cmds:
+      - uv run scripts/check_hooks_wired.py --repair
+
+  hygiene:
+    desc: Run every hygiene hook against the whole tree (what the CI hygiene job runs)
+    cmds:
+      # pre-commit-uv makes hook environments install via uv, never pip.
+      - uvx --with pre-commit-uv pre-commit run --all-files
+
+  test:
+    desc: Everything in check, plus the system and browser tiers (placeholder for now)
+    summary: |
+      Tiers 1-2 (unit, simulation) are in `task check`. Tier 3 (system: real
+      binaries, real rendezvous and coturn, needs Docker) and tier 4 (browser:
+      Playwright with Chromium, needs Docker and Chromium) land with M1.
+    cmds:
+      - task: check
+      - task: test:system
+      - task: test:browser
+
+  test:system:
+    desc: Tier 3 system tests (placeholder; needs Docker once it exists)
+    cmds:
+      - echo "test:system - not implemented yet (tier 3, lands with M1)"
+
+  test:browser:
+    desc: Tier 4 browser tests (placeholder; needs Docker and Chromium once it exists)
+    cmds:
+      - echo "test:browser - not implemented yet (tier 4, lands with M1)"
+
+  dev:up:
+    desc: Start the local dev services (rendezvous and coturn placeholders)
+    cmds:
+      - docker compose up -d
+
+  dev:down:
+    desc: Stop the local dev services
+    cmds:
+      - docker compose down

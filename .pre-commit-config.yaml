@@ -1,0 +1,91 @@
+# Hygiene-only, fast, file-scoped hooks. Anything that compiles or needs
+# judgment runs via `task check` / `task test` instead.
+#
+# Run by .githooks/pre-commit (never `pre-commit install` -- see that file),
+# and by CI with --all-files.
+#
+# `generated-or-source` exempts from every content-rewriting hook:
+#   castcorder/spikes/ -- throwaway experiments owned by whoever is running them;
+#                         never formatted or linted by the repo tooling.
+#   .beads/ .agents/ .codex/ -- owned and rewritten by beads.
+repos:
+  - repo: local
+    hooks:
+      - id: ascii-only
+        name: ASCII only (Windows terminals break on unicode)
+        language: pygrep
+        entry: "[^\\x00-\\x7F]"
+        types: [text]
+        exclude: &generated-or-source '^castcorder/spikes/|^\.beads/|^\.agents/|^\.codex/|^LICENSE'
+
+      # uvx keeps Python tooling off pip.
+      - id: shellcheck
+        name: shellcheck (scripts/*.sh)
+        language: system
+        entry: uvx --from shellcheck-py==0.11.0.1 shellcheck
+        files: '^scripts/.*\.sh$'
+
+      # Lints the workflows, and shellchecks their `run:` blocks when shellcheck is on PATH.
+      - id: actionlint
+        name: actionlint (.github/workflows)
+        language: system
+        entry: uvx --from actionlint-py==1.7.12.25 --with shellcheck-py==0.11.0.1 actionlint
+        files: '^\.github/workflows/.*\.ya?ml$'
+
+      # Rewrites files; pre-commit then fails the commit so you re-stage. The workspace
+      # excludes castcorder/spikes/, so `--all` never touches it.
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        entry: cargo fmt --all --manifest-path castcorder/Cargo.toml
+        types: [rust]
+        exclude: "^castcorder/spikes/"
+        pass_filenames: false
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        types: [text]
+        exclude: *generated-or-source
+      - id: end-of-file-fixer
+        types: [text]
+        exclude: *generated-or-source
+      - id: check-yaml
+        exclude: *generated-or-source
+      - id: check-toml
+        exclude: *generated-or-source
+      - id: mixed-line-ending
+        types: [text]
+        args: [--fix=lf]
+        exclude: *generated-or-source
+      - id: fix-byte-order-marker
+        exclude: *generated-or-source
+
+  - repo: https://github.com/ComPWA/taplo-pre-commit
+    rev: v0.9.3
+    hooks:
+      - id: taplo-format
+        exclude: *generated-or-source
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        types: [yaml]
+        exclude: *generated-or-source
+
+  - repo: https://github.com/hukkin/mdformat
+    rev: 1.0.0
+    hooks:
+      - id: mdformat
+        args: [--number]
+        exclude: *generated-or-source
+        additional_dependencies:
+          - mdformat-gfm
+          - mdformat-frontmatter
