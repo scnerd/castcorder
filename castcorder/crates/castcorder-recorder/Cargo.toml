@@ -1,0 +1,18 @@
+[package]
+name = "castcorder-recorder"
+description = "Recorder: crash-tolerant WAV track writer with recovery, driver, and FLAC conversion, all through the disk port"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+castcorder-port-capture = { workspace = true }
+castcorder-port-disk = { workspace = true }
+flacenc = { workspace = true }
+claxon = { workspace = true }
+
+[lints]
+workspace = true
