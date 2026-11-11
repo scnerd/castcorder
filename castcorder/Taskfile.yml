@@ -20,6 +20,8 @@ tasks:
     cmds:
       - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
       - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      # The Browser Guest: its UI and worker binaries only exist on wasm32.
+      - cargo clippy -p castcorder-client --lib --bins --target wasm32-unknown-unknown --locked -- -D warnings
 
   lint:
     desc: Formatting and clippy (what the CI check job runs)
@@ -60,6 +62,23 @@ tasks:
     dir: crates/castcorder-transport/browser-test
     cmds:
       - cargo build --release --locked -p castcorder-transport --example browser_host
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node e2e.mjs
+
+  test:browser:client:
+    desc: The Browser Guest (castcorder-client) against the browser_host example with 2 headless Chromium guests (installs Playwright and Chromium locally on first run)
+    summary: |
+      Builds the browser_host example and the client with trunk (dist/), then runs
+      crates/castcorder-client/browser-test/e2e.mjs with Playwright installed in
+      that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
+      The host serves dist/; guest A is fed a deterministic WAV, both guests join,
+      B must receive A's audio, and A's take must come back out of OPFS bit-exact.
+      Run from the repo root with: task test:browser
+    dir: crates/castcorder-client/browser-test
+    cmds:
+      - cargo build --release --locked -p castcorder-transport --example browser_host
+      - cd .. && trunk build --release
       - npm install --no-audit --no-fund
       - node setup.mjs
       - node e2e.mjs

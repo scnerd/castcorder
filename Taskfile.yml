@@ -52,6 +52,7 @@ tasks:
     desc: Tier 4 browser tests (Playwright with headless Chromium, installed locally on first run)
     cmds:
       - task: test:browser:transport
+      - task: test:browser:client
 
   dev:up:
     desc: Start the local dev services (rendezvous and coturn placeholders)
