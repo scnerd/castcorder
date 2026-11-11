@@ -1,6 +1,23 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# castcorder-capture-gst needs a GStreamer install, so plain `cargo build` skips it.
+# Tasks that use --workspace must add `--exclude castcorder-capture-gst`; `task test:gst`
+# builds it.
+default-members = [
+  "crates/castcorder-app",
+  "crates/castcorder-client",
+  "crates/castcorder-core",
+  "crates/castcorder-port-capture",
+  "crates/castcorder-port-clock",
+  "crates/castcorder-port-disk",
+  "crates/castcorder-port-net",
+  "crates/castcorder-protocol",
+  "crates/castcorder-recorder",
+  "crates/castcorder-rendezvous",
+  "crates/castcorder-transfer",
+  "crates/castcorder-transport",
+]
 # Spikes are throwaway experiments with their own manifests; keep them out of the workspace.
 exclude = ["spikes"]
 
@@ -24,6 +41,7 @@ castcorder-port-clock = { path = "crates/castcorder-port-clock" }
 castcorder-port-net = { path = "crates/castcorder-port-net" }
 castcorder-port-disk = { path = "crates/castcorder-port-disk" }
 castcorder-port-capture = { path = "crates/castcorder-port-capture" }
+castcorder-capture-gst = { path = "crates/castcorder-capture-gst" }
 castcorder-recorder = { path = "crates/castcorder-recorder" }
 # Pure-Rust FLAC, as in the browser-recorder spike; keep behind castcorder-recorder.
 flacenc = { version = "0.5.1", default-features = false }

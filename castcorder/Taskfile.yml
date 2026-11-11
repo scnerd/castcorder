@@ -18,7 +18,7 @@ tasks:
   clippy:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
-      - cargo clippy --workspace --all-targets --locked -- -D warnings
+      - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
       - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer --lib --target wasm32-unknown-unknown --locked -- -D warnings
 
   lint:
@@ -30,13 +30,25 @@ tasks:
   test:unit:
     desc: Tiers 1-2 - unit, simulation, and doc tests (no Docker)
     cmds:
-      - cargo test --workspace --locked
+      - cargo test --workspace --exclude castcorder-capture-gst --locked
 
   check:
     desc: Formatting, clippy, and tiers 1-2 tests; no Docker needed
     cmds:
       - task: lint
       - task: test:unit
+
+  test:gst:
+    desc: castcorder-capture-gst against a real GStreamer (needs the GStreamer runtime and development files, and pkg-config)
+    summary: |
+      Not part of `task check`: CI and other machines may lack GStreamer. On Windows
+      install the MSVC runtime and development packages; the installer sets
+      GSTREAMER_1_0_ROOT_MSVC_X86_64, PKG_CONFIG_PATH (its lib\pkgconfig) and Path
+      (its bin, which holds pkg-config.exe) -- open a new shell afterwards.
+      The microphone test skips itself when there is no input device.
+    cmds:
+      - cargo clippy -p castcorder-capture-gst --all-targets -- -D warnings
+      - cargo test -p castcorder-capture-gst -- --nocapture
 
   test:browser:transport:
     desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)

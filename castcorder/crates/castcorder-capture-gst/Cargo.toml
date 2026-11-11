@@ -1,0 +1,21 @@
+[package]
+name = "castcorder-capture-gst"
+description = "Capture port over GStreamer: wasapi2src, pulsesrc, osxaudiosrc, or a WAV file; device monitor and watchdog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+castcorder-port-capture.workspace = true
+gst = { package = "gstreamer", version = "0.25", features = ["v1_24"] }
+gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"] }
+gst-audio = { package = "gstreamer-audio", version = "0.25", features = [
+  "v1_24",
+] }
+tracing.workspace = true
+
+[lints]
+workspace = true
