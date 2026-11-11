@@ -24,6 +24,12 @@ castcorder-port-clock = { path = "crates/castcorder-port-clock" }
 castcorder-port-net = { path = "crates/castcorder-port-net" }
 castcorder-port-disk = { path = "crates/castcorder-port-disk" }
 castcorder-port-capture = { path = "crates/castcorder-port-capture" }
+# Pinned as in the transfer spike (spikes/transfer/FINDINGS.md); keep behind this crate.
+bao-tree = { version = "0.17", default-features = false, features = [
+  "validate",
+] }
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
+castcorder-transfer = { path = "crates/castcorder-transfer" }
 serde = { version = "1", default-features = false, features = [
   "derive",
   "alloc",

@@ -19,7 +19,7 @@ tasks:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
       - cargo clippy --workspace --all-targets --locked -- -D warnings
-      - cargo clippy -p castcorder-protocol -p castcorder-core --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer --lib --target wasm32-unknown-unknown --locked -- -D warnings
 
   lint:
     desc: Formatting and clippy (what the CI check job runs)
