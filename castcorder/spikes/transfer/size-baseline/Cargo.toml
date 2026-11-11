@@ -1,0 +1,17 @@
+[workspace]
+
+# Baseline for measuring the WASM size contribution of bao-tree + the
+# transfer code: the same wasm-bindgen export surface minus everything but
+# BLAKE3.
+[package]
+name = "size-baseline"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
+wasm-bindgen = "=0.2.128"

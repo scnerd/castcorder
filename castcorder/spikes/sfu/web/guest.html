@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>castcorder sfu spike guest</title>
+<style>
+  body { font-family: sans-serif; background: #111; color: #ddd; }
+  video { width: 240px; margin: 2px; background: #000; }
+  #log { font-family: monospace; font-size: 11px; white-space: pre; }
+</style>
+</head>
+<body>
+<div>
+  name: <span id="name"></span>
+  <button onclick="cc.join()">join</button>
+  <button onclick="cc.leave()">leave</button>
+  <button onclick="cc.blob(50*1024*1024).then(r=>log(JSON.stringify(r)))">50MB blob</button>
+  state: <span id="state">idle</span>
+</div>
+<div id="local"></div>
+<div id="remote"></div>
+<div id="log"></div>
+<script>
+// Throwaway spike guest. Exposes window.cc for the Playwright test.
+// Signalling: POST /offer once; afterwards the HOST is the only offerer and
+// sends offers over the "signal" data channel; we only answer.
+const params = new URLSearchParams(location.search);
+const NAME = (params.get('name') || 'guest').replace(/[^A-Za-z0-9]/g, '');
+document.getElementById('name').textContent = NAME;
+const byId = (id) => document.getElementById(id);
+function log(s) { byId('log').textContent += s + '\n'; console.log('[' + NAME + '] ' + s); }
+
+let localStream = null;
+let pc = null;
+let signal = null;
+let data = null;
+let session = 0;               // increments per join
+let midToOrigin = {};          // mid -> stream id ("<name>-<hostClientId>")
+let subscribedAt = {};         // stream id -> performance.now() at ontrack(video)
+let firstFrameMs = {};         // stream id -> ms from ontrack to first decoded frame
+let dataWaiters = [];          // pending resolvers for data channel messages
+let sigChain = Promise.resolve();
+
+function setState(s) { byId('state').textContent = s; }
+
+async function getMedia() {
+  if (!localStream) {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { width: 640, height: 360, frameRate: 30 },
+    });
+    const v = document.createElement('video');
+    v.muted = true; v.autoplay = true; v.playsInline = true;
+    v.srcObject = localStream;
+    byId('local').appendChild(v);
+  }
+  return localStream;
+}
+
+function waitOpen(ch) {
+  return new Promise((res, rej) => {
+    if (ch.readyState === 'open') return res();
+    ch.onopen = () => res();
+    ch.onerror = (e) => rej(e);
+  });
+}
+
+async function join() {
+  const my = ++session;
+  midToOrigin = {}; subscribedAt = {}; firstFrameMs = {};
+  setState('joining');
+  const stream = await getMedia();
+  pc = new RTCPeerConnection();
+  const thisPc = pc;
+  for (const track of stream.getTracks()) {
+    pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+  }
+  signal = pc.createDataChannel('signal');
+  data = pc.createDataChannel('data'); // reliable + ordered by default
+  data.binaryType = 'arraybuffer';
+  signal.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'offer') {
+      sigChain = sigChain.then(() => handleOffer(thisPc, msg)).catch((e) => log('offer error ' + e));
+    }
+  };
+  data.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') return;
+    const msg = JSON.parse(ev.data);
+    const i = dataWaiters.findIndex((w) => w.match(msg));
+    if (i >= 0) { const w = dataWaiters.splice(i, 1)[0]; w.resolve(msg); }
+  };
+  pc.ontrack = (e) => {
+    const origin = (e.streams[0] && e.streams[0].id) || 'unknown';
+    const mid = e.transceiver.mid;
+    midToOrigin[mid] = origin;
+    const el = document.createElement(e.track.kind === 'video' ? 'video' : 'audio');
+    el.autoplay = true; el.muted = true; el.playsInline = true;
+    el.dataset.origin = origin;
+    el.srcObject = new MediaStream([e.track]);
+    byId('remote').appendChild(el);
+    e.track.addEventListener('ended', () => el.remove());
+    if (e.track.kind === 'video') subscribedAt[origin] = performance.now();
+  };
+  pc.onconnectionstatechange = () => { if (my === session) setState(pc.connectionState); };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const res = await fetch('/offer?name=' + encodeURIComponent(NAME), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: offer.type, sdp: offer.sdp }),
+  });
+  if (!res.ok) throw new Error('offer rejected: ' + (await res.text()));
+  const answer = await res.json();
+  await pc.setRemoteDescription(answer);
+  await Promise.all([waitOpen(signal), waitOpen(data)]);
+  setState('joined');
+  log('joined session ' + my);
+  return true;
+}
+
+async function handleOffer(thisPc, offer) {
+  if (thisPc !== pc || pc.signalingState === 'closed') return;
+  await pc.setRemoteDescription(offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  signal.send(JSON.stringify({ type: answer.type, sdp: answer.sdp }));
+}
+
+async function leave() {
+  if (!pc) return;
+  try { if (signal && signal.readyState === 'open') signal.send(JSON.stringify({ type: 'bye' })); } catch (e) {}
+  await new Promise((r) => setTimeout(r, 100));
+  pc.close();
+  pc = null; signal = null; data = null;
+  byId('remote').innerHTML = '';
+  setState('left');
+  log('left');
+}
+
+function waitData(match, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const w = { match, resolve };
+    dataWaiters.push(w);
+    setTimeout(() => {
+      const i = dataWaiters.indexOf(w);
+      if (i >= 0) { dataWaiters.splice(i, 1); reject(new Error('data channel timeout')); }
+    }, timeoutMs);
+  });
+}
+
+async function echo(n) {
+  const rtts = [];
+  for (let i = 0; i < n; i++) {
+    const payload = 'x'.repeat(64) + ':' + i;
+    const t0 = performance.now();
+    const p = waitData((m) => m.type === 'echo' && m.seq === i, 5000);
+    data.send(JSON.stringify({ type: 'echo', seq: i, payload }));
+    const m = await p;
+    if (m.payload !== payload) throw new Error('echo mismatch at ' + i);
+    rtts.push(performance.now() - t0);
+  }
+  rtts.sort((a, b) => a - b);
+  return { n, ok: true, median_ms: rtts[Math.floor(n / 2)], max_ms: rtts[n - 1] };
+}
+
+function makeBlob(size) {
+  // Deterministic xorshift32 pseudo-random content (incompressible enough).
+  const buf = new Uint8Array(size);
+  const u32 = new Uint32Array(buf.buffer, 0, Math.floor(size / 4));
+  let x = 0x9e3779b9 ^ size;
+  for (let i = 0; i < u32.length; i++) {
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+    u32[i] = x >>> 0;
+  }
+  return buf;
+}
+
+function hex(buf) {
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function blob(size, chunk) {
+  chunk = chunk || 64 * 1024;
+  const buf = makeBlob(size);
+  const sha = hex(await crypto.subtle.digest('SHA-256', buf));
+  const HIGH = 4 * 1024 * 1024, LOW = 1024 * 1024;
+  data.bufferedAmountLowThreshold = LOW;
+  const t0 = performance.now();
+  data.send(JSON.stringify({ type: 'blob-start', size }));
+  for (let off = 0; off < size; off += chunk) {
+    if (data.bufferedAmount > HIGH) {
+      await new Promise((r) => { data.onbufferedamountlow = () => { data.onbufferedamountlow = null; r(); }; });
+    }
+    data.send(buf.subarray(off, Math.min(size, off + chunk)));
+  }
+  const p = waitData((m) => m.type === 'blob-result', 120000);
+  data.send(JSON.stringify({ type: 'blob-end' }));
+  const r = await p;
+  const ms = performance.now() - t0;
+  return {
+    size, chunk, sha_local: sha, sha_host: r.sha256, match: sha === r.sha256 && r.bytes === size,
+    guest_ms: Math.round(ms), guest_mbit_s: (size * 8 / 1e6) / (ms / 1000),
+    host_ms: r.host_ms, host_mbit_s: r.host_mbit_s,
+  };
+}
+
+async function stats() {
+  if (!pc) return { joined: false, inbound: [], outbound: [] };
+  const report = await pc.getStats();
+  const codecs = {};
+  report.forEach((s) => { if (s.type === 'codec') codecs[s.id] = s.mimeType; });
+  const live = new Set(pc.getTransceivers()
+    .filter((t) => t.currentDirection !== 'stopped' && t.direction !== 'stopped' && t.mid != null)
+    .map((t) => t.mid));
+  const inbound = [], outbound = [];
+  report.forEach((s) => {
+    if (s.type === 'inbound-rtp' && live.has(s.mid) && midToOrigin[s.mid]) {
+      inbound.push({
+        origin: midToOrigin[s.mid], mid: s.mid, kind: s.kind,
+        packetsReceived: s.packetsReceived || 0, bytesReceived: s.bytesReceived || 0,
+        packetsLost: s.packetsLost || 0,
+        framesDecoded: s.framesDecoded || 0, keyFramesDecoded: s.keyFramesDecoded || 0,
+        frameWidth: s.frameWidth, frameHeight: s.frameHeight,
+        totalSamplesReceived: s.totalSamplesReceived || 0,
+        pliCount: s.pliCount || 0, firCount: s.firCount || 0, nackCount: s.nackCount || 0,
+        jitterBufferDelay: s.jitterBufferDelay, jitterBufferEmittedCount: s.jitterBufferEmittedCount,
+        codec: codecs[s.codecId],
+      });
+    }
+    if (s.type === 'outbound-rtp') {
+      outbound.push({
+        kind: s.kind, mid: s.mid, packetsSent: s.packetsSent, bytesSent: s.bytesSent,
+        pliCount: s.pliCount || 0, firCount: s.firCount || 0, nackCount: s.nackCount || 0,
+        keyFramesEncoded: s.keyFramesEncoded, targetBitrate: s.targetBitrate,
+        frameWidth: s.frameWidth, qualityLimitationReason: s.qualityLimitationReason,
+        codec: codecs[s.codecId],
+      });
+    }
+  });
+  for (const i of inbound) {
+    if (i.kind === 'video' && i.framesDecoded > 0 && firstFrameMs[i.origin] == null && subscribedAt[i.origin] != null) {
+      firstFrameMs[i.origin] = Math.round(performance.now() - subscribedAt[i.origin]);
+    }
+  }
+  return { joined: true, session, inbound, outbound, firstFrameMs: { ...firstFrameMs } };
+}
+
+// Background poller so first-frame times are measured with ~100 ms resolution.
+setInterval(() => { if (pc) stats().catch(() => {}); }, 100);
+
+window.cc = { name: NAME, join, leave, echo, blob, stats };
+if (params.get('auto') === '1') join().catch((e) => log('join failed: ' + e));
+</script>
+</body>
+</html>

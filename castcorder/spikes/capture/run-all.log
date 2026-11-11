@@ -1,0 +1,336 @@
+capture spike run on Linux 6.6.114.1-microsoft-standard-WSL2 x86_64, 16 cpus
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+ulimit -r (rtprio): 95
+
+==================================================================
+=== [measure] probe elements and devices (before sound server)
+==================================================================
+GStreamer runtime version: 1.28.2.0
+  element filesrc          present (plugin license LGPL)
+  element wavparse         present (plugin license LGPL)
+  element wavenc           present (plugin license LGPL)
+  element tee              present (plugin license LGPL)
+  element queue            present (plugin license LGPL)
+  element appsink          present (plugin license LGPL)
+  element audioconvert     present (plugin license LGPL)
+  element audioresample    present (plugin license LGPL)
+  element webrtcdsp        present (plugin license LGPL)
+  element webrtcechoprobe  present (plugin license LGPL)
+  element opusenc          present (plugin license LGPL)
+  element pulsesrc         present (plugin license LGPL)
+  element pulsesink        present (plugin license LGPL)
+  element pipewiresrc      present (plugin license MIT/X11)
+  element alsasrc          present (plugin license LGPL)
+  element v4l2src          present (plugin license LGPL)
+  element videotestsrc     present (plugin license LGPL)
+  element openh264enc      present (plugin license BSD)
+  element x264enc          present (plugin license GPL)
+  element vah264enc        MISSING
+  element vaapih264enc     MISSING
+  element mp4mux           present (plugin license LGPL)
+  element matroskamux      present (plugin license LGPL)
+  element isofmp4mux       MISSING
+  element splitmuxsink     present (plugin license LGPL)
+  element avdec_h264       present (plugin license LGPL)
+  element h264parse        present (plugin license LGPL)
+  /dev/video* nodes: []
+--- (measurement step returned non-zero: probe elements and devices (before sound server))
+
+==================================================================
+=== [required] cargo test (unit, bit-exact file source, stalled live branch, TestClock)
+==================================================================
+/home/spike/app/scripts/run-all.sh: line 13:    22 Segmentation fault         (core dumped) "$@"
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+[44k16-app] src caps Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+[44k16-app] rec caps Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+[44k16-app] [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=529348 rec_discont=0 rec_overruns=0 live_in=76 live_out=5 live_dropped=71 live_overruns=71 opus_packets=9 opus_bytes=843
+.[44k16-wavenc] src caps Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+[44k16-wavenc] rec caps Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+[44k16-wavenc] [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=529348 rec_discont=0 rec_overruns=0 live_in=76 live_out=5 live_dropped=71 live_overruns=71 opus_packets=9 opus_bytes=843
+.[48k24-app] src caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-app] rec caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-app] [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=864222 rec_discont=0 rec_overruns=0 live_in=76 live_out=6 live_dropped=70 live_overruns=70 opus_packets=11 opus_bytes=1037
+.[48k24-wavenc] src caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-wavenc] rec caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-wavenc] [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=864222 rec_discont=0 rec_overruns=0 live_in=76 live_out=5 live_dropped=71 live_overruns=71 opus_packets=9 opus_bytes=826
+.[48k24-stalled] src caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-stalled] rec caps Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+[48k24-stalled] [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=864222 rec_discont=0 rec_overruns=0 live_in=76 live_out=5 live_dropped=71 live_overruns=71 opus_packets=9 opus_bytes=826
+.
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+
+running 1 test
+pts (ms) under TestClock: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90]
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+--- PASS: cargo test (unit, bit-exact file source, stalled live branch, TestClock)
+generated /tmp/spike-out/ref48k24.wav (48000 Hz, 24 bit, stereo, 144037 frames)
+generated /tmp/spike-out/ref44k16.wav (44100 Hz, 16 bit, stereo, 132337 frames)
+
+==================================================================
+=== [required] CLI record-file 48k/24 (thread priority report)
+==================================================================
+  /tmp/spike-out/ref48k24.wav -> /tmp/spike-out/file48k24.wav in 14 ms
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=864222 rec_discont=0 rec_overruns=0 live_in=76 live_out=6 live_dropped=70 live_overruns=70 opus_packets=11 opus_bytes=996
+  src caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+  rec caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+  rec-thread: rec_queue streaming thread entered (tid 77)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 77; rec_queue thread tid 77; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  input data 864222 bytes (48000 Hz 24 bit), output data 864222 bytes (48000 Hz 24 bit), byte-identical: true
+--- PASS: CLI record-file 48k/24 (thread priority report)
+
+==================================================================
+=== [required] CLI record-file 44.1k/16 with wavenc writer
+==================================================================
+  /tmp/spike-out/ref44k16.wav -> /tmp/spike-out/file44k16.wav in 12 ms
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=529348 rec_discont=0 rec_overruns=0 live_in=76 live_out=6 live_dropped=70 live_overruns=70 opus_packets=10 opus_bytes=1001
+  src caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+  rec caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)44100")
+  rec-thread: rec_queue streaming thread entered (tid 83)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 83; rec_queue thread tid 83; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  input data 529348 bytes (44100 Hz 16 bit), output data 529348 bytes (44100 Hz 16 bit), byte-identical: true
+--- PASS: CLI record-file 44.1k/16 with wavenc writer
+
+==================================================================
+=== [required] CLI record-file 48k/24 with live branch stalled 50 ms/packet
+==================================================================
+  /tmp/spike-out/ref48k24.wav -> /tmp/spike-out/stall48k24.wav in 567 ms
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=76 rec_bytes=864222 rec_discont=0 rec_overruns=0 live_in=76 live_out=6 live_dropped=70 live_overruns=70 opus_packets=11 opus_bytes=993
+  src caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+  rec caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, channels=(int)2, channel-mask=(bitmask)0x0000000000000003, rate=(int)48000")
+  rec-thread: rec_queue streaming thread entered (tid 89)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 89; rec_queue thread tid 89; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  input data 864222 bytes (48000 Hz 24 bit), output data 864222 bytes (48000 Hz 24 bit), byte-identical: true
+--- PASS: CLI record-file 48k/24 with live branch stalled 50 ms/packet
+Server Name: pulseaudio
+Server Version: 17.0
+Default Sample Specification: s24le 2ch 48000Hz
+
+==================================================================
+=== [measure] pulse null-sink monitor (playback mixed by server), 48k/24
+==================================================================
+  device=vsink48.monitor mode=monitor requested caps=audio/x-raw,format=S24LE,rate=48000,channels=2
+  src caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, rate=(int)48000, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  rec caps: Some("audio/x-raw, format=(string)S24LE, layout=(string)interleaved, rate=(int)48000, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=532 rec_bytes=1532160 rec_discont=0 rec_overruns=0 live_in=532 live_out=532 live_dropped=0 live_overruns=0 opus_packets=267 opus_bytes=18896
+  rec-thread: rec_queue streaming thread entered (tid 110)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 110; rec_queue thread tid 110; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  compare: lag_frames=15121 method=min-error reference_frames=144037 compared_frames=144037 identical_frames=143603 (99.6987%) first_mismatch=Some(0) max_abs_diff_lsb=8388608 rms_diff_lsb=166621.967 bit_exact=false mismatched_frames_with_full_scale_reference=1 examples(frame,ch,ref,cap)=[(0, 0, -8388608, 0), (0, 1, 8388607, 0), (1, 0, 121767, 0), (1, 1, 607454, 0), (2, 0, 241536, 0), (2, 1, 1199104, 0)]
+  RESULT bit_exact=false
+--- PASS: pulse null-sink monitor (playback mixed by server), 48k/24
+
+==================================================================
+=== [measure] pulse null-sink monitor, 44.1k/16
+==================================================================
+  device=vsink44.monitor mode=monitor requested caps=audio/x-raw,format=S16LE,rate=44100,channels=2
+  src caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, rate=(int)44100, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  rec caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, rate=(int)44100, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=532 rec_bytes=938448 rec_discont=0 rec_overruns=0 live_in=532 live_out=532 live_dropped=0 live_overruns=0 opus_packets=266 opus_bytes=13922
+  rec-thread: rec_queue streaming thread entered (tid 126)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 126; rec_queue thread tid 126; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  compare: lag_frames=13974 method=min-error reference_frames=132337 compared_frames=132337 identical_frames=131929 (99.6917%) first_mismatch=Some(0) max_abs_diff_lsb=32768 rms_diff_lsb=661.166 bit_exact=false mismatched_frames_with_full_scale_reference=1 examples(frame,ch,ref,cap)=[(0, 0, -32768, 0), (0, 1, 32767, 0), (1, 0, 1502, 0), (1, 1, 2683, 0), (2, 0, 1078, 0), (2, 1, 5306, 0)]
+  RESULT bit_exact=false
+--- PASS: pulse null-sink monitor, 44.1k/16
+
+==================================================================
+=== [measure] pulse mismatch: 44.1k/16 file into a 48k/24 device, captured at 44.1k/16
+==================================================================
+  device=vsinkmis.monitor mode=monitor requested caps=audio/x-raw,format=S16LE,rate=44100,channels=2
+  src caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, rate=(int)44100, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  rec caps: Some("audio/x-raw, format=(string)S16LE, layout=(string)interleaved, rate=(int)44100, channels=(int)2, channel-mask=(bitmask)0x0000000000000003")
+  stats: [webrtcdsp: echo-cancel=true (far-end probe), noise-suppression=true] rec_buffers=532 rec_bytes=938448 rec_discont=0 rec_overruns=0 live_in=532 live_out=532 live_dropped=0 live_overruns=0 opus_packets=266 opus_bytes=13912
+  rec-thread: rec_queue streaming thread entered (tid 142)
+  rec-thread: SCHED_FIFO prio 50: ok
+  rec-thread: writer ran on tid 142; rec_queue thread tid 142; same thread: true
+  rec-thread: /proc stat priority=-51 nice=0 rt_priority=50 policy=1
+  compare: lag_frames=13636 method=min-error reference_frames=132337 compared_frames=132337 identical_frames=131921 (99.6857%) first_mismatch=Some(0) max_abs_diff_lsb=32768 rms_diff_lsb=664.512 bit_exact=false mismatched_frames_with_full_scale_reference=1 examples(frame,ch,ref,cap)=[(0, 0, -32768, 0), (0, 1, 32767, 0), (1, 0, 1502, 0), (1, 1, 2683, 0), (2, 0, 1078, 0), (2, 1, 5306, 0)]
+  RESULT bit_exact=false
+--- PASS: pulse mismatch: 44.1k/16 file into a 48k/24 device, captured at 44.1k/16
+
+==================================================================
+=== [measure] SIGKILL mid-recording: wavenc writer
+==================================================================
+  child exit status: signal: 9 (SIGKILL) (killed 3001.1 ms after first data)
+  header: riff=RIFF rate=48000 bits=24 ch=2 data_offset=44
+  expected ~864331 bytes (3.001 s); header claims 2147418112 bytes (7456.313 s); on disk 811008 bytes (2.816 s)
+  readable without repair: 93.8% of expected; physically present: 93.8% (lost tail ~185.1 ms)
+  recover(): frames per header before=135168 frames on disk=135168 partial bytes dropped=0 repaired=true -> header now claims 2.816 s
+--- PASS: SIGKILL mid-recording: wavenc writer
+
+==================================================================
+=== [measure] SIGKILL mid-recording: app writer, header every 1000 ms
+==================================================================
+  child exit status: signal: 9 (SIGKILL) (killed 3002.1 ms after first data)
+  header: riff=RIFF rate=48000 bits=24 ch=2 data_offset=80
+  expected ~864599 bytes (3.002 s); header claims 583680 bytes (2.027 s); on disk 866304 bytes (3.008 s)
+  readable without repair: 67.5% of expected; physically present: 100.2% (lost tail ~-5.9 ms)
+  recover(): frames per header before=97280 frames on disk=144384 partial bytes dropped=0 repaired=true -> header now claims 3.008 s
+  timing sidecar lines survived: 3
+--- PASS: SIGKILL mid-recording: app writer, header every 1000 ms
+
+==================================================================
+=== [measure] SIGKILL mid-recording: app writer, header every 100 ms + fdatasync
+==================================================================
+  child exit status: signal: 9 (SIGKILL) (killed 3001.1 ms after first data)
+  header: riff=RIFF rate=48000 bits=24 ch=2 data_offset=80
+  expected ~864312 bytes (3.001 s); header claims 860160 bytes (2.987 s); on disk 866304 bytes (3.008 s)
+  readable without repair: 99.5% of expected; physically present: 100.2% (lost tail ~-6.9 ms)
+  recover(): frames per header before=143360 frames on disk=144384 partial bytes dropped=0 repaired=true -> header now claims 3.008 s
+  timing sidecar lines survived: 3
+--- PASS: SIGKILL mid-recording: app writer, header every 100 ms + fdatasync
+
+==================================================================
+=== [measure] SIGKILL mid-recording: app writer, real pulsesrc capture
+==================================================================
+  child exit status: signal: 9 (SIGKILL) (killed 3001.3 ms after first data)
+  header: riff=RIFF rate=48000 bits=24 ch=2 data_offset=80
+  expected ~864361 bytes (3.001 s); header claims 581760 bytes (2.020 s); on disk 864000 bytes (3.000 s)
+  readable without repair: 67.3% of expected; physically present: 100.0% (lost tail ~1.3 ms)
+  recover(): frames per header before=96960 frames on disk=144000 partial bytes dropped=0 repaired=true -> header now claims 3.000 s
+  timing sidecar lines survived: 3
+--- PASS: SIGKILL mid-recording: app writer, real pulsesrc capture
+
+v4l2loopback check:
+ls: cannot access '/dev/video*': No such file or directory
+modprobe: FATAL: Module v4l2loopback not found in directory /lib/modules/6.6.114.1-microsoft-standard-WSL2
+
+==================================================================
+=== [required] video tee: clean recording (Matroska) + live branch
+==================================================================
+  encoder=openh264enc rec_frames=121 live_packets=121 live_bytes=3700041 live_queue_overruns=0
+  clean file: 30937578 bytes, decoded frames 121 err=None
+--- PASS: video tee: clean recording (Matroska) + live branch
+
+==================================================================
+=== [required] video tee: clean recording (fragmented MP4)
+==================================================================
+  encoder=openh264enc rec_frames=121 live_packets=121 live_bytes=3700041 live_queue_overruns=0
+  clean file: 30938809 bytes, decoded frames 121 err=None
+--- PASS: video tee: clean recording (fragmented MP4)
+
+==================================================================
+=== [measure] video SIGKILL survival: mp4
+==================================================================
+  mux=mp4: killed after 4.00 s (~120 frames captured), file 30210229 bytes, decodable frames 0 (0.0%), decode error: Some("error: This file contains no playable streams. (Some(\"../gst/isomp4/qtdemux.c(520): gst_qtdemux_post_no_playable_stream_error (): /GstPipeline:pipeline0/GstDecodeBin:decodebin0/GstQTDemux:qtdemux0:\\nno known streams found\"))")
+  RESULT mux=mp4 survives_kill=false
+--- PASS: video SIGKILL survival: mp4
+
+==================================================================
+=== [measure] video SIGKILL survival: mp4frag
+==================================================================
+  mux=mp4frag: killed after 4.00 s (~120 frames captured), file 25949404 bytes, decodable frames 102 (85.0%), decode error: None
+  RESULT mux=mp4frag survives_kill=true
+--- PASS: video SIGKILL survival: mp4frag
+
+==================================================================
+=== [measure] video SIGKILL survival: mkv
+==================================================================
+  mux=mkv: killed after 4.00 s (~120 frames captured), file 30630371 bytes, decodable frames 120 (99.9%), decode error: None
+  RESULT mux=mkv survives_kill=true
+--- PASS: video SIGKILL survival: mkv
+
+==================================================================
+=== [measure] probe devices with PulseAudio running
+==================================================================
+GStreamer runtime version: 1.28.2.0
+  element filesrc          present (plugin license LGPL)
+  element wavparse         present (plugin license LGPL)
+  element wavenc           present (plugin license LGPL)
+  element tee              present (plugin license LGPL)
+  element queue            present (plugin license LGPL)
+  element appsink          present (plugin license LGPL)
+  element audioconvert     present (plugin license LGPL)
+  element audioresample    present (plugin license LGPL)
+  element webrtcdsp        present (plugin license LGPL)
+  element webrtcechoprobe  present (plugin license LGPL)
+  element opusenc          present (plugin license LGPL)
+  element pulsesrc         present (plugin license LGPL)
+  element pulsesink        present (plugin license LGPL)
+  element pipewiresrc      present (plugin license MIT/X11)
+  element alsasrc          present (plugin license LGPL)
+  element v4l2src          present (plugin license LGPL)
+  element videotestsrc     present (plugin license LGPL)
+  element openh264enc      present (plugin license BSD)
+  element x264enc          present (plugin license GPL)
+  element vah264enc        MISSING
+  element vaapih264enc     MISSING
+  element mp4mux           present (plugin license LGPL)
+  element matroskamux      present (plugin license LGPL)
+  element isofmp4mux       MISSING
+  element splitmuxsink     present (plugin license LGPL)
+  element avdec_h264       present (plugin license LGPL)
+  element h264parse        present (plugin license LGPL)
+  /dev/video* nodes: []
+  DeviceMonitor Audio/Source: 1 device(s)
+    name="Monitor of placeholder" internal-name=Some("placeholder.monitor") class=Audio/Source caps=audio/x-raw, format=(string){ S16LE, S16BE, F32LE, F32BE, S32LE, S32BE, S24LE, S24BE, S24_32LE, S24_32BE, U8 }, layout=(string)interleaved, rate=(int)[ 1, 768000 ], channels=(int)[ 1, 32 ]; audio/x-alaw, rate=(int)[ 1, 768000 ], channels=(int)[ 1, 32 ]; audio/x-mulaw, rate=(int)[ 1, 768000 ], channels=(int)[ 1, 32 ] props=pulse-proplist, device.description=(string)"Monitor\ of\ placeholder", device.class=(string)monitor, device.icon_name=(string)audio-input-microphone, is-default=(boolean)false;
+  DeviceMonitor Video/Source: 0 device(s)
+--- PASS: probe devices with PulseAudio running
+
+==================================================================
+=== [required] device removed mid-capture -> segment closed, new segment on return
+==================================================================
+  event: 6 ms: segment 1 started -> /tmp/spike-out/segments/segment-001.wav
+  event: 6 ms: DeviceAdded "Monitor of placeholder"
+  event: 6 ms: DeviceAdded "Monitor of Null Output"
+  event: 2012 ms: DeviceRemoved "Monitor of Null Output"
+  event: 2314 ms: device removed; data still flowing after removal: false
+  event: 2315 ms: segment closed (device removed), 0 bytes
+  event: 4025 ms: DeviceAdded "Monitor of Null Output"
+  event: 4028 ms: segment 2 started -> /tmp/spike-out/segments/segment-002.wav
+  event: 8038 ms: segment closed (end of run, EOS), 190080 bytes
+  segment /tmp/spike-out/segments/segment-001.wav: no file (no data before close), ended by: device removed
+  segment /tmp/spike-out/segments/segment-002.wav: 1.980 s of audio, wall 4028..8038 ms, ended by: end of run, header consistent with file: true
+  RESULT segments=2 all_clean=true
+--- PASS: device removed mid-capture -> segment closed, new segment on return
+
+==================================================================
+SUMMARY
+  PASS  probe elements and devices (before sound server) (measure, rc!=0)
+  PASS  cargo test (unit, bit-exact file source, stalled live branch, TestClock)
+  PASS  CLI record-file 48k/24 (thread priority report)
+  PASS  CLI record-file 44.1k/16 with wavenc writer
+  PASS  CLI record-file 48k/24 with live branch stalled 50 ms/packet
+  PASS  pulse null-sink monitor (playback mixed by server), 48k/24
+  PASS  pulse null-sink monitor, 44.1k/16
+  PASS  pulse mismatch: 44.1k/16 file into a 48k/24 device, captured at 44.1k/16
+  PASS  SIGKILL mid-recording: wavenc writer
+  PASS  SIGKILL mid-recording: app writer, header every 1000 ms
+  PASS  SIGKILL mid-recording: app writer, header every 100 ms + fdatasync
+  PASS  SIGKILL mid-recording: app writer, real pulsesrc capture
+  PASS  video tee: clean recording (Matroska) + live branch
+  PASS  video tee: clean recording (fragmented MP4)
+  PASS  video SIGKILL survival: mp4
+  PASS  video SIGKILL survival: mp4frag
+  PASS  video SIGKILL survival: mkv
+  PASS  probe devices with PulseAudio running
+  PASS  device removed mid-capture -> segment closed, new segment on return
+OVERALL: PASS
+[exit 0]

@@ -1,0 +1,26 @@
+[workspace]
+
+[package]
+name = "castcorder-transfer-spike"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+# Enables BLAKE3's wasm32 SIMD backend (needs RUSTFLAGS=-C target-feature=+simd128).
+wasm-simd = ["blake3/wasm32_simd"]
+
+[dependencies]
+bao-tree = { version = "0.17", default-features = false, features = ["validate"] }
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+
+[profile.release]
+debug = false

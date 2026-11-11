@@ -1,0 +1,5 @@
+# Minimal PulseAudio startup: no hardware, no udev, just the native protocol
+# and a placeholder sink. The test script loads the virtual devices it needs.
+load-module module-native-protocol-unix
+load-module module-null-sink sink_name=placeholder sink_properties=device.description=placeholder
+set-default-sink placeholder
