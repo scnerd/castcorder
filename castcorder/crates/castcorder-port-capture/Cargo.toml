@@ -1,0 +1,12 @@
+[package]
+name = "castcorder-port-capture"
+description = "Capture port: audio frame sources with format info, synthetic WAV and generator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

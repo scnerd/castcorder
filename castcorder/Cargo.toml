@@ -20,3 +20,12 @@ missing_docs = "warn"
 castcorder-protocol = { path = "crates/castcorder-protocol" }
 castcorder-core = { path = "crates/castcorder-core" }
 castcorder-client = { path = "crates/castcorder-client" }
+castcorder-port-clock = { path = "crates/castcorder-port-clock" }
+castcorder-port-net = { path = "crates/castcorder-port-net" }
+castcorder-port-disk = { path = "crates/castcorder-port-disk" }
+castcorder-port-capture = { path = "crates/castcorder-port-capture" }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
