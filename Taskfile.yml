@@ -49,9 +49,9 @@ tasks:
       - echo "test:system - not implemented yet (tier 3, lands with M1)"
 
   test:browser:
-    desc: Tier 4 browser tests (placeholder; needs Docker and Chromium once it exists)
+    desc: Tier 4 browser tests (Playwright with headless Chromium, installed locally on first run)
     cmds:
-      - echo "test:browser - not implemented yet (tier 4, lands with M1)"
+      - task: test:browser:transport
 
   dev:up:
     desc: Start the local dev services (rendezvous and coturn placeholders)

@@ -39,3 +39,9 @@ serde = { version = "1", default-features = false, features = [
   "alloc",
 ] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+castcorder-transport = { path = "crates/castcorder-transport" }
+# Pinned as in the SFU spike (spikes/sfu/FINDINGS.md): str0m is pre-1.0. Keep it
+# behind castcorder-transport. Never enable its openssl backend.
+str0m = { version = "=0.25.0", default-features = false }
+tracing = "0.1"
+serde_json = "1"

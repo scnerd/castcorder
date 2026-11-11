@@ -37,3 +37,17 @@ tasks:
     cmds:
       - task: lint
       - task: test:unit
+
+  test:browser:transport:
+    desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)
+    summary: |
+      Builds the browser_host example (real UDP socket, system clock), then runs
+      crates/castcorder-transport/browser-test/e2e.mjs with Playwright installed in
+      that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
+      Run from the repo root: task test:browser
+    dir: crates/castcorder-transport/browser-test
+    cmds:
+      - cargo build --release --locked -p castcorder-transport --example browser_host
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node e2e.mjs

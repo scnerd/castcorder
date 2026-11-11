@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>castcorder-transport test guest</title>
+</head>
+<body>
+<div>name: <span id="name"></span> state: <span id="state">idle</span></div>
+<div id="remote"></div>
+<script>
+// Test guest for castcorder-transport, ported from the SFU spike. Exposes
+// window.cc for the Playwright test. Wire contract (see the crate docs):
+// - POST /offer once with audio+video sendonly and data channels "control" and
+//   "data"; afterwards the HOST is the only offerer.
+// - Text frames on "control" are JSON: {"type":"offer"|"answer"|"hb"|"bye"}.
+//   Binary frames carry castcorder-protocol messages (ignored here).
+// - Send {"type":"hb"} on "control" every second or the host drops us.
+const params = new URLSearchParams(location.search);
+const NAME = (params.get('name') || 'guest').replace(/[^A-Za-z0-9]/g, '');
+document.getElementById('name').textContent = NAME;
+const byId = (id) => document.getElementById(id);
+
+let pc = null;
+let control = null;
+let midToOrigin = {};
+let sigChain = Promise.resolve();
+let hbTimer = null;
+
+function waitOpen(ch) {
+  return new Promise((res, rej) => {
+    if (ch.readyState === 'open') return res();
+    ch.onopen = () => res();
+    ch.onerror = (e) => rej(e);
+  });
+}
+
+async function join() {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: true,
+    video: { width: 640, height: 360, frameRate: 30 },
+  });
+  pc = new RTCPeerConnection();
+  for (const track of stream.getTracks()) {
+    pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+  }
+  control = pc.createDataChannel('control');
+  const data = pc.createDataChannel('data');
+  data.binaryType = 'arraybuffer';
+  control.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') return;
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'offer') {
+      sigChain = sigChain.then(() => handleOffer(msg)).catch((e) => console.log('offer error ' + e));
+    }
+  };
+  pc.ontrack = (e) => {
+    const origin = (e.streams[0] && e.streams[0].id) || 'unknown';
+    midToOrigin[e.transceiver.mid] = origin;
+    const el = document.createElement(e.track.kind === 'video' ? 'video' : 'audio');
+    el.autoplay = true; el.muted = true; el.playsInline = true;
+    el.srcObject = new MediaStream([e.track]);
+    byId('remote').appendChild(el);
+  };
+  pc.onconnectionstatechange = () => { byId('state').textContent = pc.connectionState; };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  const res = await fetch('/offer?name=' + encodeURIComponent(NAME), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: offer.type, sdp: offer.sdp }),
+  });
+  if (!res.ok) throw new Error('offer rejected: ' + (await res.text()));
+  await pc.setRemoteDescription(await res.json());
+  await Promise.all([waitOpen(control), waitOpen(data)]);
+  hbTimer = setInterval(() => {
+    if (control && control.readyState === 'open') control.send(JSON.stringify({ type: 'hb' }));
+  }, 1000);
+  return true;
+}
+
+async function handleOffer(offer) {
+  await pc.setRemoteDescription({ type: 'offer', sdp: offer.sdp });
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  control.send(JSON.stringify({ type: 'answer', sdp: answer.sdp }));
+}
+
+async function stats() {
+  if (!pc) return { inbound: [] };
+  const report = await pc.getStats();
+  const live = new Set(pc.getTransceivers()
+    .filter((t) => t.currentDirection !== 'stopped' && t.direction !== 'stopped' && t.mid != null)
+    .map((t) => t.mid));
+  const inbound = [];
+  report.forEach((s) => {
+    if (s.type === 'inbound-rtp' && live.has(s.mid) && midToOrigin[s.mid]) {
+      inbound.push({
+        origin: midToOrigin[s.mid], mid: s.mid, kind: s.kind,
+        packetsReceived: s.packetsReceived || 0, bytesReceived: s.bytesReceived || 0,
+        framesDecoded: s.framesDecoded || 0,
+      });
+    }
+  });
+  return { inbound };
+}
+
+window.cc = { name: NAME, join, stats };
+</script>
+</body>
+</html>
