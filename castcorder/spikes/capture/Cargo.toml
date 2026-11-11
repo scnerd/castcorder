@@ -1,0 +1,32 @@
+[package]
+name = "capture-spike"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Castcorder M0 spike: GStreamer capture teed to a raw WAV track and a live Opus branch"
+
+# Standalone: never attach to a parent workspace.
+[workspace]
+
+[lib]
+name = "capture_spike"
+path = "src/lib.rs"
+
+[[bin]]
+name = "capture-spike"
+path = "src/main.rs"
+
+[dependencies]
+gst = { package = "gstreamer", version = "0.25", features = ["v1_24"] }
+gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"] }
+gst-audio = { package = "gstreamer-audio", version = "0.25", features = ["v1_24"] }
+anyhow = "1"
+libc = "0.2"
+
+[dev-dependencies]
+gst-check = { package = "gstreamer-check", version = "0.25", features = ["v1_24"] }
+
+[profile.release]
+debug = false
