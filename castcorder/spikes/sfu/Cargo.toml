@@ -1,0 +1,35 @@
+[package]
+name = "castcorder-spike-sfu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Throwaway spike: str0m as host transport and SFU for browser guests"
+license = "MIT OR Apache-2.0"
+
+# Standalone package: never attach to a parent workspace.
+[workspace]
+
+[[bin]]
+name = "host"
+path = "src/main.rs"
+
+[features]
+default = ["aws-lc-rs"]
+# DTLS/SRTP crypto backend selection (exactly one), forwarded to str0m.
+aws-lc-rs = ["str0m/aws-lc-rs"]
+rust-crypto = ["str0m/rust-crypto"]
+wincrypto = ["str0m/wincrypto"]
+openssl = ["str0m/openssl"]
+
+[dependencies]
+str0m = { version = "0.25.0", default-features = false }
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+socket2 = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+debug = 1
