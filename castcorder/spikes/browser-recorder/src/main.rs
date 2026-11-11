@@ -229,12 +229,57 @@ async fn open_mics(ui: Ui) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Capture-clock path: clone the raw track and transfer it to the worker, which reads it
+/// with MediaStreamTrackProcessor. No AudioContext is involved in recording.
+async fn start_take_mstp(ui: Ui, raw: MediaStream) -> Result<(), JsValue> {
+    let rs = track_settings(&raw);
+    let rate = num(&rs, "sampleRate");
+    let channels = (num(&rs, "channelCount") as u32).clamp(1, 8);
+    ui.rate.set(rate);
+    ui.transport.set("mstp".into());
+    let t: MediaStreamTrack = raw.get_audio_tracks().get(0).unchecked_into();
+    let clone_fn: js_sys::Function = get(&t, "clone").dyn_into()?;
+    let clone: JsValue = clone_fn.call0(&t)?;
+    // MediaStreamTrack is not transferable in Chromium; the processor's readable stream is.
+    let ctor: js_sys::Function = get(&js_sys::global(), "MediaStreamTrackProcessor").dyn_into()?;
+    let init = Object::new();
+    set(&init, "track", &clone);
+    let proc = Reflect::construct(&ctor, &Array::of1(&init))?;
+    let readable = get(&proc, "readable");
+    let name = format!("take-{}", js_sys::Date::now() as u64);
+    let meta = Object::new();
+    set(&meta, "rawTrackSettings", rs.clone());
+    set(&meta, "trackSampleRate", rate);
+    set(&meta, "userAgent", window().navigator().user_agent().unwrap_or_default());
+    set(&meta, "crossOriginIsolated", cross_origin_isolated());
+    let msg = cmd("start");
+    set(&msg, "name", name.as_str());
+    set(&msg, "sampleRate", rate);
+    set(&msg, "channels", channels);
+    set(&msg, "transport", "mstp");
+    set(&msg, "meta", meta);
+    set(&msg, "stream", &readable);
+    ENGINE.with(|e| {
+        if let Some(w) = e.borrow().worker.as_ref() {
+            w.post_message_with_transfer(&msg, &Array::of1(&readable))
+        } else {
+            Err("no worker".into())
+        }
+    })?;
+    ui.recording.set(true);
+    ui.status.set(format!("starting {name}"));
+    Ok(())
+}
+
 async fn start_take(ui: Ui) -> Result<(), JsValue> {
     let (raw, live) = ENGINE.with(|e| (e.borrow().raw.clone(), e.borrow().live.clone()));
     let (raw, live) = match (raw, live) {
         (Some(r), Some(l)) => (r, l),
         _ => return Err("open the microphones first".into()),
     };
+    if query_param("transport").as_deref() == Some("mstp") {
+        return start_take_mstp(ui, raw).await;
+    }
     let rs = track_settings(&raw);
     let track_rate = num(&rs, "sampleRate");
     let channels = (num(&rs, "channelCount") as u32).clamp(1, 8);
@@ -356,6 +401,10 @@ async fn start_take(ui: Ui) -> Result<(), JsValue> {
 }
 
 fn stop_take() {
+    if query_param("transport").as_deref() == Some("mstp") {
+        send(&cmd("stop"));
+        return;
+    }
     ENGINE.with(|e| {
         if let Some(n) = e.borrow().node.as_ref() {
             if let Ok(p) = n.port() {

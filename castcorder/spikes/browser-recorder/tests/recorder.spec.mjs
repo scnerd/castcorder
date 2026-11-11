@@ -118,7 +118,7 @@ test('two opens of one device + MediaStreamTrackProcessor probe', async () => {
   } finally { await b.kill(); }
 });
 
-for (const transport of ['sab', 'msg']) {
+for (const transport of (process.env.TRANSPORTS || 'sab,msg').split(',')) {
   test(`record 10 s via ${transport}, read back from OPFS, FLAC, download`, async () => {
     const b = await h.launch(path.join(PROFILES, `rec-${transport}`));
     try {
@@ -246,7 +246,7 @@ test('crash mid-take: kill the browser process tree, reopen, recover', async () 
   } finally { await b.kill(); }
 });
 
-for (const transport of ['sab', 'msg']) {
+for (const transport of (process.env.TRANSPORTS || 'sab,msg').split(',')) {
   test(`soak ${SOAK_SECONDS} s via ${transport}`, async () => {
     test.setTimeout((SOAK_SECONDS * 2 + 240) * 1000);
     const b = await h.launch(path.join(PROFILES, `soak-${transport}`));
