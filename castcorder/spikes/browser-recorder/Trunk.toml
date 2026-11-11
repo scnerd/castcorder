@@ -1,0 +1,11 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[tools]
+wasm_bindgen = "0.2.128"
+
+# COOP/COEP make the page crossOriginIsolated, which SharedArrayBuffer needs.
+# A production static host must send the same two headers.
+[serve]
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }

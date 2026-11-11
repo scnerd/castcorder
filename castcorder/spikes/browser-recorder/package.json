@@ -1,0 +1,11 @@
+{
+  "name": "castcorder-browser-recorder-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/run-tests.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.x"
+  }
+}

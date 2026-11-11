@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Castcorder browser-recorder spike</title>
+  <link data-trunk rel="rust" href="Cargo.toml" data-bin="app" data-type="main" data-wasm-opt="0" />
+  <link data-trunk rel="rust" href="Cargo.toml" data-bin="worker" data-type="worker" data-loader-shim data-wasm-opt="0" />
+  <link data-trunk rel="copy-file" href="js/recorder-worklet.js" />
+  <style>
+    body { font-family: sans-serif; margin: 1.5rem; max-width: 60rem; }
+    .meter { display: inline-block; width: 16rem; height: 0.8rem; background: #ddd; vertical-align: middle; }
+    .bar { height: 100%; background: #2a7; }
+    td { padding: 0.2rem 0.5rem; }
+    code { word-break: break-all; }
+  </style>
+</head>
+<body></body>
+</html>

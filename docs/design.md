@@ -44,7 +44,7 @@ A free, open-source desktop app for recording podcasts, at `castcorder.app`. Par
 
 The outbox syncs whenever the host is connected and no take is recording: audio before video, oldest take first. Sync and live traffic compete, with priority hints where the platform honours them. Transfer is our own verified, resumable, range-based protocol over the existing connection, sized to suit S3 multipart later.
 
-Browser guests store tracks in the browser's private filesystem: persistent storage is requested, recording is refused in incognito, and the guest is told to return in the same browser to finish syncing.
+Browser guests store tracks in the browser's private filesystem: persistent storage is requested, storage is probed before recording with a warning when it looks unreliable (Chrome incognito cannot be detected), and the guest is told to return in the same browser to finish syncing.
 
 ## Timing
 
@@ -99,11 +99,27 @@ Each device continuously measures its clock offset to the host and logs it besid
 ## Milestones
 
 - M0, spikes: str0m host forwarding between two browsers; GStreamer raw capture teed to WAV and a live stream; bao-tree in browser WASM; Leptos client writing audio to browser storage; Leptos server functions over a data channel; virtual audio and webcam devices in CI.
-- M1: host plus one browser guest. Live audio, raw audio tracks, outbox sync, FLAC. The fake-source test harness.
+- M1: host plus one browser guest. Live audio, raw audio tracks, outbox sync, FLAC. The fake-source test harness. Carried in from M0: the browser capture clock fix, a forced-relay test through coturn with the host's own TURN client, the transfer protocol over a real data channel, and reproducing the capture start-up gap on a real microphone.
 - M2: multiple guests, safety tracks, the failure model, producers, room security.
 - M3: timing metadata, aligned tracks, marker exports.
 - M4: live video and video recording.
 - M5 (v1): relay metering, updater, app guest polish.
+
+## M0 results
+
+All five spikes returned "go with caveats". Proof code and full findings are in `castcorder/spikes/<name>/FINDINGS.md`. What they settled:
+
+- **Transport: str0m.** Three Chromium guests exchanged forwarded audio and video through a str0m host, with a verified data-channel transfer. str0m does ICE only, so the host needs its own STUN and TURN client. Leaves are detected by an application heartbeat (about 1 s), not ICE (14-22 s). One video codec per call (VP8). Per-guest video step-down means guests publish two simulcast layers and the host picks one or drops video.
+- **Media engine: GStreamer.** One capture teed to a byte-identical WAV and a processed Opus branch; a stalled live branch does not affect the recording. We keep our own WAV writer (header rewritten each second, RF64 past 4 GiB, repair on startup). Video records to Matroska, which survived a hard kill intact. Device loss is detected by the device monitor plus a no-data watchdog.
+- **Transfer: bao-tree.** Verified, resumable transfer natively and in browser WASM. 16 KiB chunk groups, 1 MiB units, 64 KiB frames, 8 MiB S3 parts. The hash is computed while recording. Browser storage writes must be batched per unit.
+- **Browser recorder: Rust and Leptos work.** Raw and processed opens of one microphone coexist in Chromium; the raw one is lossless. Recording is a float32 WAV patched in place, recoverable after a browser kill. One 68-line JS file is unavoidable.
+- **Protocol: the typed protocol crate.** Leptos server functions do run over a data channel but fit the two-core design and server-pushed events poorly.
+
+What they changed or left open:
+
+- **Browser capture clock.** An AudioWorklet runs on the output device's clock, and a 150 s soak showed Chrome inserting or dropping 10 ms blocks as it drifts from the microphone. This must be fixed before M1, likely by capturing on the microphone's clock in Chromium, and any insert or drop must be recorded in timing metadata.
+- **Incognito cannot be detected in Chrome**, so "refuse recording in incognito" becomes a storage capability probe plus a warning.
+- **Unverified:** Firefox and Safari end to end, any relayed or lossy network path, Windows and macOS capture, virtual webcams on CI runners, and a 2 s start-up gap seen on a freshly opened virtual microphone.
 
 ## Not in v1
 
