@@ -65,7 +65,7 @@ Each device continuously measures its clock offset to the host and logs it besid
 - Rendezvous: a small Rust WebSocket mailbox. The host holds a connection while running; guests send connection info encrypted to the host key.
 - Relay: stock coturn, with short-lived credentials minted by the rendezvous per host key.
 - Both are rate-limited per host key and per IP address. Charging may attach to the host key later.
-- No telemetry. Logs stay local, with an export-diagnostics action.
+- Structured logs in every component, correlated by call, device and take, kept locally in rotating files. For now, guests' logs sync automatically to the host as files through the outbox, disclosed at join, and land beside the call's takes. No third-party destination.
 
 ## Repository and delivery
 
