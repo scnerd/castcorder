@@ -1,0 +1,14 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>castcorder transfer spike</title></head>
+<body><pre id="out">running</pre>
+<script type="module">
+const params = new URLSearchParams(location.search);
+const pkg = params.get('pkg') || 'pkg-scalar';
+const memMb = Number(params.get('mem') || 64);
+const opfsMb = Number(params.get('opfs') || 100);
+const cuts = Number(params.get('cuts') || 3);
+const w = new Worker('./worker.js', { type: 'module' });
+w.onmessage = (ev) => { window.__result = ev.data; document.getElementById('out').textContent = JSON.stringify(ev.data, null, 1); };
+w.onerror = (ev) => { window.__result = { error: 'worker error: ' + ev.message }; };
+w.postMessage({ pkg, memMb, opfsMb, cuts });
+</script></body></html>
