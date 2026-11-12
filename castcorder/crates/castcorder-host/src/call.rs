@@ -45,6 +45,11 @@ pub enum Command {
         /// Where the JSON goes.
         reply: mpsc::Sender<String>,
     },
+    /// Learn the host's server-reflexive address from this STUN server.
+    Stun {
+        /// The rendezvous's STUN address.
+        server: std::net::SocketAddr,
+    },
 }
 
 /// The producer-side state of the call.
@@ -288,6 +293,7 @@ impl Call {
             Command::Status { reply } => {
                 let _ = reply.send(self.status_json());
             }
+            Command::Stun { server } => host.set_stun_server(Some(server)),
         }
     }
 }

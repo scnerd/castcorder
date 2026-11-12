@@ -118,3 +118,54 @@ fn a_vanished_guest_on_real_udp_does_not_disturb_the_others() {
             .any(|e| matches!(e, HostEvent::GuestGone { guest, .. } if *guest == b))
     );
 }
+
+/// Server-reflexive discovery over real UDP: a STUN server on loopback that
+/// answers as a NAT would (the mapped address is a public one, not the
+/// requester's loopback address) teaches the host its srflx address through
+/// its own socket, and every later answer offers it as a srflx candidate.
+#[test]
+fn the_host_learns_and_offers_its_server_reflexive_address() {
+    use castcorder_link::stun;
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mapped: std::net::SocketAddr = "203.0.113.9:40123".parse().unwrap();
+    let mut host = Host::new(
+        UdpDatagramSocket::bind_loopback().unwrap(),
+        SystemClock::new(),
+        HostConfig::default(),
+    );
+    host.set_stun_server(Some(server.local_addr().unwrap()));
+    let end = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0u8; 1500];
+    while host.reflexive().is_none() {
+        assert!(Instant::now() < end, "no reflexive address learned");
+        host.poll();
+        if let Ok((n, from)) = server.recv_from(&mut buf) {
+            assert_eq!(
+                from,
+                host.local_addr(),
+                "STUN must go out from the host socket"
+            );
+            let tx = stun::parse_binding_request(&buf[..n]).expect("a binding request");
+            server
+                .send_to(&stun::binding_success(tx, mapped), from)
+                .unwrap();
+        }
+    }
+    assert_eq!(host.reflexive(), Some(mapped));
+    let (_g, offer) = Guest::new(
+        UdpDatagramSocket::bind_loopback().unwrap(),
+        SystemClock::new(),
+    );
+    let (_, answer) = host.accept("A", &offer).unwrap();
+    assert!(
+        answer.contains("203.0.113.9 40123 typ srflx"),
+        "answer lacks the srflx candidate:\n{answer}"
+    );
+    assert!(
+        answer.contains("typ host"),
+        "answer lost its host candidate"
+    );
+}

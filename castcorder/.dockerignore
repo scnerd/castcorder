@@ -1,0 +1,8 @@
+# Build context for rendezvous.Dockerfile: sources and manifests only.
+target
+target-agent
+spikes
+**/node_modules
+**/dist
+**/dist-agent
+**/test-results

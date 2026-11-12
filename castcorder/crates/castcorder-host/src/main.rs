@@ -11,13 +11,20 @@
 //! host's own rotating JSON-lines log.
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
-//! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...`
+//! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
+//! [--rendezvous URL]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
+//!
+//! With `--rendezvous URL` (none by default) the host also registers with
+//! that rendezvous under its host key and, once registered, prints the call
+//! link for guests anywhere and `CALL_LINK <link>` (see [`rendezvous`]). The
+//! LAN pages and `POST /offer` keep working beside it.
 
 mod call;
 mod http;
+mod rendezvous;
 mod tls;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
@@ -33,7 +40,7 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]...";
+[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL]";
 
 struct Args {
     dist: PathBuf,
@@ -44,6 +51,7 @@ struct Args {
     http_port: u16,
     udp_port: u16,
     advertise: Vec<IpAddr>,
+    rendezvous: Option<String>,
 }
 
 fn fail(msg: &str) -> ! {
@@ -73,6 +81,7 @@ fn parse_args() -> Args {
         http_port: 47801,
         udp_port: 47802,
         advertise: vec![],
+        rendezvous: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -91,6 +100,13 @@ fn parse_args() -> Args {
             "--http-port" => a.http_port = port(value()),
             "--udp-port" => a.udp_port = port(value()),
             "--advertise" => a.advertise.push(ip(value())),
+            "--rendezvous" => {
+                let url = value();
+                if let Err(e) = rendezvous::validate(&url) {
+                    fail(&e);
+                }
+                a.rendezvous = Some(url.trim_end_matches('/').to_string());
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -183,6 +199,15 @@ fn main() {
     );
     let (tx, rx) = mpsc::channel();
     call::Call::new(library, last_take(&call_dir)).spawn(host, clock, rx);
+    let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
+        base: base.clone(),
+        key: rendezvous::host_key(&args.library)
+            .unwrap_or_else(|e| fail(&format!("host key: {e}"))),
+        secret: rendezvous::call_secret(&call_dir)
+            .unwrap_or_else(|e| fail(&format!("call secret: {e}"))),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+    let rendezvous_tx = tx.clone();
 
     let tls = tls::server_config(&args.library, &lan)
         .unwrap_or_else(|e| fail(&format!("certificate: {e}")));
@@ -230,6 +255,16 @@ fn main() {
             .map(|l| l.trim_end_matches('/'))
             .unwrap_or_default()
     );
+    if let Some(cfg) = rendezvous {
+        tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
+        rendezvous::spawn(cfg, rendezvous_tx, |link| {
+            println!();
+            println!("  Guests anywhere open this call link (share it only with them):");
+            println!("    {link}");
+            println!();
+            println!("CALL_LINK {link}");
+        });
+    }
     loop {
         std::thread::park();
     }

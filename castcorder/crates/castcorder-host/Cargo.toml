@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 castcorder-core.workspace = true
+castcorder-link.workspace = true
 castcorder-port-clock.workspace = true
 castcorder-port-disk.workspace = true
 castcorder-port-net.workspace = true
@@ -22,6 +23,13 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# The rendezvous connection: a blocking WebSocket on its own thread; TLS for
+# wss:// is rustls (below) with the Mozilla roots, not tungstenite's TLS features.
+getrandom = "0.3"
+tungstenite = { version = "0.29", default-features = false, features = [
+  "handshake",
+] }
+webpki-roots = "1"
 # Self-signed certificate for the LAN page (browsers grant the microphone only in
 # a secure context). aws-lc-rs is already the crypto backend via str0m; never ring.
 rcgen = { version = "0.14", default-features = false, features = [

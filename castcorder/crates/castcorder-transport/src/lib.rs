@@ -17,6 +17,13 @@
 //! that first exchange the host is the only offerer: renegotiation on join and
 //! leave travels in-band on the guest's "control" data channel.
 //!
+//! The answer offers the advertised host candidates and, once
+//! [`Host::set_stun_server`] has learned one, the server-reflexive address of
+//! the host's socket (STUN Binding through the same socket, refreshed every
+//! 20 s to keep the NAT mapping open), so a guest outside the host's network
+//! can reach it where the NAT allows. Relay (TURN) candidates are not yet
+//! offered.
+//!
 //! # Wire contract for guests
 //!
 //! - The first offer contains the guest's send-only audio and video and two data
@@ -241,7 +248,24 @@ pub struct Host<S, C> {
     next_id: u64,
     events: VecDeque<HostEvent>,
     queue: VecDeque<Propagated>,
+    stun: Stun,
 }
+
+/// Server-reflexive discovery: Binding requests to one STUN server, sent from
+/// the host's own socket so the NAT mapping found is the one guests reach.
+#[derive(Default)]
+struct Stun {
+    server: Option<SocketAddr>,
+    txid: Option<castcorder_link::stun::TxId>,
+    seq: u64,
+    next: Duration,
+    reflexive: Option<SocketAddr>,
+}
+
+/// Re-query (and so keep the NAT mapping alive) this often once known.
+const STUN_REFRESH: Duration = Duration::from_secs(20);
+/// Retry this often until the first answer.
+const STUN_RETRY: Duration = Duration::from_secs(2);
 
 impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// A host serving every guest on `socket`, keeping time with `clock`.
@@ -268,7 +292,73 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             next_id: 0,
             events: VecDeque::new(),
             queue: VecDeque::new(),
+            stun: Stun::default(),
         }
+    }
+
+    /// Learn this host's server-reflexive address from a STUN server, asking
+    /// from the host's socket now and every 20 s (which also keeps a NAT
+    /// mapping open), or stop with `None`. Once known, every later
+    /// [`Host::accept`] offers it as a srflx candidate beside the host ones.
+    pub fn set_stun_server(&mut self, server: Option<SocketAddr>) {
+        info!(server = ?server.map(|s| s.to_string()), "stun server set");
+        self.stun = Stun {
+            server,
+            ..Stun::default()
+        };
+    }
+
+    /// The server-reflexive address learned from the STUN server, if any.
+    pub fn reflexive(&self) -> Option<SocketAddr> {
+        self.stun.reflexive
+    }
+
+    fn stun_tick(&mut self, now_d: Duration) -> Duration {
+        let Some(server) = self.stun.server else {
+            return now_d + MAX_WAIT;
+        };
+        if now_d >= self.stun.next {
+            // Unique per host and request; not a secret (the response must
+            // also come from the server's address).
+            self.stun.seq += 1;
+            let mut txid = [0u8; 12];
+            txid[..4].copy_from_slice(&(self.local.port() as u32).to_be_bytes());
+            txid[4..].copy_from_slice(&(now_d.as_nanos() as u64 ^ self.stun.seq).to_be_bytes());
+            self.stun.txid = Some(txid);
+            if let Err(e) = self
+                .socket
+                .send_to(&castcorder_link::stun::binding_request(txid), server)
+            {
+                debug!(error = %e, server = %server, "stun request not sent");
+            }
+            self.stun.next = now_d
+                + if self.stun.reflexive.is_some() {
+                    STUN_REFRESH
+                } else {
+                    STUN_RETRY
+                };
+        }
+        self.stun.next
+    }
+
+    /// A STUN answer to our own request: record the reflexive address.
+    fn stun_answer(&mut self, payload: &[u8], source: SocketAddr) -> bool {
+        if self.stun.server != Some(source) {
+            return false;
+        }
+        let Some((txid, mapped)) = castcorder_link::stun::parse_binding_success(payload) else {
+            return false;
+        };
+        if self.stun.txid != Some(txid) {
+            return false;
+        }
+        self.stun.txid = None;
+        if self.stun.reflexive != Some(mapped) {
+            info!(reflexive = %mapped, server = %source, "server-reflexive address learned");
+            self.stun.reflexive = Some(mapped);
+            self.stun.next = self.stun.next.min(self.clock.monotonic() + STUN_REFRESH);
+        }
+        true
     }
 
     /// The address every guest connects to.
@@ -317,6 +407,19 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
             rtc.add_local_candidate(cand);
         }
+        if let (Some(r), Some(server)) = (self.stun.reflexive, self.stun.server)
+            && !self.advertise.contains(&r)
+        {
+            let base = self.destination_for(server);
+            match Candidate::server_reflexive(r, base, "udp") {
+                Ok(c) => {
+                    if rtc.add_local_candidate(c).is_none() {
+                        debug!(reflexive = %r, "srflx candidate redundant, not added");
+                    }
+                }
+                Err(e) => debug!(reflexive = %r, error = ?e, "srflx candidate refused"),
+            }
+        }
         let answer = rtc
             .sdp_api()
             .accept_offer(offer)
@@ -363,7 +466,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         }
 
         let timing = self.timing();
-        let mut deadline = now_d + MAX_WAIT;
+        let mut deadline = (now_d + MAX_WAIT).min(self.stun_tick(now_d));
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             g.handle_input(Input::Timeout(now));
@@ -405,6 +508,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     }
 
     fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant) {
+        if self.stun_answer(&payload, source) {
+            return;
+        }
         let Ok(contents) = payload.as_slice().try_into() else {
             trace!(from = %source, "unrecognised datagram dropped");
             return;

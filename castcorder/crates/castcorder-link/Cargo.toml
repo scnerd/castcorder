@@ -1,0 +1,30 @@
+[package]
+name = "castcorder-link"
+description = "Reaching a host by its call link: the link format, the rendezvous mailbox wire messages, end-to-end sealing to the host key, and a minimal STUN codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Pure Rust and no randomness of its own (callers pass random bytes in), so it
+# builds unchanged for the browser (wasm32), the host and the rendezvous.
+[dependencies]
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = [
+  "alloc",
+] }
+curve25519-dalek = { version = "5", default-features = false, features = [
+  "zeroize",
+] }
+ed25519-dalek = { version = "3", default-features = false, features = [
+  "zeroize",
+] }
+hkdf = "0.13"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = { version = "0.11", default-features = false }

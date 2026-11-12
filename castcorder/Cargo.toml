@@ -9,6 +9,7 @@ default-members = [
   "crates/castcorder-client",
   "crates/castcorder-core",
   "crates/castcorder-host",
+  "crates/castcorder-link",
   "crates/castcorder-port-capture",
   "crates/castcorder-port-clock",
   "crates/castcorder-port-disk",
@@ -59,6 +60,7 @@ serde = { version = "1", default-features = false, features = [
 ] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 castcorder-transport = { path = "crates/castcorder-transport" }
+castcorder-link = { path = "crates/castcorder-link" }
 # Pinned as in the SFU spike (spikes/sfu/FINDINGS.md): str0m is pre-1.0. Keep it
 # behind castcorder-transport. Never enable its openssl backend.
 str0m = { version = "=0.25.0", default-features = false }

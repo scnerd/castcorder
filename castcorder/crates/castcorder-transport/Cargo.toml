@@ -20,6 +20,7 @@ rust-crypto = ["str0m/rust-crypto"]
 [dependencies]
 castcorder-port-clock.workspace = true
 castcorder-port-net.workspace = true
+castcorder-link.workspace = true
 castcorder-protocol.workspace = true
 str0m.workspace = true
 tracing.workspace = true

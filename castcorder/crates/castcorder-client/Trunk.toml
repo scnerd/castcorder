@@ -1,6 +1,9 @@
 [build]
 target = "index.html"
 dist = "dist"
+# Relative asset URLs, so the same build serves at the host's `/` and at the
+# rendezvous site's `/v/<version>/` (ADR 0002).
+public_url = "./"
 
 [tools]
 # Must match the wasm-bindgen crate pinned in Cargo.toml.
