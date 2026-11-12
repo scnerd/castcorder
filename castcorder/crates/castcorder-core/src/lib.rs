@@ -20,10 +20,12 @@
 //! - [`clocksync`]: NTP-style clock exchanges, the offset and drift
 //!   estimator, and the host timeline.
 //! - [`timing`]: the timing metadata file written beside every track.
+//! - [`safety`]: the host's copy of each guest's live Opus stream, per take.
 
 pub mod clocksync;
 pub mod library;
 pub mod logging;
 pub mod outbox;
+pub mod safety;
 pub mod sync;
 pub mod timing;

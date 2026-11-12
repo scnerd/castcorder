@@ -53,6 +53,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16, INPUT_RATE } from './gen-wav.mjs';
 import { parseWav, deinterleave, analyzeRecording } from './analyze.mjs';
+import { parseOggOpus } from './ogg.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -382,6 +383,26 @@ try {
     'take01_B_mic.timing.jsonl'].every((f) => hostFiles.includes(f))
     && !hostFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
     'host library holds both tracks, sidecars and timing metadata, with no transfer state left');
+  // Safety tracks (cast-706): the host kept each guest's live Opus stream in
+  // take01/safety/, one Ogg Opus per guest with a timing sidecar, none of it
+  // in the take directory proper (so the outbox and aligner never see it).
+  {
+    const safetyDir = join(TAKE_DIR, 'safety');
+    const safety = existsSync(safetyDir) ? readdirSync(safetyDir).sort() : [];
+    console.log('host take01/safety: ' + safety.join(' '));
+    check(['A', 'B'].every((n) => safety.includes('take01_' + n + '_safety.opus') && safety.includes('take01_' + n + '_safety.timing.jsonl'))
+      && safety.filter((f) => f.endsWith('.opus')).length === 2,
+      'safety/ holds one .opus and one timing file per guest');
+    for (const n of ['A', 'B']) {
+      const o = parseOggOpus(readFileSync(join(safetyDir, 'take01_' + n + '_safety.opus')));
+      check(o.finished && o.packets > 0 && o.seconds > TAKE_SECONDS - 1.5 && o.seconds < TAKE_SECONDS + 1.5,
+        n + '\x27s safety track is valid Ogg Opus: ' + o.packets + ' packets, ' + o.seconds.toFixed(2) + ' s for a ~' + TAKE_SECONDS + ' s take');
+      const tl = readFileSync(join(safetyDir, 'take01_' + n + '_safety.timing.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+      check(tl[0].type === 'header' && tl[0].source === 'safety' && tl.some((l) => l.type === 'ref' && typeof l.host_us === 'number'),
+        n + '\x27s safety timing file is marked as a safety track and maps RTP time to host time');
+    }
+    check(!hostFiles.some((f) => f.includes('safety') && f !== 'safety'), 'no safety file in the take directory itself');
+  }
   // Timing metadata (cast-whr): each guest's file parses, and its mapping
   // places the track's first frame just after the host's take start (loopback:
   // clocks are shared, so this checks the plumbing, not the estimator).

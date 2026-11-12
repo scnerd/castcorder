@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
+use castcorder_core::safety::SafetyRecorder;
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
@@ -115,6 +116,8 @@ pub struct Call {
     participant: Option<Participant>,
     local: Option<LocalAudio>,
     timeline: HostTimeline<SystemClock>,
+    /// Each guest's live Opus stream, kept per take (safety tracks).
+    safety: SafetyRecorder<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
     align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
 }
@@ -171,7 +174,9 @@ impl Call {
         last_take: u32,
         timeline: HostTimeline<SystemClock>,
     ) -> Self {
+        let safety = SafetyRecorder::new(library.call(), timeline.id());
         Self {
+            safety,
             status: TakeStatus::Idle,
             last_take,
             rpc: BTreeMap::new(),
@@ -308,17 +313,20 @@ impl Call {
         self.status = TakeStatus::Recording { take };
         let host_us = self.timeline.now_us();
         info!(call = %self.library.call(), take = take.0, host_us, "take started");
-        if let Some(p) = &self.participant {
-            match self.library.take_dir(take) {
-                Ok(dir) => {
+        match self.library.take_dir(take) {
+            Ok(dir) => {
+                if let Err(e) = self.safety.start_take(take.0, dir) {
+                    warn!(take = take.0, error = %e, "no safety directory; safety tracks not kept");
+                }
+                if let Some(p) = &self.participant {
                     let _ = p.takes.send(TakeCtl::Start {
                         take,
                         dir: dir.clone(),
                     });
                 }
-                Err(e) => {
-                    warn!(take = take.0, error = %e, "no take directory; host microphone not recorded")
-                }
+            }
+            Err(e) => {
+                warn!(take = take.0, error = %e, "no take directory; safety tracks and host microphone not recorded")
             }
         }
         self.broadcast();
@@ -332,6 +340,7 @@ impl Call {
         self.status = TakeStatus::Idle;
         let host_us = self.timeline.now_us();
         info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
+        self.safety.stop_take();
         if let Some(p) = &self.participant {
             let _ = p.takes.send(TakeCtl::Stop { done: None });
         }
@@ -453,8 +462,9 @@ impl Call {
             .spawn(move || {
                 if let Some(p) = &self.participant {
                     self.local = Some(host.add_local_audio(&p.name));
-                    host.set_guest_audio_tap(p.heard.is_some());
                 }
+                // Always on: the safety tracks keep every guest's frames.
+                host.set_guest_audio_tap(true);
                 loop {
                     while let Ok(c) = rx.try_recv() {
                         self.command(&mut host, c);
@@ -468,6 +478,7 @@ impl Call {
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
                                 self.drop_puller(guest);
+                                self.safety.guest_gone(guest.0);
                                 self.hear(Heard::Gone(guest));
                             }
                             HostEvent::GuestConnected { guest } => {
@@ -477,6 +488,12 @@ impl Call {
                         }
                     }
                     while let Some(a) = host.next_guest_audio() {
+                        if self.safety.recording()
+                            && let Some(who) = self.names.get(&a.guest)
+                        {
+                            let now = self.timeline.now_us();
+                            self.safety.audio(a.guest.0, who, a.rtp_time, &a.data, now);
+                        }
                         self.hear(Heard::Audio(a));
                     }
                     if self.serve() {
