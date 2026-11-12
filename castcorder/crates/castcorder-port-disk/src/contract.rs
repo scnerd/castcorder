@@ -108,3 +108,46 @@ pub fn invalid_names_are_refused<H: DiskHarness>(h: &H) {
     }
     assert!(s.list().unwrap().is_empty());
 }
+
+/// A subdirectory is a storage of its own: its files are not listed in the
+/// parent, the same name can exist in both, and it is there for a new handle.
+pub fn subdirs_are_separate<H: DiskHarness>(h: &H) {
+    let s = h.storage();
+    s.open("top.wav").unwrap().write_at(0, b"top").unwrap();
+    let call = s.subdir("call1").unwrap();
+    let take = call.subdir("take01").unwrap();
+    let mut f = take.open("top.wav").unwrap();
+    f.write_at(0, b"nested").unwrap();
+    f.sync().unwrap();
+    drop(f);
+    assert_eq!(s.list().unwrap(), vec!["top.wav"]);
+    assert!(call.list().unwrap().is_empty());
+    assert_eq!(take.list().unwrap(), vec!["top.wav"]);
+    let again = h
+        .storage()
+        .subdir("call1")
+        .unwrap()
+        .subdir("take01")
+        .unwrap();
+    assert_eq!(read_all(&mut again.open("top.wav").unwrap()), b"nested");
+    assert_eq!(read_all(&mut s.open("top.wav").unwrap()), b"top");
+    take.remove("top.wav").unwrap();
+    assert!(s.exists("top.wav").unwrap());
+    let kind = s.subdir("../escape").err().map(|e| e.kind());
+    assert_eq!(kind, Some(ErrorKind::InvalidInput));
+}
+
+/// `sync_dir` succeeds after creates and removes, in the top directory and in a
+/// subdirectory, and changes nothing that reads see.
+pub fn sync_dir_keeps_what_reads_see<H: DiskHarness>(h: &H) {
+    let s = h.storage();
+    let sub = s.subdir("d").unwrap();
+    for st in [&s, &sub] {
+        st.open("keep").unwrap().write_at(0, b"k").unwrap();
+        st.open("gone").unwrap();
+        st.remove("gone").unwrap();
+        st.sync_dir().unwrap();
+        assert_eq!(st.list().unwrap(), vec!["keep"]);
+        assert_eq!(read_all(&mut st.open("keep").unwrap()), b"k");
+    }
+}

@@ -13,6 +13,11 @@
 //!   MediaStreamTrackProcessor (capture clock, no AudioContext), meters it, and
 //!   while a take records appends it to a crash-safe float WAV plus a JSON
 //!   sidecar in OPFS (`tracks/<track>.wav`, `tracks/<track>.json`).
+//! - [`outbox`] (in the worker): castcorder-core's guest outbox over OPFS. After
+//!   a take, finished tracks and their sidecars are hashed and offered to the host
+//!   (`OfferTrack` on "control"); the main thread relays the "data" channel to the
+//!   worker, which serves verified ranges and deletes a file only on the host's
+//!   DONE.
 //! - [`wav`], [`signal`], [`session`]: the pure parts, unit-tested natively.
 //!
 //! Natively only the pure modules compile; the browser modules are wasm32-only.
@@ -28,5 +33,7 @@ pub mod app;
 mod js;
 #[cfg(target_arch = "wasm32")]
 mod logging;
+#[cfg(target_arch = "wasm32")]
+pub mod outbox;
 #[cfg(target_arch = "wasm32")]
 pub mod worker;

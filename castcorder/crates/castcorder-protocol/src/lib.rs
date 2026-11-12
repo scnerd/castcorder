@@ -56,6 +56,32 @@ pub struct SourceInfo {
     pub kind: SourceKind,
 }
 
+/// A finished track a participant offers to the host from its outbox, so the host
+/// can record it in the take's manifest and pull it over the "data" channel.
+///
+/// The host takes `root` and `size` from here, not from the data stream: every
+/// byte it then receives is verified against `root` (castcorder-transfer).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackOffer {
+    /// The offering device's id (stable across rejoins of the same install or
+    /// browser profile), so a transfer resumes after a restart on either side.
+    pub device: String,
+    /// The take the track belongs to.
+    pub take: TakeId,
+    /// The source the track was recorded from (for example `mic`).
+    pub source: SourceId,
+    /// Audio or video; the outbox syncs audio first.
+    pub kind: SourceKind,
+    /// The track's name in the device's own store, unique on that device.
+    pub name: String,
+    /// Exact size in bytes.
+    pub size: u64,
+    /// BLAKE3 (bao) root of the whole file.
+    pub root: [u8; 32],
+    /// The file format, as a file extension (for example `wav`).
+    pub format: String,
+}
+
 /// A request from a client to a core.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request {
@@ -74,6 +100,13 @@ pub enum Request {
     StopTake,
     /// Ask for the current take status.
     GetTakeStatus,
+    /// Offer a finished track from the outbox (answered with
+    /// [`Response::TrackAccepted`]). A device offers its whole outbox again on
+    /// every connect; the host pulls each track on the "data" channel whenever no
+    /// take is recording, audio before video, oldest take first, and confirms
+    /// verified receipt there (castcorder-transfer DONE). Only then may the device
+    /// delete its copy.
+    OfferTrack(TrackOffer),
 }
 
 /// Whether a take is recording.
@@ -130,6 +163,13 @@ pub enum Response {
         kind: ErrorKind,
         /// A human-readable explanation.
         message: String,
+    },
+    /// The host recorded an offered track in the take's manifest.
+    TrackAccepted {
+        /// The track's file name in the host's library.
+        file: String,
+        /// Whether the host already holds it verified (it confirms on "data" too).
+        received: bool,
     },
 }
 
@@ -219,6 +259,16 @@ mod tests {
             Request::StartTake,
             Request::StopTake,
             Request::GetTakeStatus,
+            Request::OfferTrack(TrackOffer {
+                device: "dev-1".into(),
+                take: TakeId(2),
+                source: SourceId("mic".into()),
+                kind: SourceKind::Audio,
+                name: "take0002-1-mic".into(),
+                size: 1234,
+                root: [7; 32],
+                format: "wav".into(),
+            }),
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -228,6 +278,13 @@ mod tests {
             assert_eq!(decode::<ClientMessage>(&encode(&msg)).unwrap(), msg);
         }
         let core = vec![
+            CoreMessage::Response {
+                id: RequestId(9),
+                response: Response::TrackAccepted {
+                    file: "take02_alice_mic.wav".into(),
+                    received: false,
+                },
+            },
             CoreMessage::Response {
                 id: RequestId(7),
                 response: Response::Sources(vec![SourceInfo {
@@ -264,6 +321,28 @@ mod tests {
         // reorder of the enum fails here rather than silently between versions.
         assert_eq!(encode(&Request::ListSources), vec![1]);
         assert_eq!(encode(&Request::GetTakeStatus), vec![4]);
+        let offer = TrackOffer {
+            device: String::new(),
+            take: TakeId(1),
+            source: SourceId(String::new()),
+            kind: SourceKind::Video,
+            name: String::new(),
+            size: 0,
+            root: [0; 32],
+            format: String::new(),
+        };
+        // device "", take 1, source "", kind Video (1), name "", size 0, root, format "".
+        let mut wire = vec![5, 0, 1, 0, 1, 0, 0];
+        wire.extend([0; 32]);
+        wire.push(0);
+        assert_eq!(encode(&Request::OfferTrack(offer)), wire);
+        assert_eq!(
+            encode(&Response::TrackAccepted {
+                file: String::new(),
+                received: true
+            }),
+            vec![6, 0, 1]
+        );
         assert_eq!(
             encode(&Event::TakeStatusChanged(TakeStatus::Idle)),
             vec![1, 0]

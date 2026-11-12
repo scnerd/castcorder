@@ -66,11 +66,14 @@ fn flip_bit<S: Storage>(s: &S, name: &str, pos: u64, bit: u8) {
 }
 
 fn stores_of<S: Storage>(s: &S) -> ReceiverStores<S::File> {
-    ReceiverStores {
+    let stores = ReceiverStores {
         data: s.open("recv.data").unwrap(),
         outboard: s.open("recv.obao").unwrap(),
         journal: s.open("recv.journal").unwrap(),
-    }
+    };
+    // The files must survive a crash once created (receive state is resumable).
+    s.sync_dir().unwrap();
+    stores
 }
 
 fn open_recv<S: Storage>(
@@ -613,4 +616,23 @@ fn transfer_16mb_real_files_with_cuts_crashes_and_bitflips() {
 #[ignore = "200 MB run, slow in debug; use --release"]
 fn transfer_200mb_real_files_with_cuts_crashes_and_bitflips() {
     big_transfer(200 * 1024 * 1024 + 12345, &[300, 700, 500], [50, 151]);
+}
+
+#[test]
+fn outboard_of_file_matches_in_memory_outboard() {
+    use castcorder_transfer::incremental::outboard_of_file;
+    let disk = SimDisk::new(0);
+    for (i, &size) in [0usize, 1, 16 * 1024, (1 << 20) + 7, 3 << 20]
+        .iter()
+        .enumerate()
+    {
+        let data = blob(size, i as u64);
+        let name = format!("f{i}");
+        let mut f = disk.open(&name).unwrap();
+        f.write_at(0, &data).unwrap();
+        let got = outboard_of_file(&mut f, 4).unwrap();
+        let want = outboard_for(&data, 4);
+        assert_eq!(got.root, want.root, "size {size}");
+        assert_eq!(got.data, want.data, "size {size}");
+    }
 }

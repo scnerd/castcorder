@@ -140,6 +140,8 @@ fn crash_recovers_exactly_the_synced_data() {
         WriterOptions::default(),
     )
     .unwrap();
+    // The track file must survive a crash: make its directory entry durable.
+    disk.sync_dir().unwrap();
     let mut source = Generator::new(format, 1_000, Some(5_000));
     pump(&mut source, &mut w, Some(3)).unwrap();
     w.sync().unwrap();
@@ -173,6 +175,7 @@ fn crash_right_after_sync_recovers_exactly_synced_length() {
             WriterOptions::default(),
         )
         .unwrap();
+        disk.sync_dir().unwrap();
         let mut source = Generator::new(format, 1_000, Some(5_000));
         pump(&mut source, &mut w, Some(4)).unwrap();
         w.sync().unwrap();
@@ -200,6 +203,8 @@ fn resume_after_crash_continues_the_same_track() {
         WriterOptions::default(),
     )
     .unwrap();
+    // The track file must survive a crash: make its directory entry durable.
+    disk.sync_dir().unwrap();
     let mut source = Generator::new(format, 1_000, Some(3_000));
     pump(&mut source, &mut w, Some(1)).unwrap();
     w.sync().unwrap();

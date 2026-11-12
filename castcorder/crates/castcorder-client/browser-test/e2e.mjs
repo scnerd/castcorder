@@ -7,7 +7,10 @@
 //    guest B uses Chromium's default fake microphone. Both join.
 // 2. B receives A's forwarded audio (inbound RTP from A's stream rising).
 // 3. The host starts a take, waits ~5 s, stops it.
-// 4. A's track is read back out of OPFS and must be bit-exact against the input
+// 4. Each guest's outbox syncs its track and JSON sidecar into the host's
+//    library (--library test-results/library), verified; only then is the
+//    OPFS copy deleted, and the test waits until both guests' OPFS is empty.
+// 5. A's track, as the host received it, must be bit-exact against the input
 //    (Chrome's int16 -> float scaling, every frame aligned, no dropped,
 //    duplicated or inserted frames), about 5 s long, 44.1 kHz stereo.
 //
@@ -15,7 +18,7 @@
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16, INPUT_RATE } from './gen-wav.mjs';
@@ -38,6 +41,8 @@ if (!existsSync(join(dist, 'index.html'))) { console.log('FAIL client not built:
 mkdirSync(RESULTS, { recursive: true });
 const input = makeInput();
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
+const LIBRARY = join(RESULTS, 'library');
+rmSync(LIBRARY, { recursive: true, force: true });
 writeWav16(INPUT_WAV, input);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -51,7 +56,7 @@ async function waitFor(fn, what, timeout = 30000, interval = 200) {
   }
 }
 
-const host = spawn(exe, ['--dist', dist], { stdio: ['ignore', 'pipe', 'pipe'] });
+const host = spawn(exe, ['--dist', dist, '--library', LIBRARY], { stdio: ['ignore', 'pipe', 'pipe'] });
 let hostLog = '';
 host.stderr.on('data', (d) => { hostLog += d.toString(); });
 const HTTP = await new Promise((resolve, reject) => {
@@ -172,22 +177,38 @@ try {
   const stopped = await hostPost('/take/stop');
   check(stopped.take === 1, 'host stopped take ' + stopped.take);
 
-  const listed = async (p) => {
-    const t = await json(p, '#debug-tracks');
-    return t && t.length && !t.some((x) => x.recording) && t.some((x) => x.take === 1) ? t : null;
+  // The outbox: after the take, each guest's track (and its JSON sidecar) is
+  // pulled into the host's library, verified, and only then deleted from OPFS.
+  const TAKE_DIR = join(LIBRARY, 'browser-test', 'take01');
+  const verifiedCount = () => {
+    const m = join(TAKE_DIR, 'manifest.jsonl');
+    if (!existsSync(m)) return 0;
+    return readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length;
   };
-  const tracksA = await waitFor(() => listed(A), 'A track list after stop', 15000);
-  const tracksB = await waitFor(() => listed(B), 'B track list after stop', 15000);
-  const trackA = tracksA.find((x) => x.take === 1);
-  const trackB = tracksB.find((x) => x.take === 1);
-  console.log('A track ' + JSON.stringify(trackA));
-  console.log('B track ' + JSON.stringify(trackB));
-  check(trackB && trackB.seconds > TAKE_SECONDS - 1, 'B also recorded a local track (' + (trackB && trackB.seconds.toFixed(2)) + ' s)');
-
-  const wav = parseWav(await readOpfs(A, 'tracks', trackA.name + '.wav'));
-  writeFileSync(join(RESULTS, 'A-track.wav'), await readOpfs(A, 'tracks', trackA.name + '.wav'));
-  const sidecar = JSON.parse((await readOpfs(A, 'tracks', trackA.name + '.json')).toString('utf8'));
+  await waitFor(async () => verifiedCount() >= 4, 'host verified both guests\' tracks and sidecars', 60000, 250);
+  const opfsNames = (p) => p.evaluate(async () => {
+    const root = await navigator.storage.getDirectory();
+    const d = await root.getDirectoryHandle('tracks', { create: true });
+    const out = [];
+    for await (const k of d.keys()) out.push(k);
+    return out;
+  });
+  for (const [n, p] of [['A', A], ['B', B]]) {
+    const left = await waitFor(async () => ((await opfsNames(p)).length === 0 ? [] : null), 'guest ' + n + ' OPFS emptied after sync', 20000);
+    check(left.length === 0, 'guest ' + n + ' deleted its local copies after verified receipt');
+  }
+  const hostFiles = readdirSync(TAKE_DIR).sort();
+  console.log('host take01: ' + hostFiles.join(' '));
+  check(['take01_A_mic.json', 'take01_A_mic.wav', 'take01_B_mic.json', 'take01_B_mic.wav'].every((f) => hostFiles.includes(f))
+    && !hostFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
+    'host library holds both tracks and sidecars, with no transfer state left');
+  const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
+  writeFileSync(join(RESULTS, 'A-track.wav'), wavBytes);
+  const wav = parseWav(wavBytes);
+  const sidecar = JSON.parse(readFileSync(join(TAKE_DIR, 'take01_A_mic.json'), 'utf8'));
   writeFileSync(join(RESULTS, 'A-track.json'), JSON.stringify(sidecar, null, 2));
+  const wavB = parseWav(readFileSync(join(TAKE_DIR, 'take01_B_mic.wav')));
+  check(wavB.frames / wavB.rate > TAKE_SECONDS - 1, 'B\'s track arrived too (' + (wavB.frames / wavB.rate).toFixed(2) + ' s)');
   const seconds = wav.frames / wav.rate;
   check(wav.tag === 3 && wav.bits === 32, 'track is float32 WAV');
   check(wav.rate === INPUT_RATE && wav.channels === 2, 'track is ' + wav.rate + ' Hz, ' + wav.channels + ' ch (input ' + INPUT_RATE + ' Hz, 2 ch)');
@@ -225,5 +246,5 @@ if (!passed) {
   }
 }
 console.log('logs: crates/castcorder-client/browser-test/test-results/');
-console.log(passed ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS' : 'FAIL');
+console.log(passed ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS, syncs it to the host and deletes it locally' : 'FAIL');
 process.exit(passed ? 0 : 1);

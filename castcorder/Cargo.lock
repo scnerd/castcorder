@@ -347,6 +347,8 @@ dependencies = [
 name = "castcorder-client"
 version = "0.0.0"
 dependencies = [
+ "castcorder-core",
+ "castcorder-port-disk",
  "castcorder-protocol",
  "console_error_panic_hook",
  "js-sys",
@@ -363,6 +365,14 @@ dependencies = [
 [[package]]
 name = "castcorder-core"
 version = "0.0.0"
+dependencies = [
+ "castcorder-port-disk",
+ "castcorder-protocol",
+ "castcorder-transfer",
+ "serde",
+ "serde_json",
+ "tracing",
+]
 
 [[package]]
 name = "castcorder-port-capture"
@@ -419,7 +429,9 @@ dependencies = [
 name = "castcorder-transport"
 version = "0.0.0"
 dependencies = [
+ "castcorder-core",
  "castcorder-port-clock",
+ "castcorder-port-disk",
  "castcorder-port-net",
  "castcorder-protocol",
  "serde",

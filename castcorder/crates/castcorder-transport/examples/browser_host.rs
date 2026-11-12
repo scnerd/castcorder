@@ -13,7 +13,12 @@
 //!
 //! On each guest's "control" channel the host answers castcorder-protocol
 //! requests: `Join` (participant id = guest id), `GetTakeStatus`, `StartTake`,
-//! `StopTake`, `ListSources` (empty).
+//! `StopTake`, `ListSources` (empty), and `OfferTrack`.
+//!
+//! With `--library DIR` the host collects guests' outboxes (castcorder-core
+//! `Library` and `Puller` on the real disk): offered tracks are recorded in the
+//! take's manifest and pulled over each guest's "data" channel whenever no take
+//! records, into `DIR/browser-test/takeNN/`. Without it, `OfferTrack` is refused.
 //!
 //! Prints `HOST_READY http=http://127.0.0.1:PORT udp=ADDR` once listening.
 //! Everything printed is ASCII.
@@ -25,11 +30,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use castcorder_core::library::{Library, Puller};
+use castcorder_core::sync::SyncConfig;
 use castcorder_port_clock::{Clock, SystemClock};
+use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
     ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, TakeId, TakeStatus,
+    TrackOffer,
 };
 use castcorder_transport::{GuestChannel, GuestId, Host, HostConfig, HostEvent};
 use tracing::{info, warn};
@@ -55,15 +64,65 @@ struct Sdp {
     sdp: String,
 }
 
-/// The producer-side state of the call: whether a take is recording, and one
-/// RPC endpoint per guest.
+/// The producer-side state of the call: whether a take is recording, one RPC
+/// endpoint per guest, and (with a library) one outbox puller per joined guest.
 struct Call {
     status: TakeStatus,
     last_take: u32,
     rpc: BTreeMap<GuestId, RpcServer<GuestChannel>>,
+    data: BTreeMap<GuestId, GuestChannel>,
+    library: Option<Library<FsStorage>>,
+    pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
 }
 
 impl Call {
+    /// Move every guest's outbox sync along; drop pullers whose guest is gone.
+    fn sync(&mut self) {
+        let Some(lib) = self.library.as_mut() else {
+            return;
+        };
+        let recording = matches!(self.status, TakeStatus::Recording { .. });
+        let mut gone = Vec::new();
+        for (id, p) in &mut self.pullers {
+            if let Err(e) = p.poll(lib, recording) {
+                warn!(guest = id.0, error = %e, "outbox sync failed on disk");
+                gone.push(*id);
+            } else if p.is_closed() {
+                gone.push(*id);
+            }
+        }
+        for id in gone {
+            self.drop_puller(id);
+        }
+    }
+
+    fn drop_puller(&mut self, id: GuestId) {
+        if let Some(p) = self.pullers.remove(&id)
+            && let Err(e) = p.disconnect()
+        {
+            warn!(guest = id.0, error = %e, "outbox state not committed");
+        }
+    }
+
+    fn offer_track(&mut self, id: GuestId, offer: &TrackOffer) -> Response {
+        let (Some(lib), Some(p)) = (self.library.as_mut(), self.pullers.get_mut(&id)) else {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "this host collects no tracks (no --library), or Join first".into(),
+            };
+        };
+        match p.offer(lib, offer) {
+            Ok(e) => Response::TrackAccepted {
+                file: e.file,
+                received: e.verified,
+            },
+            Err(e) => Response::Error {
+                kind: ErrorKind::Other,
+                message: e.to_string(),
+            },
+        }
+    }
+
     fn start_take(&mut self) -> Result<TakeId, String> {
         if let TakeStatus::Recording { take } = self.status {
             return Err(format!("take {} is already recording", take.0));
@@ -115,9 +174,21 @@ impl Call {
                         kind: ErrorKind::VersionMismatch,
                         message: format!("host speaks protocol {PROTOCOL_VERSION}"),
                     },
-                    Request::Join { .. } => Response::Joined {
-                        participant: ParticipantId(id.0),
-                    },
+                    Request::Join { display_name, .. } => {
+                        if self.library.is_some()
+                            && let Some(ch) = self.data.get(&id)
+                        {
+                            let call = self.library.as_ref().map(|l| l.call().to_string());
+                            self.pullers.insert(
+                                id,
+                                Puller::new(call.unwrap_or_default(), display_name, ch.clone()),
+                            );
+                        }
+                        Response::Joined {
+                            participant: ParticipantId(id.0),
+                        }
+                    }
+                    Request::OfferTrack(offer) => self.offer_track(id, &offer),
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => match self.start_take() {
@@ -145,7 +216,9 @@ impl Call {
 
 fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new("castcorder_transport=info,browser_host=info")
+        tracing_subscriber::EnvFilter::new(
+            "castcorder_transport=info,castcorder_core=info,browser_host=info",
+        )
     });
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -154,13 +227,22 @@ fn main() {
         .init();
 
     let mut dist: Option<PathBuf> = None;
+    let mut library: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--dist" => dist = args.next().map(PathBuf::from),
-            other => panic!("unknown argument {other}; usage: browser_host [--dist DIR]"),
+            "--library" => library = args.next().map(PathBuf::from),
+            other => {
+                panic!("unknown argument {other}; usage: browser_host [--dist DIR] [--library DIR]")
+            }
         }
     }
+
+    let library = library.map(|dir| {
+        let root = FsStorage::new(dir).expect("library directory");
+        Library::open(&root, "browser-test", SyncConfig::default()).expect("open library")
+    });
 
     let socket = UdpDatagramSocket::bind_loopback().expect("bind UDP");
     let clock = SystemClock::new();
@@ -182,6 +264,9 @@ fn main() {
                 status: TakeStatus::Idle,
                 last_take: 0,
                 rpc: BTreeMap::new(),
+                data: BTreeMap::new(),
+                library,
+                pullers: BTreeMap::new(),
             };
             loop {
                 while let Ok(c) = rx.try_recv() {
@@ -195,6 +280,9 @@ fn main() {
                             let r = r.map(|(id, answer)| {
                                 if let Some(ch) = host.control(id) {
                                     call.rpc.insert(id, RpcServer::new(ch));
+                                }
+                                if let Some(ch) = host.data(id) {
+                                    call.data.insert(id, ch);
                                 }
                                 answer
                             });
@@ -212,9 +300,12 @@ fn main() {
                 while let Some(e) = host.next_event() {
                     if let HostEvent::GuestGone { guest, .. } = e {
                         call.rpc.remove(&guest);
+                        call.data.remove(&guest);
+                        call.drop_puller(guest);
                     }
                 }
                 call.serve();
+                call.sync();
                 // The net port has no readiness wait: sleep until the deadline
                 // but never long, so arriving datagrams are read promptly.
                 let wait = deadline.saturating_sub(clock.monotonic());

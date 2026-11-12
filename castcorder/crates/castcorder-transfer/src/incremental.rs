@@ -265,3 +265,28 @@ impl SubtreeBuilder {
         self.stack.push(Entry { cv, groups });
     }
 }
+
+/// Root and post-order outboard of a whole stored file, read with one call per
+/// MiB (the per-call cost matters on OPFS) and hashed once. Memory is the
+/// outboard (64 bytes per chunk group) plus one read buffer.
+pub fn outboard_of_file<F: castcorder_port_disk::StorageFile + ?Sized>(
+    f: &mut F,
+    block_log: u8,
+) -> std::io::Result<bao_tree::io::outboard::PostOrderMemOutboard> {
+    let size = f.len()?;
+    let mut inc = IncrementalOutboard::new(block_log, 0);
+    let mut buf = vec![0u8; (1usize << 20).min(size as usize)];
+    let mut pos = 0u64;
+    while pos < size {
+        let n = ((size - pos) as usize).min(buf.len());
+        crate::io::read_exact_at(f, pos, &mut buf[..n])?;
+        inc.append(&buf[..n]);
+        pos += n as u64;
+    }
+    let fin = inc.finish();
+    Ok(bao_tree::io::outboard::PostOrderMemOutboard {
+        root: fin.root,
+        tree: bao_tree::BaoTree::new(fin.size, bao_tree::BlockSize::from_chunk_log(block_log)),
+        data: fin.outboard,
+    })
+}

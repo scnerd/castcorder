@@ -18,12 +18,13 @@
 //! a thread-local [`Engine`]; Leptos signals hold only plain values.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use castcorder_protocol::rpc::{MessageChannel, RpcClient};
 use castcorder_protocol::{
-    Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, TakeId,
+    Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, TakeId, TakeStatus,
+    TrackOffer,
 };
 use js_sys::{Array, Promise, Reflect, Uint8Array};
 use leptos::prelude::*;
@@ -82,6 +83,10 @@ struct Engine {
     source: Option<MediaStreamTrack>,
     pc: Option<RtcPeerConnection>,
     control: Option<RtcDataChannel>,
+    data: Option<RtcDataChannel>,
+    /// Roots offered to the host on this connection.
+    offered: BTreeSet<[u8; 32]>,
+    offer_requests: Vec<RequestId>,
     rpc: Option<RpcClient<DcChannel>>,
     join_request: Option<RequestId>,
     status_request: Option<RequestId>,
@@ -212,6 +217,12 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 ui.tracks_json.set(stringify(&arr));
             }
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
+            "outbox" => offer_tracks(&get(&d, "offers")),
+            "xfer-out" => send_frames(&get(&d, "frames")),
+            "synced" => {
+                let ctx = with_engine(|e| e.ctx.clone());
+                info!(call = %ctx.call, device = %ctx.device, track = %string(&d, "name"), "track synced to the host; local copy deleted");
+            }
             _ => {}
         }
     });
@@ -219,6 +230,86 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
     onmsg.forget();
     with_engine(|e| e.worker = Some(worker));
     Ok(())
+}
+
+/// Bytes queued on "data" above which the outbox waits for bufferedamountlow.
+const DATA_MAX_BUFFERED: f64 = 1024.0 * 1024.0;
+/// The bufferedamountlow threshold of "data".
+const DATA_LOW: u32 = 256 * 1024;
+
+/// How many more bytes "data" should take now.
+fn data_room() -> f64 {
+    with_engine(|e| {
+        e.data
+            .as_ref()
+            .filter(|d| d.ready_state() == web_sys::RtcDataChannelState::Open)
+            .map(|d| (DATA_MAX_BUFFERED - f64::from(d.buffered_amount())).max(0.0))
+            .unwrap_or(0.0)
+    })
+}
+
+/// Ask the worker for more outbox frames if "data" has room.
+fn pull_frames() {
+    let room = data_room();
+    if room > 0.0 {
+        let msg = worker_cmd("xfer-pull");
+        set(&msg, "room", room);
+        post_worker(&msg, None);
+    }
+}
+
+/// Offer the worker's outbox to the host (each root once per connection).
+fn offer_tracks(offers: &JsValue) {
+    let ctx = with_engine(|e| e.ctx.clone());
+    for bytes in Array::from(offers).iter() {
+        let bytes = Uint8Array::new(&bytes).to_vec();
+        let Ok(offer) = castcorder_protocol::decode::<TrackOffer>(&bytes) else {
+            warn!("bad offer from worker");
+            continue;
+        };
+        with_engine(|e| {
+            let Some(rpc) = e.rpc.as_mut() else {
+                return;
+            };
+            if e.participant.is_none() || !e.offered.insert(offer.root) {
+                return;
+            }
+            info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size, "offering track to the host");
+            match rpc.send(Request::OfferTrack(offer)) {
+                Ok(id) => e.offer_requests.push(id),
+                Err(err) => warn!(error = ?err, "OfferTrack not sent"),
+            }
+        });
+    }
+}
+
+/// Send the worker's outbox frames on "data", then ask for more if there is room.
+fn send_frames(frames: &JsValue) {
+    let sent = with_engine(|e| {
+        let Some(d) = e.data.as_ref() else {
+            return false;
+        };
+        for f in Array::from(frames).iter() {
+            let buf: js_sys::ArrayBuffer = f.unchecked_into();
+            if let Err(err) = d.send_with_array_buffer(&buf) {
+                warn!(error = %describe(&err), "data send failed");
+                return false;
+            }
+        }
+        true
+    });
+    if sent && data_room() > DATA_MAX_BUFFERED - f64::from(DATA_LOW) {
+        pull_frames();
+    }
+}
+
+/// A message from the host on "data": to the worker's outbox.
+fn on_data_message(ev: MessageEvent) {
+    let buf = ev.data();
+    let msg = worker_cmd("xfer-in");
+    set(&msg, "bytes", &buf);
+    set(&msg, "room", data_room());
+    post_worker(&msg, Some(&Array::of1(&buf)));
 }
 
 async fn get_user_media(
@@ -387,6 +478,17 @@ fn pump_rpc(ui: Ui) {
                 statuses.push(s);
             }
         }
+        for id in std::mem::take(&mut e.offer_requests) {
+            match rpc.take_response(id) {
+                Some(Response::TrackAccepted { file, received }) => {
+                    info!(call = %ctx.call, device = %ctx.device, file = %file, received, "host accepted track offer");
+                }
+                Some(other) => {
+                    warn!(call = %ctx.call, device = %ctx.device, response = ?other, "track offer refused")
+                }
+                None => e.offer_requests.push(id),
+            }
+        }
         while let Some(ev) = rpc.next_event() {
             if let Event::TakeStatusChanged(s) = ev {
                 statuses.push(s);
@@ -402,6 +504,13 @@ fn pump_rpc(ui: Ui) {
                 RecorderCommand::Start(take) => start_track(ui, take),
                 RecorderCommand::Stop(take) => stop_track(take),
             }
+        }
+        if s == TakeStatus::Idle && current.is_none() {
+            // (After a stop the worker syncs by itself once the track is closed.)
+            // Host connected and nothing recording: sync the outbox.
+            let msg = worker_cmd("outbox");
+            set(&msg, "call", ctx.call.as_str());
+            post_worker(&msg, None);
         }
     }
 }
@@ -609,6 +718,14 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     control.set_binary_type(RtcDataChannelType::Arraybuffer);
     let data = pc.create_data_channel("data");
     data.set_binary_type(RtcDataChannelType::Arraybuffer);
+    data.set_buffered_amount_low_threshold(DATA_LOW);
+    let ondata = Closure::<dyn FnMut(MessageEvent)>::new(on_data_message);
+    data.set_onmessage(Some(ondata.as_ref().unchecked_ref()));
+    ondata.forget();
+    let onlow = Closure::<dyn FnMut()>::new(pull_frames);
+    data.set_onbufferedamountlow(Some(onlow.as_ref().unchecked_ref()));
+    onlow.forget();
+    post_worker(&worker_cmd("xfer-reset"), None);
 
     let onmsg =
         Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| on_control_message(ui, ev));
@@ -652,6 +769,7 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     with_engine(|e| {
         e.pc = Some(pc.clone());
         e.control = Some(control.clone());
+        e.data = Some(data.clone());
     });
 
     let offer = JsFuture::from(pc.create_offer()).await?;
@@ -717,6 +835,7 @@ fn leave(ui: Ui) {
     if engine.recording.is_some() {
         post_worker(&worker_cmd("stop"), None);
     }
+    post_worker(&worker_cmd("xfer-reset"), None);
     post_worker(&worker_cmd("close-source"), None);
     for id in engine.timers {
         window().clear_interval_with_handle(id);

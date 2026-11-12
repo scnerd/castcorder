@@ -79,6 +79,14 @@ macro_rules! contract_tests {
             fn invalid_names_are_refused() {
                 contract::invalid_names_are_refused(&$harness);
             }
+            #[test]
+            fn subdirs_are_separate() {
+                contract::subdirs_are_separate(&$harness);
+            }
+            #[test]
+            fn sync_dir_keeps_what_reads_see() {
+                contract::sync_dir_keeps_what_reads_see(&$harness);
+            }
         }
     };
 }

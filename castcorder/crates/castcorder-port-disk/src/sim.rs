@@ -14,11 +14,17 @@ struct FileState {
     durable: Option<Vec<u8>>,
     /// The most recent operation since the last sync, if it was a write.
     last_write: Option<(u64, Vec<u8>)>,
+    /// Whether the directory entry survives a crash (set by `sync_dir`).
+    entry_durable: bool,
 }
 
 #[derive(Debug)]
 struct DiskState {
+    /// Every file on the disk, keyed by its full path (`dir/sub/name`).
     files: BTreeMap<String, FileState>,
+    /// Removed files whose removal is not yet durable: the durable contents a
+    /// crash brings back, keyed by full path.
+    ghosts: BTreeMap<String, Vec<u8>>,
     /// Bumped by every crash; handles from an older generation are dead.
     generation: u64,
     rng: u64,
@@ -35,10 +41,12 @@ impl DiskState {
     }
 }
 
-/// An in-memory disk. Cloning shares the same disk.
+/// An in-memory disk. Cloning shares the same disk (and the same directory).
 #[derive(Clone, Debug)]
 pub struct SimDisk {
     state: Arc<Mutex<DiskState>>,
+    /// The directory this handle looks at: empty for the top, else `a/b/`.
+    prefix: String,
 }
 
 impl SimDisk {
@@ -47,9 +55,11 @@ impl SimDisk {
         Self {
             state: Arc::new(Mutex::new(DiskState {
                 files: BTreeMap::new(),
+                ghosts: BTreeMap::new(),
                 generation: 0,
                 rng: seed,
             })),
+            prefix: String::new(),
         }
     }
 
@@ -57,33 +67,52 @@ impl SimDisk {
         self.state.lock().expect("sim disk lock poisoned")
     }
 
-    /// Simulate power loss: every file reverts to its durable contents (see the crate
-    /// docs), possibly plus a torn prefix of its last unsynced write. Files never
-    /// synced vanish. Every open handle becomes unusable; open the files again.
+    fn key(&self, name: &str) -> io::Result<String> {
+        validate_name(name)?;
+        Ok(format!("{}{name}", self.prefix))
+    }
+
+    /// Whether `key` names a file directly in this handle's directory.
+    fn is_mine(&self, key: &str) -> bool {
+        key.strip_prefix(&self.prefix)
+            .is_some_and(|rest| !rest.contains('/'))
+    }
+
+    /// Simulate power loss on the whole disk (every directory): every file reverts
+    /// to its durable contents (see the crate docs), possibly plus a torn prefix of
+    /// its last unsynced write. Files whose directory entry was never made durable
+    /// with [`Storage::sync_dir`] vanish; files removed since the last `sync_dir`
+    /// come back. Every open handle becomes unusable; open the files again.
     pub fn crash(&self) {
         let mut s = self.lock();
         s.generation += 1;
-        let names: Vec<String> = s.files.keys().cloned().collect();
-        for name in names {
-            let file = s.files.remove(&name).expect("name came from the map");
-            let Some(mut data) = file.durable else {
+        let files = std::mem::take(&mut s.files);
+        for (name, file) in files {
+            if !file.entry_durable {
                 continue;
-            };
+            }
+            let mut data = file.durable.unwrap_or_default();
             if let Some((offset, bytes)) = file.last_write {
                 let keep = (s.next_random() % (bytes.len() as u64 + 1)) as usize;
                 if keep > 0 {
                     write_into(&mut data, offset, &bytes[..keep]);
                 }
             }
-            s.files.insert(
-                name,
-                FileState {
-                    durable: Some(data.clone()),
-                    data,
-                    last_write: None,
-                },
-            );
+            s.files.insert(name, durable_file(data));
         }
+        let ghosts = std::mem::take(&mut s.ghosts);
+        for (name, data) in ghosts {
+            s.files.entry(name).or_insert_with(|| durable_file(data));
+        }
+    }
+}
+
+fn durable_file(data: Vec<u8>) -> FileState {
+    FileState {
+        durable: Some(data.clone()),
+        data,
+        last_write: None,
+        entry_durable: true,
     }
 }
 
@@ -100,32 +129,64 @@ impl Storage for SimDisk {
     type File = SimFile;
 
     fn open(&self, name: &str) -> io::Result<SimFile> {
-        validate_name(name)?;
+        let key = self.key(name)?;
         let mut s = self.lock();
-        s.files.entry(name.to_owned()).or_default();
+        s.files.entry(key.clone()).or_default();
         Ok(SimFile {
             disk: self.clone(),
-            name: name.to_owned(),
+            key,
             generation: s.generation,
         })
     }
 
     fn exists(&self, name: &str) -> io::Result<bool> {
-        validate_name(name)?;
-        Ok(self.lock().files.contains_key(name))
+        let key = self.key(name)?;
+        Ok(self.lock().files.contains_key(&key))
     }
 
     fn remove(&self, name: &str) -> io::Result<()> {
-        validate_name(name)?;
-        match self.lock().files.remove(name) {
-            Some(_) => Ok(()),
+        let key = self.key(name)?;
+        let mut s = self.lock();
+        match s.files.remove(&key) {
+            Some(f) => {
+                if f.entry_durable {
+                    s.ghosts.insert(key, f.durable.unwrap_or_default());
+                }
+                Ok(())
+            }
             None => Err(io::ErrorKind::NotFound.into()),
         }
     }
 
     fn list(&self) -> io::Result<Vec<String>> {
-        // BTreeMap keys are already sorted.
-        Ok(self.lock().files.keys().cloned().collect())
+        // BTreeMap keys are already sorted, and a common prefix keeps that order.
+        Ok(self
+            .lock()
+            .files
+            .keys()
+            .filter(|k| self.is_mine(k))
+            .map(|k| k[self.prefix.len()..].to_owned())
+            .collect())
+    }
+
+    fn subdir(&self, name: &str) -> io::Result<SimDisk> {
+        let key = self.key(name)?;
+        Ok(SimDisk {
+            state: self.state.clone(),
+            prefix: format!("{key}/"),
+        })
+    }
+
+    fn sync_dir(&self) -> io::Result<()> {
+        let mut s = self.lock();
+        let s = &mut *s;
+        for (k, f) in s.files.iter_mut() {
+            if self.is_mine(k) {
+                f.entry_durable = true;
+            }
+        }
+        s.ghosts.retain(|k, _| !self.is_mine(k));
+        Ok(())
     }
 }
 
@@ -133,7 +194,7 @@ impl Storage for SimDisk {
 #[derive(Debug)]
 pub struct SimFile {
     disk: SimDisk,
-    name: String,
+    key: String,
     generation: u64,
 }
 
@@ -145,7 +206,7 @@ impl SimFile {
                 "sim disk crashed since this file was opened",
             ));
         }
-        let file = s.files.get_mut(&self.name).ok_or(io::ErrorKind::NotFound)?;
+        let file = s.files.get_mut(&self.key).ok_or(io::ErrorKind::NotFound)?;
         Ok(f(file))
     }
 }

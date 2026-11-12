@@ -27,5 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+castcorder-core.workspace = true
+castcorder-port-disk.workspace = true
 tiny_http = "0.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

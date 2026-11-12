@@ -68,6 +68,32 @@ impl Storage for FsStorage {
         names.sort();
         Ok(names)
     }
+
+    fn subdir(&self, name: &str) -> io::Result<FsStorage> {
+        let path = self.path(name)?;
+        if !path.is_dir() {
+            fs::create_dir(&path)?;
+            self.sync_dir()?;
+        }
+        Ok(FsStorage { root: path })
+    }
+
+    fn sync_dir(&self) -> io::Result<()> {
+        sync_directory(&self.root)
+    }
+}
+
+/// fsync a directory, so creates and removes in it survive power loss.
+#[cfg(not(windows))]
+fn sync_directory(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()
+}
+
+/// NTFS journals directory metadata itself, and std cannot open a directory
+/// handle on Windows without platform flags; only check the directory exists.
+#[cfg(windows)]
+fn sync_directory(dir: &Path) -> io::Result<()> {
+    fs::metadata(dir).map(|_| ())
 }
 
 /// An open file on the real filesystem.

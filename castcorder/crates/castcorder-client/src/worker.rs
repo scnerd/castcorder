@@ -51,11 +51,11 @@ fn now_ms() -> f64 {
     scope().performance().map(|p| p.now()).unwrap_or(0.0)
 }
 
-fn post(msg: &JsValue) {
+pub(crate) fn post(msg: &JsValue) {
     let _ = scope().post_message(msg);
 }
 
-fn post_error(context: &str, e: &JsValue) {
+pub(crate) fn post_error(context: &str, e: &JsValue) {
     let message = format!("{context}: {}", describe(e));
     warn!(error = %message, "worker error");
     let o = object();
@@ -64,7 +64,7 @@ fn post_error(context: &str, e: &JsValue) {
     post(&o);
 }
 
-async fn tracks_dir() -> Result<FileSystemDirectoryHandle, JsValue> {
+pub(crate) async fn tracks_dir() -> Result<FileSystemDirectoryHandle, JsValue> {
     let storage = scope().navigator().storage();
     let root: FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
         .await?
@@ -78,7 +78,7 @@ async fn tracks_dir() -> Result<FileSystemDirectoryHandle, JsValue> {
     )
 }
 
-async fn open_sync(
+pub(crate) async fn open_sync(
     dir: &FileSystemDirectoryHandle,
     name: &str,
     create: bool,
@@ -93,13 +93,13 @@ async fn open_sync(
         .unchecked_into())
 }
 
-fn at(pos: f64) -> FileSystemReadWriteOptions {
+pub(crate) fn at(pos: f64) -> FileSystemReadWriteOptions {
     let o = FileSystemReadWriteOptions::new();
     o.set_at(pos);
     o
 }
 
-fn read_all(h: &FileSystemSyncAccessHandle) -> Result<Vec<u8>, JsValue> {
+pub(crate) fn read_all(h: &FileSystemSyncAccessHandle) -> Result<Vec<u8>, JsValue> {
     let size = h.get_size()? as usize;
     let mut buf = vec![0u8; size];
     h.read_with_u8_array_and_options(&mut buf, &at(0.0))?;
@@ -357,7 +357,18 @@ async fn stop() -> Result<(), JsValue> {
     set(&o, "name", a.name.as_str());
     set(&o, "frames", a.frames as f64);
     post(&o);
-    list().await
+    list().await?;
+    crate::outbox::prepare_current().await
+}
+
+/// Post with a transfer list (ArrayBuffers move instead of being copied).
+pub(crate) fn post_transfer(msg: &JsValue, transfer: &Array) -> Result<(), JsValue> {
+    scope().post_message_with_transfer(msg, transfer)
+}
+
+/// Whether a track is recording or about to (the outbox does not hash then).
+pub(crate) fn is_busy() -> bool {
+    STARTING.get() || ACTIVE.with(|a| a.borrow().is_some())
 }
 
 fn close_source() {
@@ -366,7 +377,7 @@ fn close_source() {
     }
 }
 
-async fn entry_names(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsValue> {
+pub(crate) async fn entry_names(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsValue> {
     let it = call(dir, "keys", &[])?;
     let mut out = Vec::new();
     loop {
@@ -383,7 +394,7 @@ async fn entry_names(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsV
 }
 
 /// List every track, repairing any that a crash left unfinalised.
-async fn list() -> Result<(), JsValue> {
+pub(crate) async fn list() -> Result<(), JsValue> {
     let dir = tracks_dir().await?;
     let active = ACTIVE.with(|a| a.borrow().as_ref().map(|a| a.name.clone()));
     let names = entry_names(&dir).await?;
@@ -394,6 +405,32 @@ async fn list() -> Result<(), JsValue> {
         set(&item, "name", track.as_str());
         if active.as_deref() == Some(track.as_str()) {
             set(&item, "recording", true);
+            tracks.push(&item);
+            continue;
+        }
+        if let Some(wav) = crate::outbox::held(n) {
+            // Finalised and in the outbox: its files stay as they are.
+            if let Some(json) = crate::outbox::held(&format!("{track}.json")) {
+                let text =
+                    String::from_utf8_lossy(&read_all(&json).unwrap_or_default()).to_string();
+                let meta = JSON::parse(&text).unwrap_or_else(|_| object());
+                set(&item, "take", get(&meta, "take"));
+            }
+            let size = wav.get_size()? as u64;
+            let mut head = [0u8; HEADER_LEN];
+            let got = wav.read_with_u8_array_and_options(&mut head, &at(0.0))? as usize;
+            if let Some(fmt) = parse_header(&head[..got]) {
+                let frames = frames_in_file(size, fmt.channels);
+                set(&item, "sampleRate", fmt.sample_rate);
+                set(&item, "channels", fmt.channels);
+                set(&item, "frames", frames as f64);
+                set(
+                    &item,
+                    "seconds",
+                    frames as f64 / f64::from(fmt.sample_rate.max(1)),
+                );
+            }
+            set(&item, "outbox", true);
             tracks.push(&item);
             continue;
         }
@@ -481,6 +518,16 @@ pub fn main() {
                     Ok(())
                 }
                 "list" => list().await,
+                "outbox" => crate::outbox::prepare(msg).await,
+                "xfer-in" => crate::outbox::xfer_in(msg).await,
+                "xfer-pull" => {
+                    crate::outbox::xfer_pull(&msg);
+                    Ok(())
+                }
+                "xfer-reset" => {
+                    crate::outbox::xfer_reset();
+                    Ok(())
+                }
                 other => Err(JsValue::from_str(&format!("unknown cmd {other}"))),
             };
             if let Err(e) = r {

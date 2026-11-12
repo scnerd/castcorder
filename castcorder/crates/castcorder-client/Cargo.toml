@@ -22,6 +22,8 @@ name = "worker"
 path = "src/bin/worker.rs"
 
 [dependencies]
+castcorder-core.workspace = true
+castcorder-port-disk.workspace = true
 castcorder-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

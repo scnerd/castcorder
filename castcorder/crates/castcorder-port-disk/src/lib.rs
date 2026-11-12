@@ -1,7 +1,8 @@
 //! The disk port: the only way the core stores files (ADR 0003).
 //!
-//! - [`Storage`] is a flat directory of named files; [`StorageFile`] is one open file
-//!   with positioned reads and writes, length, truncation, and `sync`.
+//! - [`Storage`] is a directory of named files, with named subdirectories
+//!   ([`Storage::subdir`]); [`StorageFile`] is one open file with positioned reads
+//!   and writes, length, truncation, and `sync`.
 //! - [`FsStorage`] is the real implementation: std fs in one directory.
 //! - [`SimDisk`] is the simulated one: in memory, with [`SimDisk::crash`] to model
 //!   power loss.
@@ -10,15 +11,15 @@
 //!
 //! Durability rule (what [`SimDisk::crash`] keeps): a file's contents as of its last
 //! `sync` survive; anything written after that is lost, except that the last write
-//! may survive torn (a prefix of it applied). A file that was never synced does not
-//! survive at all. `remove` is durable at once.
+//! may survive torn (a prefix of it applied).
 //!
-//! Only file data durability is modelled. Directory entries are not: on a real
-//! crash, a file synced once can still vanish, and a removed file can come back,
-//! unless the parent directory is synced (Linux ext4, for example). The simulation
-//! is kinder than reality there, so code that relies on create or remove surviving
-//! a crash (outbox deletes, recovery) will need a directory-sync operation on this
-//! port, added when that code lands.
+//! Directory entries are separate, as on a real filesystem (Linux ext4, for
+//! example): a newly created file survives a crash only once [`Storage::sync_dir`]
+//! has run on its directory (then with whatever contents were synced, or empty),
+//! and a removed file comes back unless `sync_dir` ran after the remove. Code that
+//! relies on a create or a remove surviving a crash (receiving into a final name,
+//! deleting after confirmed receipt) calls `sync_dir` afterwards. Creating a
+//! directory with [`Storage::subdir`] is durable at once.
 //!
 //! Names are flat and portable: 1 to 128 characters from `A-Z a-z 0-9 . _ -`, not
 //! starting with `.`, and not a Windows reserved device name (`con`, `nul`, `com1`,
@@ -34,7 +35,7 @@ mod sim;
 pub use fs::{FsFile, FsStorage};
 pub use sim::{SimDisk, SimFile};
 
-/// A flat directory of named files.
+/// A directory of named files. Subdirectories are storages of their own.
 pub trait Storage: Send + Sync {
     /// An open file in this storage.
     type File: StorageFile;
@@ -44,8 +45,17 @@ pub trait Storage: Send + Sync {
     fn exists(&self, name: &str) -> io::Result<bool>;
     /// Delete a file. Fails with `NotFound` if it does not exist.
     fn remove(&self, name: &str) -> io::Result<()>;
-    /// The names of every file, sorted.
+    /// The names of every file directly in this directory (not in subdirectories),
+    /// sorted.
     fn list(&self) -> io::Result<Vec<String>>;
+    /// The subdirectory `name` as a storage of its own, created (durably) if it
+    /// does not exist. Subdirectory names follow the file-name rule.
+    fn subdir(&self, name: &str) -> io::Result<Self>
+    where
+        Self: Sized;
+    /// Make every create and remove of a file in this directory so far durable:
+    /// the directory-entry counterpart of [`StorageFile::sync`].
+    fn sync_dir(&self) -> io::Result<()>;
 }
 
 /// One open file.
