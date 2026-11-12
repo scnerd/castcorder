@@ -13,7 +13,11 @@
 //! The manifest is an append-only log of JSON lines (the disk port has no
 //! rename, so nothing is ever replaced): `Offered` when a guest first offers a
 //! track (its final file name is chosen once, here), `Verified` when every
-//! byte is on disk and matches the offered root. Loading stops at the first
+//! byte is on disk and matches the offered root. An item is identified by
+//! (device, name) within its take (logs: within `logs`); the root is its
+//! content check, so identical bytes from two devices or names are two items.
+//! Old `Verified` lines carry only a root and verify every entry with it (old
+//! manifests never held two). Loading stops at the first
 //! incomplete or unparsable line (a torn append) and truncates there.
 //!
 //! # Durability order
@@ -69,6 +73,10 @@ enum Record {
     },
     Verified {
         root: String,
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
     },
 }
 
@@ -76,8 +84,8 @@ struct Take<S: Storage> {
     dir: S,
     log: S::File,
     log_len: u64,
-    /// Keyed by root.
-    entries: BTreeMap<[u8; 32], ManifestEntry>,
+    /// Keyed by (device, name).
+    entries: BTreeMap<(String, String), ManifestEntry>,
 }
 
 impl<S: Storage> Take<S> {
@@ -177,7 +185,7 @@ impl<S: Storage> Library<S> {
                     file,
                 } => {
                     entries.insert(
-                        offer.root,
+                        (offer.device.clone(), offer.name.clone()),
                         ManifestEntry {
                             offer,
                             participant,
@@ -186,8 +194,12 @@ impl<S: Storage> Library<S> {
                         },
                     );
                 }
-                Record::Verified { root } => {
-                    if let Some(e) = entries.values_mut().find(|e| hex(&e.offer.root) == root) {
+                Record::Verified { root, device, name } => {
+                    for e in entries.values_mut().filter(|e| {
+                        hex(&e.offer.root) == root
+                            && device.as_ref().is_none_or(|d| *d == e.offer.device)
+                            && name.as_ref().is_none_or(|n| *n == e.offer.name)
+                    }) {
                         e.verified = true;
                     }
                 }
@@ -233,13 +245,14 @@ impl<S: Storage> Library<S> {
             ));
         }
         let t = self.take(offer.take)?;
-        if let Some(e) = t.entries.get(&offer.root) {
-            return Ok(e.clone());
-        }
-        if t.entries
-            .values()
-            .any(|e| e.offer.device == offer.device && e.offer.name == offer.name)
-        {
+        let key = (offer.device.clone(), offer.name.clone());
+        if let Some(e) = t.entries.get(&key) {
+            if e.offer.root == offer.root {
+                return Ok(e.clone());
+            }
+            warn!(call = %call, device = %offer.device, take = offer.take.0, track = %offer.name,
+                have = %hex(&e.offer.root), offered = %hex(&offer.root), verified = e.verified,
+                "track offered again with different contents; rejected");
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "track offered again with different contents",
@@ -288,13 +301,22 @@ impl<S: Storage> Library<S> {
         };
         info!(call = %call, device = %offer.device, take = offer.take.0, track = %e.file,
             size = offer.size, root = %hex(&offer.root), "track offered; recorded in manifest");
-        t.entries.insert(offer.root, e.clone());
+        t.entries.insert(key, e.clone());
         Ok(e)
     }
 
     /// The manifest entry of a track, if it was offered.
-    pub fn entry(&mut self, take: TakeId, root: &[u8; 32]) -> io::Result<Option<ManifestEntry>> {
-        Ok(self.take(take)?.entries.get(root).cloned())
+    pub fn entry(
+        &mut self,
+        take: TakeId,
+        device: &str,
+        name: &str,
+    ) -> io::Result<Option<ManifestEntry>> {
+        Ok(self
+            .take(take)?
+            .entries
+            .get(&(device.to_string(), name.to_string()))
+            .cloned())
     }
 
     /// Every entry of a take's manifest, sorted by file name.
@@ -308,11 +330,15 @@ impl<S: Storage> Library<S> {
     pub fn open_receiver(
         &mut self,
         take: TakeId,
-        root: &[u8; 32],
+        device: &str,
+        name: &str,
     ) -> io::Result<Receiver<S::File>> {
         let cfg = self.cfg;
         let t = self.take(take)?;
-        let e = t.entries.get(root).ok_or(io::ErrorKind::NotFound)?;
+        let e = t
+            .entries
+            .get(&(device.to_string(), name.to_string()))
+            .ok_or(io::ErrorKind::NotFound)?;
         if e.verified {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -328,29 +354,34 @@ impl<S: Storage> Library<S> {
         t.dir.sync_dir()?;
         Receiver::open(
             stores,
-            blake3_hash(root),
+            blake3_hash(&e.offer.root),
             cfg.geometry(e.offer.size),
             ReceiverConfig::default(),
         )
     }
 
     /// Durably record that a track is verified. Call before the DONE goes out.
-    pub fn mark_verified(&mut self, take: TakeId, root: &[u8; 32]) -> io::Result<()> {
+    pub fn mark_verified(&mut self, take: TakeId, device: &str, name: &str) -> io::Result<()> {
         let t = self.take(take)?;
-        let Some(e) = t.entries.get_mut(root) else {
+        let Some(e) = t.entries.get_mut(&(device.to_string(), name.to_string())) else {
             return Err(io::ErrorKind::NotFound.into());
         };
         if e.verified {
             return Ok(());
         }
         e.verified = true;
-        t.append(&Record::Verified { root: hex(root) })
+        let rec = Record::Verified {
+            root: hex(&e.offer.root),
+            device: Some(device.into()),
+            name: Some(name.into()),
+        };
+        t.append(&rec)
     }
 
     /// Remove a verified track's transfer state (drop its receiver first).
-    pub fn finish(&mut self, take: TakeId, root: &[u8; 32]) -> io::Result<()> {
+    pub fn finish(&mut self, take: TakeId, device: &str, name: &str) -> io::Result<()> {
         let t = self.take(take)?;
-        let Some(e) = t.entries.get(root) else {
+        let Some(e) = t.entries.get(&(device.to_string(), name.to_string())) else {
             return Err(io::ErrorKind::NotFound.into());
         };
         for s in sidecars(&e.file) {
@@ -380,7 +411,9 @@ pub struct Puller<S: Storage, C: MessageChannel> {
     call: String,
     participant: String,
     channel: C,
-    queue: BTreeMap<(u8, u32, String), (TakeId, [u8; 32])>,
+    queue: BTreeMap<(u8, u32, String), TrackOffer>,
+    /// Roots to confirm, one per item. The wire DONE names a root, but this
+    /// puller's channel belongs to one guest, so only that guest sees it.
     done: VecDeque<[u8; 32]>,
     current: Option<Pull<S::File>>,
     completed: Vec<ManifestEntry>,
@@ -413,9 +446,10 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             info!(call = %self.call, device = %offer.device, take = offer.take.0, track = %e.file,
                 "track offered again but already received; confirming");
             self.done.push_back(offer.root);
-        } else if self.current.as_ref().map(|c| c.entry.offer.root) != Some(offer.root) {
-            self.queue
-                .insert(sync_order(offer), (offer.take, offer.root));
+        } else if !self.current.as_ref().is_some_and(|c| {
+            c.entry.offer.device == offer.device && c.entry.offer.name == offer.name
+        }) {
+            self.queue.insert(sync_order(offer), offer.clone());
         }
         Ok(e)
     }
@@ -451,16 +485,44 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         !self.closed
     }
 
+    /// Whether an item of this guest with `root` is still unverified: queued,
+    /// or (with `current`) being received.
+    fn root_unverified(
+        &self,
+        lib: &mut Library<S>,
+        root: &[u8; 32],
+        current: bool,
+    ) -> io::Result<bool> {
+        if current
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|c| c.entry.offer.root == *root)
+        {
+            return Ok(true);
+        }
+        for o in self.queue.values().filter(|o| o.root == *root) {
+            if lib
+                .entry(o.take, &o.device, &o.name)?
+                .is_some_and(|e| !e.verified)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn start_next(&mut self, lib: &mut Library<S>) -> io::Result<()> {
-        while let Some((_, (take, root))) = self.queue.pop_first() {
-            let Some(entry) = lib.entry(take, &root)? else {
+        while let Some((_, offer)) = self.queue.pop_first() {
+            let take = offer.take;
+            let Some(entry) = lib.entry(take, &offer.device, &offer.name)? else {
                 continue;
             };
             if entry.verified {
-                self.done.push_back(root);
+                self.done.push_back(entry.offer.root);
                 continue;
             }
-            let receiver = lib.open_receiver(take, &root)?;
+            let receiver = lib.open_receiver(take, &offer.device, &offer.name)?;
             let have = receiver.units_have();
             let total = receiver.geometry().n_units();
             if have > 0 {
@@ -490,11 +552,18 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             return Ok(false);
         }
         let mut progress = false;
-        while let Some(root) = self.done.front().copied() {
+        // A DONE names a root and the guest drops every local copy with it, so
+        // it waits until no item of this guest with that root is unverified.
+        let mut i = 0;
+        while let Some(root) = self.done.get(i).copied() {
+            if self.root_unverified(lib, &root, true)? {
+                i += 1;
+                continue;
+            }
             if !self.send(Msg::Done { root }.encode()) {
                 return Ok(progress);
             }
-            self.done.pop_front();
+            self.done.remove(i);
             progress = true;
         }
         if self.current.is_none() && !recording {
@@ -530,6 +599,10 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 }
             }
         }
+        let Some(root) = self.current.as_ref().map(|c| c.entry.offer.root) else {
+            return Ok(progress);
+        };
+        let hold_done = self.root_unverified(lib, &root, false)?;
         let Some(cur) = self.current.as_mut() else {
             return Ok(progress);
         };
@@ -569,10 +642,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 };
                 if cur.receiver.state() == State::Verified && !cur.verified_recorded {
                     // The DONE about to go out lets the guest delete: record first.
-                    lib.mark_verified(o.take, &o.root)?;
+                    lib.mark_verified(o.take, &o.device, &o.name)?;
                     cur.verified_recorded = true;
                 }
                 progress = true;
+                if hold_done && matches!(Msg::decode(&m), Ok(Msg::Done { .. })) {
+                    // Identical items of this guest are still to come: the
+                    // last one's DONE covers them all.
+                    continue;
+                }
                 if self.channel.send(m).is_err() {
                     self.closed = true;
                     return Ok(progress);
@@ -583,7 +661,7 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             let c = self.current.take().expect("current is set");
             let entry = c.entry;
             drop(c.receiver);
-            lib.finish(o.take, &o.root)?;
+            lib.finish(o.take, &o.device, &o.name)?;
             info!(call = %self.call, device = %o.device, take = o.take.0, track = %entry.file,
                 size = o.size, "sync done: track verified and confirmed");
             let mut entry = entry;

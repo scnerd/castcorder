@@ -119,10 +119,12 @@ impl<F: StorageFile> Sender<F> {
                 }
             }
             Msg::Done { root } => {
-                if let Some(idx) = self.find(&root) {
-                    // In the app this is where the local copy may be deleted
-                    // (or scheduled for deletion after the retention period).
-                    self.blobs[idx].confirmed = true;
+                // In the app this is where the local copy may be deleted
+                // (or scheduled for deletion after the retention period).
+                // DONE names a root, so it covers every blob with that root:
+                // the receiver sends it only once all of them are held.
+                for b in self.blobs.iter_mut().filter(|b| b.root() == root) {
+                    b.confirmed = true;
                 }
             }
             Msg::Data { .. } | Msg::Error { .. } => {

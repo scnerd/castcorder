@@ -1,0 +1,276 @@
+//! Two guests offer byte-identical tracks (and logs) in the same take (tier 2).
+//! Each must land under its own name, bit-exact, and no guest may delete
+//! before its own copy is verified: the host's disk crashes at every
+//! confirmation. One guest also holds two identical tracks of its own.
+
+use castcorder_core::library::{Library, Puller};
+use castcorder_core::outbox::GuestOutbox;
+use castcorder_core::sync::SyncConfig;
+use castcorder_port_disk::{SimDisk, Storage, StorageFile};
+use castcorder_protocol::{SourceId, SourceKind, TakeId, TrackOffer};
+use castcorder_transfer::channel::{MemEnd, mem_link};
+use castcorder_transfer::fill_pseudo_random;
+use castcorder_transfer::io::read_exact_at;
+
+const CALL: &str = "call-1";
+
+fn cfg() -> SyncConfig {
+    SyncConfig {
+        block_log: 4,
+        unit_log: 14,
+        frame_payload: 4096,
+    }
+}
+
+/// (local name, take, source, kind, format)
+type Item = (&'static str, u32, &'static str, SourceKind, &'static str);
+
+struct Guest {
+    device: &'static str,
+    participant: &'static str,
+    disk: SimDisk,
+    items: Vec<Item>,
+}
+
+impl Guest {
+    fn file(item: &Item) -> String {
+        format!("{}.{}", item.0, item.4)
+    }
+
+    fn outbox(&self) -> GuestOutbox<castcorder_port_disk::SimFile> {
+        let mut outbox = GuestOutbox::new(CALL, cfg());
+        let on_disk = self.disk.list().unwrap();
+        for item in &self.items {
+            let file = Self::file(item);
+            if on_disk.contains(&file) {
+                let offer = TrackOffer {
+                    device: self.device.into(),
+                    take: TakeId(item.1),
+                    source: SourceId(item.2.into()),
+                    kind: item.3,
+                    name: item.0.into(),
+                    size: 0,
+                    root: [0; 32],
+                    format: item.4.into(),
+                };
+                outbox.add(offer, self.disk.open(&file).unwrap()).unwrap();
+            }
+        }
+        outbox
+    }
+}
+
+fn contents<S: Storage>(s: &S, name: &str) -> Vec<u8> {
+    let mut f = s.open(name).unwrap();
+    let mut v = vec![0u8; f.len().unwrap() as usize];
+    read_exact_at(&mut f, 0, &mut v).unwrap();
+    v
+}
+
+#[test]
+fn identical_tracks_and_logs_from_two_guests_each_land_under_their_own_name() {
+    let mut audio = vec![0u8; 100 * 1024 + 3];
+    fill_pseudo_random(7, 0, &mut audio);
+    let log = b"{\"ts\":\"2026-11-11T12:05:00.000Z\",\"message\":\"same\"}\n".to_vec();
+    let data_of = |item: &Item| {
+        if item.3 == SourceKind::Log {
+            &log
+        } else {
+            &audio
+        }
+    };
+
+    let guests = vec![
+        Guest {
+            device: "dev-alice",
+            participant: "Alice",
+            disk: SimDisk::new(1),
+            items: vec![
+                ("take0001-1-mic", 1, "mic", SourceKind::Audio, "wav"),
+                // Alice's own second track, identical to her first.
+                ("take0001-1-aux", 1, "aux", SourceKind::Audio, "wav"),
+                ("log-1-000", 0, "log", SourceKind::Log, "jsonl"),
+            ],
+        },
+        Guest {
+            device: "dev-bob",
+            participant: "Bob",
+            disk: SimDisk::new(2),
+            items: vec![
+                ("take0001-9-mic", 1, "mic", SourceKind::Audio, "wav"),
+                ("log-1-000", 0, "log", SourceKind::Log, "jsonl"),
+            ],
+        },
+    ];
+    for g in &guests {
+        for item in &g.items {
+            let mut f = g.disk.open(&Guest::file(item)).unwrap();
+            f.write_at(0, data_of(item)).unwrap();
+            f.sync().unwrap();
+        }
+        g.disk.sync_dir().unwrap();
+    }
+
+    let host_disk = SimDisk::new(3);
+    let host_root = host_disk.subdir("library").unwrap();
+    let mut lib = Library::open(&host_root, CALL, cfg()).unwrap();
+    let mut outboxes: Vec<_> = guests.iter().map(Guest::outbox).collect();
+
+    let mut session = 0;
+    while outboxes.iter().any(|o| !o.pending().is_empty()) {
+        session += 1;
+        assert!(session < 50, "no progress");
+        let mut links: Vec<MemEnd> = Vec::new();
+        let mut pullers = Vec::new();
+        for (g, outbox) in guests.iter().zip(&outboxes) {
+            let (ge, he) = mem_link(None, None);
+            links.push(ge);
+            let mut p = Puller::new(CALL, g.participant, he);
+            for o in outbox.pending() {
+                p.offer(&mut lib, &o).unwrap();
+            }
+            pullers.push(p);
+        }
+        let mut crashed = false;
+        for step in 0..10_000 {
+            assert!(step < 9_999, "session {session} stuck");
+            for gi in 0..guests.len() {
+                let confirmed = outboxes[gi].pump(&mut links[gi], 64 * 1024).unwrap();
+                for c in confirmed {
+                    // DONE means this guest's own copy is durable on the host.
+                    host_disk.crash();
+                    crashed = true;
+                    let mut after = Library::open(&host_root, CALL, cfg()).unwrap();
+                    let e = after
+                        .entry(c.take, &c.device, &c.name)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("{} {} not in manifest", c.device, c.name));
+                    assert!(
+                        e.verified,
+                        "{} {} confirmed but not verified",
+                        c.device, c.name
+                    );
+                    assert_eq!(e.participant, guests[gi].participant);
+                    let dir = after.take_dir(c.take).unwrap();
+                    let item = guests[gi].items.iter().find(|i| i.0 == c.name).unwrap();
+                    assert_eq!(
+                        &contents(dir, &e.file),
+                        data_of(item),
+                        "{} {} not bit-exact after a host crash",
+                        c.device,
+                        c.name
+                    );
+                    guests[gi].disk.remove(&Guest::file(item)).unwrap();
+                    guests[gi].disk.sync_dir().unwrap();
+                    lib = after;
+                }
+                if crashed {
+                    break;
+                }
+                pullers[gi].poll(&mut lib, false).unwrap();
+            }
+            if crashed
+                || (outboxes.iter().all(|o| o.pending().is_empty())
+                    && pullers.iter().all(|p| p.is_idle()))
+            {
+                break;
+            }
+        }
+        for l in &links {
+            l.cut();
+        }
+        if crashed {
+            drop(pullers);
+            host_disk.crash();
+            lib = Library::open(&host_root, CALL, cfg()).unwrap();
+            for o in &mut outboxes {
+                o.on_disconnect();
+            }
+        } else {
+            for p in pullers {
+                p.disconnect().unwrap();
+            }
+        }
+    }
+
+    for g in &guests {
+        assert!(
+            g.disk.list().unwrap().is_empty(),
+            "{} copies deleted",
+            g.device
+        );
+    }
+
+    host_disk.crash();
+    let mut lib = Library::open(&host_root, CALL, cfg()).unwrap();
+    let files = |lib: &mut Library<SimDisk>, take: u32| -> Vec<String> {
+        lib.entries(TakeId(take))
+            .unwrap()
+            .into_iter()
+            .inspect(|e| assert!(e.verified))
+            .map(|e| e.file)
+            .collect()
+    };
+    assert_eq!(
+        files(&mut lib, 1),
+        [
+            "take01_Alice_aux.wav",
+            "take01_Alice_mic.wav",
+            "take01_Bob_mic.wav"
+        ]
+    );
+    assert_eq!(
+        files(&mut lib, 0),
+        ["dev-alice-log-1-000.jsonl", "dev-bob-log-1-000.jsonl"]
+    );
+    for (take, names) in [
+        (
+            1,
+            vec![
+                "take01_Alice_aux.wav",
+                "take01_Alice_mic.wav",
+                "take01_Bob_mic.wav",
+            ],
+        ),
+        (
+            0,
+            vec!["dev-alice-log-1-000.jsonl", "dev-bob-log-1-000.jsonl"],
+        ),
+    ] {
+        let dir = lib.take_dir(TakeId(take)).unwrap().clone();
+        let want = if take == 0 { &log } else { &audio };
+        for n in &names {
+            assert_eq!(&contents(&dir, n), want, "{n}");
+        }
+        let mut listed = dir.list().unwrap();
+        listed.sort();
+        let mut expect: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        expect.push("manifest.jsonl".into());
+        expect.sort();
+        assert_eq!(listed, expect, "no transfer state left in take {take}");
+    }
+}
+
+#[test]
+fn same_device_and_name_with_different_contents_is_rejected_and_keeps_the_verified_track() {
+    let host = SimDisk::new(4);
+    let root = host.subdir("library").unwrap();
+    let mut lib = Library::open(&root, CALL, cfg()).unwrap();
+    let mk = |root_byte: u8| TrackOffer {
+        device: "dev-alice".into(),
+        take: TakeId(1),
+        source: SourceId("mic".into()),
+        kind: SourceKind::Audio,
+        name: "t".into(),
+        size: 10,
+        root: [root_byte; 32],
+        format: "wav".into(),
+    };
+    let first = lib.offer("Alice", &mk(1)).unwrap();
+    lib.mark_verified(TakeId(1), "dev-alice", "t").unwrap();
+    assert!(lib.offer("Alice", &mk(2)).is_err());
+    let again = lib.offer("Alice", &mk(1)).unwrap();
+    assert!(again.verified);
+    assert_eq!(again.file, first.file);
+    assert_eq!(lib.entries(TakeId(1)).unwrap().len(), 1);
+}

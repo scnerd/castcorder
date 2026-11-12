@@ -209,7 +209,10 @@ fn every_track_arrives_bit_exact_through_cuts_crashes_and_restarts() {
                 host_disk.crash();
                 crashed = true;
                 let mut after = Library::open(&host_root, CALL, cfg()).unwrap();
-                let e = after.entry(c.take, &c.root).unwrap().expect("in manifest");
+                let e = after
+                    .entry(c.take, &c.device, &c.name)
+                    .unwrap()
+                    .expect("in manifest");
                 assert!(e.verified, "{} confirmed but not verified", c.name);
                 let dir = after.take_dir(c.take).unwrap();
                 assert_eq!(
