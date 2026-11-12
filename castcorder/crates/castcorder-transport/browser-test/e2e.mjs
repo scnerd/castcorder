@@ -48,6 +48,7 @@ const browser = await chromium.launch({
     '--use-fake-ui-for-media-stream',
     '--allow-loopback-in-peer-connection',
     '--autoplay-policy=no-user-gesture-required',
+    '--mute-audio', // automated runs stay silent
   ],
 });
 console.log('chromium ' + browser.version());

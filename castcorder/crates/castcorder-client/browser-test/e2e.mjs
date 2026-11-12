@@ -21,6 +21,20 @@
 //    after the tracks), are valid JSON lines with the call and device fields, and
 //    the merge-logs example prints them with the host's own log merged by time.
 //
+// Modes (first argument; default chromium, everything above):
+//   fallback - as above, but MediaStreamTrackProcessor is deleted from window in
+//              both Chromium guests before the app loads, so recording must fall
+//              back (worker MSTP if it works, else the AudioWorklet tap). Reduced
+//              checks: join, each hears the other, a take records on both, both
+//              tracks and sidecars arrive on the host; A's track is analysed
+//              against the input and the result printed, not required bit-exact.
+//   firefox  - the same reduced checks with two headless Firefox guests (A the
+//              producer over localhost HTTP, B over HTTPS: the owner's desktop
+//              and phone cases); recording must use the AudioWorklet path. The
+//              host binds 0.0.0.0 and advertises this machine's LAN address, as
+//              `task host` does: Firefox on Windows gathers no loopback ICE
+//              candidates, so it cannot reach a host bound to 127.0.0.1.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
@@ -36,8 +50,12 @@ const CRATE = join(HERE, '..');
 const WORKSPACE = join(CRATE, '..', '..');
 const RESULTS = join(HERE, 'test-results');
 const TAKE_SECONDS = 5;
+const MODE = process.argv[2] || 'chromium';
+if (!['chromium', 'fallback', 'firefox'].includes(MODE)) { console.log('FAIL unknown mode ' + MODE); process.exit(1); }
+const FULL = MODE === 'chromium';
+console.log('mode ' + MODE);
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
-const { chromium } = await import('playwright');
+const { chromium, firefox } = await import('playwright');
 
 const exe = join(WORKSPACE, 'target', 'release',
   process.platform === 'win32' ? 'castcorder-host.exe' : 'castcorder-host');
@@ -48,7 +66,7 @@ if (!existsSync(join(dist, 'index.html'))) { console.log('FAIL client not built:
 mkdirSync(RESULTS, { recursive: true });
 const input = makeInput();
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
-const LIBRARY = join(RESULTS, 'library');
+const LIBRARY = join(RESULTS, FULL ? 'library' : 'library-' + MODE);
 rmSync(LIBRARY, { recursive: true, force: true });
 writeWav16(INPUT_WAV, input);
 
@@ -63,7 +81,7 @@ async function waitFor(fn, what, timeout = 30000, interval = 200) {
   }
 }
 
-const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--call', 'browser-test', '--bind', '127.0.0.1',
+const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--call', 'browser-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
   '--port', '0', '--http-port', '0', '--udp-port', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
 let hostLog = '';
 host.stderr.on('data', (d) => { hostLog += d.toString(); });
@@ -78,6 +96,12 @@ const [HTTP, HTTPS] = await new Promise((resolve, reject) => {
   host.on('exit', (c) => reject(new Error('host exited early with ' + c)));
 });
 console.log('host up at ' + HTTP + ' and ' + HTTPS);
+if (MODE === 'firefox' && /\/\/127\./.test(HTTPS)) {
+  // No LAN address: Firefox (no loopback ICE candidates on Windows) cannot connect.
+  host.kill();
+  console.log('SKIP firefox: this machine has no LAN IPv4 address for the host to advertise');
+  process.exit(0);
+}
 
 const BASE_ARGS = [
   '--use-fake-device-for-media-stream',
@@ -85,14 +109,40 @@ const BASE_ARGS = [
   '--allow-loopback-in-peer-connection',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-background-timer-throttling',
+  // Automated runs stay silent. The fallback run's 5 s take still records
+  // bit-exact with this flag; longer-run render-clock effects are not covered.
+  '--mute-audio',
 ];
 const logs = { A: [], B: [] };
 const browsers = [];
 
+const FIREFOX_PREFS = {
+  'media.navigator.streams.fake': true,
+  'media.navigator.permission.disabled': true,
+  // ICE and autoplay stay at Firefox's defaults, as on the owner's machine.
+  // Automated runs stay silent: every output is scaled to 0 while the output
+  // stream itself keeps running (the AudioWorklet's render clock needs it).
+  'media.volume_scale': '0.0',
+};
+
 async function openGuest(name, extraArgs, base) {
-  const browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
+  let browser, ctx;
+  if (MODE === 'firefox') {
+    // Distinct fake tones: identical recordings would share one content root,
+    // and the host library keys tracks by root (one entry for both guests).
+    const prefs = { ...FIREFOX_PREFS, 'media.navigator.audio.fake_frequency': name === 'A' ? 1000 : 1500 };
+    browser = await firefox.launch({ headless: true, firefoxUserPrefs: prefs });
+    ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+  } else {
+    browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
+    ctx = await browser.newContext({ permissions: ['microphone', 'camera'], ignoreHTTPSErrors: true });
+  }
   browsers.push(browser);
-  const ctx = await browser.newContext({ permissions: ['microphone', 'camera'], ignoreHTTPSErrors: true });
+  if (MODE === 'fallback') {
+    // A browser without MediaStreamTrackProcessor on window (Firefox, Safari,
+    // or a Chrome that exposes it in workers only).
+    await ctx.addInitScript(() => { delete window.MediaStreamTrackProcessor; });
+  }
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
@@ -146,7 +196,7 @@ let passed = false;
 try {
   const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV], HTTP);
   const B = await openGuest('B', [], HTTPS);
-  console.log('chromium ' + browsers[0].version());
+  console.log((MODE === 'firefox' ? 'firefox ' : 'chromium ') + browsers[0].version());
 
   // Producer controls: only on the page from the host machine's localhost.
   await A.waitForSelector('#take-start', { timeout: 10000 });
@@ -170,6 +220,25 @@ try {
     return y.packets > x.packets && y.bytes > x.bytes ? { x, y } : null;
   }, 'B receiving audio from A', 30000, 0);
   check(true, 'B receives A\'s forwarded audio (' + Math.round((flowing.y.packets - flowing.x.packets) / 2) + ' pkt/s)');
+  if (!FULL) {
+    const back = await waitFor(async () => {
+      const x = audioFrom(await json(A, '#debug-inbound'), 'B');
+      await sleep(2000);
+      const y = audioFrom(await json(A, '#debug-inbound'), 'B');
+      return y.packets > x.packets && y.bytes > x.bytes ? { x, y } : null;
+    }, 'A receiving audio from B', 30000, 0);
+    check(true, 'A receives B\'s forwarded audio (' + Math.round((back.y.packets - back.x.packets) / 2) + ' pkt/s)');
+    // The capture path each guest chose, from its structured join log line.
+    for (const n of ['A', 'B']) {
+      const line = await waitFor(async () => logs[n].find((l) => l.includes('recording capture path chosen') || l.includes('RECORDING UNAVAILABLE')),
+        'guest ' + n + ' capture path log line', 15000);
+      const path = (line.match(/capture_path = "?([a-z-]+)/) || [])[1];
+      check(line.includes('user_agent') && line.includes('raw_settings') && path && path !== 'none',
+        'guest ' + n + ' logged its user agent, raw track settings and capture path: ' + path);
+      if (MODE === 'firefox') check(path === 'worklet', 'guest ' + n + ' (Firefox) records through the AudioWorklet path');
+      if (MODE === 'fallback') check(path === 'worklet' || path === 'mstp-worker', 'guest ' + n + ' (no MSTP on window) fell back to ' + path);
+    }
+  }
 
   // The raw path is warm (read since join; the spike's 500 ms warm-up lesson).
   await waitFor(async () => (await text(A, '#level-db')) !== '-inf dBFS', 'A level meter');
@@ -213,6 +282,7 @@ try {
   // offered it as the lowest-priority outbox item; the host stores it under
   // <call>/logs/<device>-<name>.jsonl beside its own host-<start>.jsonl.
   const LOGS_DIR = join(LIBRARY, 'browser-test', 'logs');
+  if (FULL) {
   const guestLogFiles = () => (existsSync(LOGS_DIR) ? readdirSync(LOGS_DIR) : [])
     .filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl' && !f.startsWith('host-'));
   const devicesWithLogs = () => new Set(guestLogFiles().map((f) => f.split('-log-')[0]));
@@ -254,17 +324,45 @@ try {
   check(merged.status === 0 && mergedLines.length > 10 && stamps.every((s, i) => i === 0 || stamps[i - 1] <= s)
     && mergedLines.some((l) => l.includes('[host host]')) && mergedLines.some((l) => !l.includes('[host host]')),
     'merge-logs prints host and guest lines merged by time (' + mergedLines.length + ' lines)');
+  }
 
   const hostFiles = readdirSync(TAKE_DIR).sort();
   console.log('host take01: ' + hostFiles.join(' '));
   check(['take01_A_mic.json', 'take01_A_mic.wav', 'take01_B_mic.json', 'take01_B_mic.wav'].every((f) => hostFiles.includes(f))
     && !hostFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
     'host library holds both tracks and sidecars, with no transfer state left');
+  const SUFFIX = FULL ? '' : '-' + MODE;
   const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
-  writeFileSync(join(RESULTS, 'A-track.wav'), wavBytes);
+  writeFileSync(join(RESULTS, 'A-track' + SUFFIX + '.wav'), wavBytes);
   const wav = parseWav(wavBytes);
   const sidecar = JSON.parse(readFileSync(join(TAKE_DIR, 'take01_A_mic.json'), 'utf8'));
-  writeFileSync(join(RESULTS, 'A-track.json'), JSON.stringify(sidecar, null, 2));
+  writeFileSync(join(RESULTS, 'A-track' + SUFFIX + '.json'), JSON.stringify(sidecar, null, 2));
+  if (!FULL) {
+    for (const n of ['A', 'B']) {
+      const w = parseWav(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.wav')));
+      const sc = JSON.parse(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.json'), 'utf8'));
+      const secs = w.frames / w.rate;
+      let pk = 0;
+      for (let i = 0; i < w.samples.length; i++) pk = Math.max(pk, Math.abs(w.samples[i]));
+      check(w.tag === 3 && w.bits === 32 && w.dataDeclared === w.frames * w.channels * 4,
+        n + '\'s track is float32 WAV, ' + w.rate + ' Hz, ' + w.channels + ' ch, header matches the data');
+      check(secs > TAKE_SECONDS - 1 && secs < TAKE_SECONDS + 2, n + '\'s track is ' + secs.toFixed(2) + ' s for a ~' + TAKE_SECONDS + ' s take');
+      check(pk > 0.001, n + '\'s track is not silent (peak ' + pk.toFixed(4) + ')');
+      check(sc.finalised === true && sc.take === 1 && sc.frames === w.frames && typeof sc.capturePath === 'string'
+        && Array.isArray(sc.discontinuities) && typeof sc.insertedFrames === 'number' && typeof sc.droppedFrames === 'number',
+        n + '\'s sidecar: finalised, capture ' + sc.capturePath + ', ' + sc.discontinuities.length + ' discontinuities (inserted '
+        + sc.insertedFrames + ', dropped ' + sc.droppedFrames + ' frames)');
+    }
+    if (MODE === 'fallback') {
+      // Informational: how the fallback path compares with the input.
+      for (const c of analyzeRecording(deinterleave(wav.samples, wav.channels), input)) {
+        console.log('info A channel ' + c.channel + ' vs ' + c.against + ': ' + c.verdict + ' (aligned ' + c.aligned + '/' + c.considered
+          + ', dropped ' + c.droppedFrames + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames
+          + ', discontinuities ' + c.discontinuities + ')');
+      }
+    }
+  }
+  if (FULL) {
   const wavB = parseWav(readFileSync(join(TAKE_DIR, 'take01_B_mic.wav')));
   check(wavB.frames / wavB.rate > TAKE_SECONDS - 1, 'B\'s track arrived too (' + (wavB.frames / wavB.rate).toFixed(2) + ' s)');
   const seconds = wav.frames / wav.rate;
@@ -283,6 +381,7 @@ try {
       + ', leading zeros ' + c.leadingZeroFrames + ', unlocked ' + c.unlocked + ', mismatched ' + c.mismatched
       + ', dropped ' + c.droppedFrames + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames + ')');
   }
+  }
   for (const [n, p] of [['A', A], ['B', B]]) await noErrors(p, n);
   passed = checks.every((c) => c.ok);
   for (const p of [A, B]) await p.click('#leave');
@@ -293,8 +392,8 @@ try {
   for (const b of browsers) await b.close().catch(() => {});
   host.kill();
 }
-writeFileSync(join(RESULTS, 'host.log'), hostLog);
-for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + '.log'), logs[n].join('\n'));
+writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), hostLog);
+for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 if (!passed) {
   console.log('host log tail:');
   console.log(hostLog.split('\n').slice(-30).join('\n'));
@@ -304,5 +403,7 @@ if (!passed) {
   }
 }
 console.log('logs: crates/castcorder-client/browser-test/test-results/');
-console.log(passed ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS, syncs it to the host and deletes it locally' : 'FAIL');
+console.log(!passed ? 'FAIL (' + MODE + ')'
+  : FULL ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS, syncs it to the host and deletes it locally'
+    : 'PASS (' + MODE + ') guests join, hear each other, record a take without MediaStreamTrackProcessor on the page, and the tracks reach the host');
 process.exit(passed ? 0 : 1);

@@ -44,7 +44,7 @@ A free, open-source desktop app for recording podcasts, at `castcorder.app`. Par
 
 The outbox syncs whenever the host is connected and no take is recording: audio before video, oldest take first. Sync and live traffic compete, with priority hints where the platform honours them. Transfer is our own verified, resumable, range-based protocol over the existing connection, sized to suit S3 multipart later.
 
-Browser guests store tracks in the browser's private filesystem: persistent storage is requested (best effort), and the guest is told to return in the same browser to finish syncing. Chromium browsers are the supported target; Firefox and Safari are a medium-low priority.
+Browser guests store tracks in the browser's private filesystem: persistent storage is requested (best effort), and the guest is told to return in the same browser to finish syncing. Chromium browsers and Firefox are supported targets; Safari is a medium-low priority. Chromium records on the microphone's clock (MediaStreamTrackProcessor); other browsers use an AudioWorklet fallback, with any detected drift written to the track's metadata.
 
 ## Timing
 

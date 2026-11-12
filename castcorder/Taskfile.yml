@@ -75,6 +75,10 @@ tasks:
       The host (bound to loopback) serves dist/ over localhost HTTP to guest A, the
       producer, and over HTTPS to guest B; A is fed a deterministic WAV, both join,
       B must receive A's audio, and A's take must come back out of OPFS bit-exact.
+      Then the recording fallbacks: `fallback` (Chromium with
+      MediaStreamTrackProcessor deleted from window) and `firefox` (two headless
+      Firefox guests, AudioWorklet capture; the host binds 0.0.0.0 and advertises
+      the LAN address, as `task host` does, and the run is skipped without one).
       Run from the repo root with: task test:browser
     dir: crates/castcorder-client/browser-test
     cmds:
@@ -83,6 +87,8 @@ tasks:
       - npm install --no-audit --no-fund
       - node setup.mjs
       - node e2e.mjs
+      - node e2e.mjs fallback
+      - node e2e.mjs firefox
 
   host:
     desc: Run a call on this machine's local network (builds the client and the host, then runs castcorder-host)
