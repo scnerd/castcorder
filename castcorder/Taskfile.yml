@@ -67,18 +67,32 @@ tasks:
       - node e2e.mjs
 
   test:browser:client:
-    desc: The Browser Guest (castcorder-client) against the browser_host example with 2 headless Chromium guests (installs Playwright and Chromium locally on first run)
+    desc: The Browser Guest (castcorder-client) against castcorder-host with 2 headless Chromium guests (installs Playwright and Chromium locally on first run)
     summary: |
-      Builds the browser_host example and the client with trunk (dist/), then runs
+      Builds castcorder-host and the client with trunk (dist/), then runs
       crates/castcorder-client/browser-test/e2e.mjs with Playwright installed in
       that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
-      The host serves dist/; guest A is fed a deterministic WAV, both guests join,
+      The host (bound to loopback) serves dist/ over localhost HTTP to guest A, the
+      producer, and over HTTPS to guest B; A is fed a deterministic WAV, both join,
       B must receive A's audio, and A's take must come back out of OPFS bit-exact.
       Run from the repo root with: task test:browser
     dir: crates/castcorder-client/browser-test
     cmds:
-      - cargo build --release --locked -p castcorder-transport --example browser_host
+      - cargo build --release --locked -p castcorder-host
       - cd .. && trunk build --release
       - npm install --no-audit --no-fund
       - node setup.mjs
       - node e2e.mjs
+
+  host:
+    desc: Run a call on this machine's local network (builds the client and the host, then runs castcorder-host)
+    summary: |
+      Builds the Browser Guest with trunk (release) and runs castcorder-host,
+      which prints the join links and the library path. Open the localhost link
+      on this machine for the producer controls; guests on the same network open
+      the https link. Stop with Ctrl+C. Pass host flags after --, e.g.
+      task host -- --call my-show --library D:\Podcasts
+      Files land in %USERPROFILE%\Castcorder\<call>\ by default.
+    cmds:
+      - cd crates/castcorder-client && trunk build --release
+      - cargo run --release --locked -p castcorder-host -- --dist crates/castcorder-client/dist {{.CLI_ARGS}}

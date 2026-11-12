@@ -69,7 +69,7 @@ compile_error!("castcorder-transport needs a crypto backend: feature aws-lc-rs o
 
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -116,6 +116,14 @@ pub struct HostConfig {
     /// messages are written only while that channel holds less than half of it,
     /// so control traffic always has room.
     pub send_buffer: usize,
+    /// The addresses offered to guests as host ICE candidates. Empty means the
+    /// socket's own address; set it when the socket is bound to a wildcard
+    /// address (`0.0.0.0:PORT`), listing the machine's reachable addresses with
+    /// that port. A received datagram is attributed to the advertised address
+    /// that best matches its source (same family, loopback to loopback, then the
+    /// longest common prefix), since a wildcard socket cannot tell which
+    /// address it arrived on.
+    pub advertise: Vec<SocketAddr>,
 }
 
 impl Default for HostConfig {
@@ -127,6 +135,7 @@ impl Default for HostConfig {
             connect_timeout: Duration::from_secs(15),
             initial_bandwidth_estimate_kbps: Some(1500),
             send_buffer: 1024 * 1024,
+            advertise: Vec::new(),
         }
     }
 }
@@ -225,6 +234,7 @@ pub struct Host<S, C> {
     clock: C,
     base: Instant,
     local: SocketAddr,
+    advertise: Vec<SocketAddr>,
     config: HostConfig,
     crypto: Arc<CryptoProvider>,
     guests: Vec<Guest>,
@@ -237,7 +247,13 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// A host serving every guest on `socket`, keeping time with `clock`.
     pub fn new(socket: S, clock: C, config: HostConfig) -> Self {
         let local = socket.local_addr();
-        info!(call = %config.call, udp = %local, "host transport started");
+        let advertise = if config.advertise.is_empty() {
+            vec![local]
+        } else {
+            config.advertise.clone()
+        };
+        let advertised: Vec<String> = advertise.iter().map(|a| a.to_string()).collect();
+        info!(call = %config.call, udp = %local, advertise = ?advertised, "host transport started");
         Self {
             socket,
             clock,
@@ -245,6 +261,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             // monotonic Duration into the Instants str0m wants.
             base: Instant::now(),
             local,
+            advertise,
             config,
             crypto: Arc::new(str0m::crypto::from_feature_flags()),
             guests: vec![],
@@ -295,9 +312,11 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             b = b.enable_bwe(Some(Bitrate::kbps(k)));
         }
         let mut rtc = b.build(now);
-        let cand = Candidate::host(self.local, "udp")
-            .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
-        rtc.add_local_candidate(cand);
+        for addr in &self.advertise {
+            let cand = Candidate::host(*addr, "udp")
+                .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
+            rtc.add_local_candidate(cand);
+        }
         let answer = rtc
             .sdp_api()
             .accept_offer(offer)
@@ -395,7 +414,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             Receive {
                 proto: Protocol::Udp,
                 source,
-                destination: self.local,
+                destination: self.destination_for(source),
                 contents,
             },
         );
@@ -410,6 +429,38 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         g.poll_until_timeout(&self.socket, now);
         self.queue.extend(g.outbox.drain(..));
         self.events.extend(g.events.drain(..));
+    }
+
+    /// The advertised address a datagram from `source` is taken to have
+    /// arrived on (str0m's ICE agent drops requests not addressed to one of its
+    /// host candidates).
+    fn destination_for(&self, source: SocketAddr) -> SocketAddr {
+        if let [only] = self.advertise.as_slice() {
+            return *only;
+        }
+        let score = |a: &SocketAddr| -> Option<u32> {
+            let (same_loop, common) = match (a.ip(), source.ip()) {
+                (IpAddr::V4(l), IpAddr::V4(r)) => (
+                    l.is_loopback() == r.is_loopback(),
+                    (u32::from(l) ^ u32::from(r)).leading_zeros(),
+                ),
+                (IpAddr::V6(l), IpAddr::V6(r)) => (
+                    l.is_loopback() == r.is_loopback(),
+                    (u128::from(l) ^ u128::from(r)).leading_zeros(),
+                ),
+                _ => return None,
+            };
+            Some((u32::from(same_loop) << 8) + common)
+        };
+        let mut best: Option<(u32, SocketAddr)> = None;
+        for a in &self.advertise {
+            if let Some(s) = score(a)
+                && best.is_none_or(|(b, _)| s > b)
+            {
+                best = Some((s, *a));
+            }
+        }
+        best.map(|(_, a)| a).unwrap_or(self.local)
     }
 
     fn remove_gone(&mut self) {

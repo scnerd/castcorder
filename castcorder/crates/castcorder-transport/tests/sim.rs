@@ -3,7 +3,7 @@
 
 mod support;
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use castcorder_port_clock::{SimClock, SimClockConfig, SimTime};
@@ -382,4 +382,31 @@ fn a_guest_that_never_connects_times_out() {
     let _ = &mut g;
     w.run_until(Duration::from_secs(3), |w| w.gone(id).is_some());
     assert_eq!(w.gone(id).unwrap().1, GoneReason::ConnectTimeout);
+}
+
+/// A host on a wildcard-style socket advertises several addresses; each
+/// datagram is attributed to the advertised address nearest its source, so the
+/// guest connects through the reachable one and ignores the decoy.
+#[test]
+fn a_host_advertising_several_addresses_connects_through_the_matching_one() {
+    let mut w = World::new(HostConfig::default());
+    let socket = w.net.bind(ip(1));
+    let port = socket.local_addr().port();
+    w.host = Host::new(
+        socket,
+        w.time.clock(SimClockConfig::default()),
+        HostConfig {
+            advertise: vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 77, 7)), port),
+                SocketAddr::new(ip(1), port),
+            ],
+            ..HostConfig::default()
+        },
+    );
+    let (i, answer) = w.join("A");
+    assert!(answer.contains("192.168.77.7") && answer.contains("10.0.0.1"));
+    w.run_until(Duration::from_secs(5), |w| {
+        let id = w.id(i);
+        w.host.stats(id).unwrap().connected && w.g(i).channels_open()
+    });
 }

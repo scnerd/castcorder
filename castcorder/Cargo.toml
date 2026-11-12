@@ -8,6 +8,7 @@ default-members = [
   "crates/castcorder-app",
   "crates/castcorder-client",
   "crates/castcorder-core",
+  "crates/castcorder-host",
   "crates/castcorder-port-capture",
   "crates/castcorder-port-clock",
   "crates/castcorder-port-disk",

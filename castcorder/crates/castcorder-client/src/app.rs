@@ -899,6 +899,90 @@ fn db(x: f64) -> String {
     }
 }
 
+/// `method` on `path` of the page's own origin: the response text, or an
+/// error naming the path and the host's message.
+async fn host_request(method: &str, path: &str) -> Result<String, JsValue> {
+    let init = object();
+    set(&init, "method", method);
+    let resp = JsFuture::from(Promise::from(call(
+        &window(),
+        "fetch",
+        &[&JsValue::from_str(path), &init],
+    )?))
+    .await?;
+    let text = JsFuture::from(Promise::from(call(&resp, "text", &[])?)).await?;
+    let text = text.as_string().unwrap_or_default();
+    if get(&resp, "ok").is_truthy() {
+        Ok(text)
+    } else {
+        Err(JsValue::from_str(&format!("{path}: {text}")))
+    }
+}
+
+/// The producer controls (start and stop a take, the connected guests). The
+/// host decides who the producer is: `GET /role` says so only to a page loaded
+/// from the host machine's own localhost listener, and refuses the take and
+/// status endpoints to everyone else.
+#[component]
+fn Producer() -> impl IntoView {
+    let producer = RwSignal::new(false);
+    let take = RwSignal::new(String::new());
+    let guests = RwSignal::new(Vec::<String>::new());
+    let result = RwSignal::new(String::new());
+    let refresh = move || {
+        spawn_local(async move {
+            if let Ok(text) = host_request("GET", "/status").await
+                && let Ok(v) = js_sys::JSON::parse(&text)
+            {
+                take.set(string(&v, "take"));
+                guests.set(
+                    Array::from(&get(&v, "guests"))
+                        .iter()
+                        .filter_map(|g| g.as_string())
+                        .collect(),
+                );
+            }
+        })
+    };
+    spawn_local(async move {
+        let Ok(role) = host_request("GET", "/role").await else {
+            return;
+        };
+        if role.contains("\"producer\":true") {
+            producer.set(true);
+            refresh();
+            every(1000, refresh);
+        }
+    });
+    let post = move |path: &'static str| {
+        spawn_local(async move {
+            match host_request("POST", path).await {
+                Ok(t) => result.set(t),
+                Err(e) => result.set(describe(&e)),
+            }
+            refresh();
+        })
+    };
+    view! {
+        <Show when=move || producer.get()>
+            <h2>"Producer"</h2>
+            <p>
+                <button id="take-start" on:click=move |_| post("/take/start")>"Start take"</button>
+                " "
+                <button id="take-stop" on:click=move |_| post("/take/stop")>"Stop take"</button>
+                " Take: " <span id="take-status">{move || take.get()}</span>
+                " " <code id="take-result">{move || result.get()}</code>
+            </p>
+            <p>"Connected guests: " <span id="guest-count">{move || guests.get().len()}</span></p>
+            <ul id="guests">
+                <For each=move || guests.get() key=|g| g.clone() let:g>
+                    <li>{g}</li>
+                </For>
+            </ul>
+        </Show>
+    }
+}
+
 #[component]
 fn App() -> impl IntoView {
     let origin = window().location().origin().unwrap_or_default();
@@ -944,6 +1028,7 @@ fn App() -> impl IntoView {
             <button id="join" disabled=move || ui.joined.get() on:click=on_join>"Join"</button>
             <button id="leave" disabled=move || !ui.joined.get() on:click=move |_| leave(ui)>"Leave"</button>
         </p>
+        <Producer/>
         <p>"Connection: " <span id="state">{move || ui.connection.get()}</span>
            " | Participant: " <span id="participant">{move || ui.participant.get()}</span></p>
         <p>"Recording: " <span id="recording">{move || if is_recording() { "REC " } else { "" }}

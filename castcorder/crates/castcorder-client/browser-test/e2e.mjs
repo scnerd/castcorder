@@ -1,12 +1,15 @@
 // Real-browser test for the Browser Guest (castcorder-client), ADR 0003's real
-// boundary: the castcorder-transport browser_host example (real UDP socket,
-// system clock) serving the trunk build of the client, plus two headless
+// boundary: the castcorder-host binary (real UDP socket, system clock, bound to
+// loopback here) serving the trunk build of the client, plus two headless
 // Chromium guests.
 //
-// 1. Guest A is fed a deterministic WAV (--use-file-for-fake-audio-capture);
-//    guest B uses Chromium's default fake microphone. Both join.
+// 1. Guest A is fed a deterministic WAV (--use-file-for-fake-audio-capture) and
+//    loads the page from the host's localhost HTTP listener, so it is the
+//    producer; guest B uses Chromium's default fake microphone and loads the
+//    page over HTTPS (the self-signed certificate, errors ignored), so it gets
+//    no producer controls and the host refuses it the take endpoints. Both join.
 // 2. B receives A's forwarded audio (inbound RTP from A's stream rising).
-// 3. The host starts a take, waits ~5 s, stops it.
+// 3. A's producer controls start a take; ~5 s later they stop it.
 // 4. Each guest's outbox syncs its track and JSON sidecar into the host's
 //    library (--library test-results/library), verified; only then is the
 //    OPFS copy deleted, and the test waits until both guests' OPFS is empty.
@@ -36,8 +39,8 @@ const TAKE_SECONDS = 5;
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium } = await import('playwright');
 
-const exe = join(WORKSPACE, 'target', 'release', 'examples',
-  process.platform === 'win32' ? 'browser_host.exe' : 'browser_host');
+const exe = join(WORKSPACE, 'target', 'release',
+  process.platform === 'win32' ? 'castcorder-host.exe' : 'castcorder-host');
 const dist = join(CRATE, 'dist');
 if (!existsSync(exe)) { console.log('FAIL host binary missing: ' + exe); process.exit(1); }
 if (!existsSync(join(dist, 'index.html'))) { console.log('FAIL client not built: ' + dist); process.exit(1); }
@@ -60,27 +63,21 @@ async function waitFor(fn, what, timeout = 30000, interval = 200) {
   }
 }
 
-const host = spawn(exe, ['--dist', dist, '--library', LIBRARY], { stdio: ['ignore', 'pipe', 'pipe'] });
+const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--call', 'browser-test', '--bind', '127.0.0.1',
+  '--port', '0', '--http-port', '0', '--udp-port', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
 let hostLog = '';
 host.stderr.on('data', (d) => { hostLog += d.toString(); });
-const HTTP = await new Promise((resolve, reject) => {
+const [HTTP, HTTPS] = await new Promise((resolve, reject) => {
   let buf = '';
   const t = setTimeout(() => reject(new Error('host did not print HOST_READY')), 20000);
   host.stdout.on('data', (d) => {
     buf += d.toString();
-    const m = buf.match(/HOST_READY http=(\S+)/);
-    if (m) { clearTimeout(t); resolve(m[1]); }
+    const m = buf.match(/HOST_READY http=(\S+) https=(\S+)/);
+    if (m) { clearTimeout(t); resolve([m[1], m[2]]); }
   });
   host.on('exit', (c) => reject(new Error('host exited early with ' + c)));
 });
-console.log('host up at ' + HTTP);
-
-async function hostPost(path) {
-  const r = await fetch(HTTP + path, { method: 'POST' });
-  const body = await r.text();
-  if (!r.ok) throw new Error(path + ' -> ' + r.status + ' ' + body);
-  return JSON.parse(body);
-}
+console.log('host up at ' + HTTP + ' and ' + HTTPS);
 
 const BASE_ARGS = [
   '--use-fake-device-for-media-stream',
@@ -92,14 +89,14 @@ const BASE_ARGS = [
 const logs = { A: [], B: [] };
 const browsers = [];
 
-async function openGuest(name, extraArgs) {
+async function openGuest(name, extraArgs, base) {
   const browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
   browsers.push(browser);
-  const ctx = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const ctx = await browser.newContext({ permissions: ['microphone', 'camera'], ignoreHTTPSErrors: true });
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
-  await page.goto(HTTP + '/?name=' + name);
+  await page.goto(base + '/?name=' + name);
   await page.waitForSelector('#join');
   return page;
 }
@@ -147,9 +144,16 @@ function check(ok, what) {
 
 let passed = false;
 try {
-  const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV]);
-  const B = await openGuest('B', []);
+  const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV], HTTP);
+  const B = await openGuest('B', [], HTTPS);
   console.log('chromium ' + browsers[0].version());
+
+  // Producer controls: only on the page from the host machine's localhost.
+  await A.waitForSelector('#take-start', { timeout: 10000 });
+  await sleep(1000);
+  check((await B.locator('#take-start').count()) === 0, 'producer controls on the localhost page only, not on the HTTPS page');
+  const refused = await B.evaluate(async () => (await fetch('/take/start', { method: 'POST' })).status);
+  check(refused === 403, 'host refuses take control over HTTPS (' + refused + ')');
 
   for (const [n, p] of [['A', A], ['B', B]]) {
     await p.click('#join');
@@ -171,15 +175,19 @@ try {
   await waitFor(async () => (await text(A, '#level-db')) !== '-inf dBFS', 'A level meter');
   await sleep(1000);
 
-  const started = await hostPost('/take/start');
-  check(started.take === 1, 'host started take ' + started.take);
+  await A.click('#take-start');
+  await waitFor(async () => (await text(A, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
+  check(true, 'producer started take 1');
   for (const [n, p] of [['A', A], ['B', B]]) {
     await waitFor(async () => { await noErrors(p, n); return (await text(p, '#recording')).includes('recording take'); },
       'guest ' + n + ' recording', 10000);
   }
   await sleep(TAKE_SECONDS * 1000);
-  const stopped = await hostPost('/take/stop');
-  check(stopped.take === 1, 'host stopped take ' + stopped.take);
+  await A.click('#take-stop');
+  await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);
+  check(true, 'producer stopped take 1');
+  const guestsSeen = await text(A, '#guests');
+  check(guestsSeen.includes('A (guest') && guestsSeen.includes('B (guest'), 'producer lists the connected guests: ' + guestsSeen);
 
   // The outbox: after the take, each guest's track (and its JSON sidecar) is
   // pulled into the host's library, verified, and only then deleted from OPFS.
