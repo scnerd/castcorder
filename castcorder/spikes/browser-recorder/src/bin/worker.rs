@@ -106,6 +106,7 @@ struct Active {
 }
 
 thread_local! {
+    static READER: RefCell<Option<JsValue>> = const { RefCell::new(None) };
     static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
 }
 
@@ -317,7 +318,7 @@ async fn start(msg: JsValue) -> Result<(), JsValue> {
     );
     tick.forget();
 
-    if transport != "sab" {
+    if transport == "msg" {
         let port: MessagePort = get(&msg, "port").dyn_into()?;
         let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
             let d = e.data();
@@ -348,10 +349,97 @@ async fn start(msg: JsValue) -> Result<(), JsValue> {
         active.port = Some(port);
     }
     ACTIVE.with(|a| *a.borrow_mut() = Some(active));
+    if transport == "mstp" {
+        let track = get(&msg, "stream");
+        spawn_local(async move {
+            if let Err(e) = read_track(track).await {
+                post_error("mstp", &e);
+                ACTIVE.with(|a| {
+                    if let Some(a) = a.borrow_mut().as_mut() {
+                        a.ended = true
+                    }
+                });
+                finish_if_ended();
+            }
+        });
+    }
     let o = Object::new();
     set(&o, "type", "recording");
     post(&o);
     Ok(())
+}
+
+/// Capture-clock path: MediaStreamTrackProcessor (its readable is transferred here) yields AudioData
+/// straight from the capture pipeline (no AudioContext, no output clock).
+async fn read_track(readable: JsValue) -> Result<(), JsValue> {
+    let get_reader: js_sys::Function = get(&readable, "getReader").dyn_into()?;
+    let reader: JsValue = get_reader.call0(&readable)?;
+    READER.with(|r| *r.borrow_mut() = Some(reader.clone()));
+    let read: js_sys::Function = get(&reader, "read").dyn_into()?;
+    let opts = Object::new();
+    set(&opts, "format", "f32-planar");
+    let (mut first_ts, mut last_dev, mut total, mut jumps) = (None::<f64>, 0.0f64, 0u64, 0u32);
+    let mut inter: Vec<f32> = Vec::new();
+    loop {
+        let r = JsFuture::from(js_sys::Promise::from(read.call0(&reader)?)).await?;
+        if get(&r, "done").is_truthy() {
+            break;
+        }
+        let ad = get(&r, "value");
+        let n = get(&ad, "numberOfFrames").as_f64().unwrap_or(0.0) as usize;
+        let ch = get(&ad, "numberOfChannels").as_f64().unwrap_or(0.0) as usize;
+        let ts = get(&ad, "timestamp").as_f64().unwrap_or(0.0);
+        let copy: js_sys::Function = get(&ad, "copyTo").dyn_into()?;
+        inter.clear();
+        inter.resize(n * ch, 0.0);
+        let plane = Float32Array::new_with_length(n as u32);
+        let mut plane_buf = vec![0f32; n];
+        for c in 0..ch {
+            set(&opts, "planeIndex", c as u32);
+            copy.call2(&ad, &plane, &opts)?;
+            plane.copy_to(&mut plane_buf);
+            for i in 0..n {
+                inter[i * ch + c] = plane_buf[i];
+            }
+        }
+        if let Ok(close) = get(&ad, "close").dyn_into::<js_sys::Function>() {
+            let _ = close.call0(&ad);
+        }
+        let f0 = *first_ts.get_or_insert(ts);
+        ACTIVE.with(|a| {
+            if let Some(a) = a.borrow_mut().as_mut() {
+                // Timestamp deviation from an ideal frame counter (microseconds).
+                let dev = (ts - f0) - total as f64 * 1e6 / a.rate as f64;
+                // Informational only: AudioData timestamps are capture times and jitter
+                // independently of the sample stream, so jumps are logged, not counted as gaps.
+                if (dev - last_dev).abs() > 2000.0 {
+                    jumps += 1;
+                    set(&a.meta, "mstpTsJumps", jumps as f64);
+                    set(&a.meta, "mstpTsJumpDevUs", dev);
+                }
+                last_dev = dev;
+                set(&a.meta, "mstpLastTsDevUs", dev);
+                a.append(&inter);
+            }
+        });
+        total += n as u64;
+    }
+    READER.with(|r| r.borrow_mut().take());
+    ACTIVE.with(|a| {
+        if let Some(a) = a.borrow_mut().as_mut() {
+            a.ended = true
+        }
+    });
+    finish_if_ended();
+    Ok(())
+}
+
+fn stop_reader() {
+    if let Some(r) = READER.with(|r| r.borrow().clone()) {
+        if let Ok(f) = get(&r, "cancel").dyn_into::<js_sys::Function>() {
+            let _ = f.call0(&r);
+        }
+    }
 }
 
 async fn entry_names(dir: &FileSystemDirectoryHandle) -> Result<Vec<String>, JsValue> {
@@ -505,6 +593,10 @@ fn main() {
                 "list" => list().await,
                 "flac" => flac(msg).await,
                 "delete" => remove(msg).await,
+                "stop" => {
+                    stop_reader();
+                    Ok(())
+                }
                 other => Err(JsValue::from_str(&format!("unknown cmd {other}"))),
             };
             if let Err(e) = r {

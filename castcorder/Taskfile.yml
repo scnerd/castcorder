@@ -18,8 +18,10 @@ tasks:
   clippy:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
-      - cargo clippy --workspace --all-targets --locked -- -D warnings
-      - cargo clippy -p castcorder-protocol -p castcorder-core --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
+      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      # The Browser Guest: its UI and worker binaries only exist on wasm32.
+      - cargo clippy -p castcorder-client --lib --bins --target wasm32-unknown-unknown --locked -- -D warnings
 
   lint:
     desc: Formatting and clippy (what the CI check job runs)
@@ -30,10 +32,73 @@ tasks:
   test:unit:
     desc: Tiers 1-2 - unit, simulation, and doc tests (no Docker)
     cmds:
-      - cargo test --workspace --locked
+      - cargo test --workspace --exclude castcorder-capture-gst --locked
 
   check:
     desc: Formatting, clippy, and tiers 1-2 tests; no Docker needed
     cmds:
       - task: lint
       - task: test:unit
+
+  test:gst:
+    desc: castcorder-capture-gst against a real GStreamer (needs the GStreamer runtime and development files, and pkg-config)
+    summary: |
+      Not part of `task check`: CI and other machines may lack GStreamer. On Windows
+      install the MSVC runtime and development packages; the installer sets
+      GSTREAMER_1_0_ROOT_MSVC_X86_64, PKG_CONFIG_PATH (its lib\pkgconfig) and Path
+      (its bin, which holds pkg-config.exe) -- open a new shell afterwards.
+      The microphone test skips itself when there is no input device.
+    cmds:
+      - cargo clippy -p castcorder-capture-gst --all-targets -- -D warnings
+      - cargo test -p castcorder-capture-gst -- --nocapture
+
+  test:browser:transport:
+    desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)
+    summary: |
+      Builds the browser_host example (real UDP socket, system clock), then runs
+      crates/castcorder-transport/browser-test/e2e.mjs with Playwright installed in
+      that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
+      Run from the repo root: task test:browser
+    dir: crates/castcorder-transport/browser-test
+    cmds:
+      - cargo build --release --locked -p castcorder-transport --example browser_host
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node e2e.mjs
+
+  test:browser:client:
+    desc: The Browser Guest (castcorder-client) against castcorder-host with 2 headless Chromium guests (installs Playwright and Chromium locally on first run)
+    summary: |
+      Builds castcorder-host and the client with trunk (dist/), then runs
+      crates/castcorder-client/browser-test/e2e.mjs with Playwright installed in
+      that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
+      The host (bound to loopback) serves dist/ over localhost HTTP to guest A, the
+      producer, and over HTTPS to guest B; A is fed a deterministic WAV, both join,
+      B must receive A's audio, and A's take must come back out of OPFS bit-exact.
+      Then the recording fallbacks: `fallback` (Chromium with
+      MediaStreamTrackProcessor deleted from window) and `firefox` (two headless
+      Firefox guests, AudioWorklet capture; the host binds 0.0.0.0 and advertises
+      the LAN address, as `task host` does, and the run is skipped without one).
+      Run from the repo root with: task test:browser
+    dir: crates/castcorder-client/browser-test
+    cmds:
+      - cargo build --release --locked -p castcorder-host
+      - cd .. && trunk build --release
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node e2e.mjs
+      - node e2e.mjs fallback
+      - node e2e.mjs firefox
+
+  host:
+    desc: Run a call on this machine's local network (builds the client and the host, then runs castcorder-host)
+    summary: |
+      Builds the Browser Guest with trunk (release) and runs castcorder-host,
+      which prints the join links and the library path. Open the localhost link
+      on this machine for the producer controls; guests on the same network open
+      the https link. Stop with Ctrl+C. Pass host flags after --, e.g.
+      task host -- --call my-show --library D:\Podcasts
+      Files land in %USERPROFILE%\Castcorder\<call>\ by default.
+    cmds:
+      - cd crates/castcorder-client && trunk build --release
+      - cargo run --release --locked -p castcorder-host -- --dist crates/castcorder-client/dist {{.CLI_ARGS}}

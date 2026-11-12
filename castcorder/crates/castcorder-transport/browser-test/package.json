@@ -1,0 +1,13 @@
+{
+  "name": "castcorder-transport-browser-test",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "setup": "node setup.mjs",
+    "test": "node e2e.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0"
+  }
+}

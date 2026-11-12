@@ -71,3 +71,13 @@ Soak failure with `?keepalive=1` (an inaudible DC offset on the output): renderi
 6. Treat `persist()` as best effort.
 7. Replace "refuse recording in incognito" with a capability probe plus a warning.
 8. Test on real hardware: Windows raw mode, Firefox, and Safari's double open.
+
+## Clock fix: MediaStreamTrackProcessor path (cast-6ij)
+
+Select with `?transport=mstp` (the AudioWorklet paths `sab` and `msg` are unchanged). No AudioContext is created for recording, so the output clock is out of the loop.
+
+- **Wiring.** Chromium refuses to transfer a MediaStreamTrack to a worker (`DataCloneError: does not have a transferable type`). Instead the main thread clones the raw track, builds `MediaStreamTrackProcessor({track})` and transfers its `readable` stream to the Rust worker, which reads AudioData, copies each plane as f32-planar, interleaves and appends through the existing OPFS writer. Main-thread cost is one small function in `src/main.rs`; the reader is `read_track` in `src/bin/worker.rs`. No new JS.
+- **150 s soak (SOAK_SECONDS=150, headless Chromium, fake device).** 150.22 s recorded (6624702 frames) in 154.4 s wall. Both channels bit-exact, 0 dropped, 0 duplicated, 0 inserted, 0 discontinuities, 0 late glitches. maxFlushMs 6.6, maxWriteMs 2.1. The worklet paths failed this test.
+- **10 s test.** Bit-exact, 0 glitches, FLAC roundtrip lossless, download ok.
+- **Timestamps.** AudioData timestamps are capture times and deviate from an ideal frame counter (about -70 ms after the first packets with the fake device) even though the samples are exact. They are logged in the sidecar (`mstpTsJumps`, `mstpLastTsDevUs`), not used to detect gaps. Gap detection on this path must come from timestamps only if tolerance is calibrated on real hardware.
+- **Not covered.** Fake-device input only; a real microphone clock was not tested. No live meter in mstp mode. Crash test not run on this path. Run with `TRANSPORTS=mstp` to restrict the record and soak tests to it (default is `sab,msg`).

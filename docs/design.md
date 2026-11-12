@@ -44,7 +44,7 @@ A free, open-source desktop app for recording podcasts, at `castcorder.app`. Par
 
 The outbox syncs whenever the host is connected and no take is recording: audio before video, oldest take first. Sync and live traffic compete, with priority hints where the platform honours them. Transfer is our own verified, resumable, range-based protocol over the existing connection, sized to suit S3 multipart later.
 
-Browser guests store tracks in the browser's private filesystem: persistent storage is requested (best effort), and the guest is told to return in the same browser to finish syncing. Chromium browsers are the supported target; Firefox and Safari are a medium-low priority.
+Browser guests store tracks in the browser's private filesystem: persistent storage is requested (best effort), and the guest is told to return in the same browser to finish syncing. Chromium browsers and Firefox are supported targets; Safari is a medium-low priority. Chromium records on the microphone's clock (MediaStreamTrackProcessor); other browsers use an AudioWorklet fallback, with any detected drift written to the track's metadata.
 
 ## Timing
 
@@ -65,7 +65,7 @@ Each device continuously measures its clock offset to the host and logs it besid
 - Rendezvous: a small Rust WebSocket mailbox. The host holds a connection while running; guests send connection info encrypted to the host key.
 - Relay: stock coturn, with short-lived credentials minted by the rendezvous per host key.
 - Both are rate-limited per host key and per IP address. Charging may attach to the host key later.
-- No telemetry. Logs stay local, with an export-diagnostics action.
+- Structured logs in every component, correlated by call, device and take, kept locally in rotating files. For now, guests' logs sync automatically to the host as files through the outbox, disclosed at join, and land beside the call's takes. No third-party destination.
 
 ## Repository and delivery
 

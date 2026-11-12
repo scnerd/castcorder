@@ -10,3 +10,93 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# Two wasm binaries built by trunk (see index.html): the Leptos UI on the main
+# thread and the storage worker. Natively both are empty stubs.
+[[bin]]
+name = "app"
+path = "src/bin/app.rs"
+
+[[bin]]
+name = "worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+castcorder-core.workspace = true
+castcorder-port-disk.workspace = true
+castcorder-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Browser-only dependencies; the native build compiles only the pure modules.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+js-sys = "0.3"
+leptos = { version = "0.8", features = ["csr"] }
+tracing-wasm = "0.2"
+# Pinned to the wasm-bindgen CLI trunk uses (Trunk.toml [tools]).
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+  "AudioContext",
+  "AudioContextOptions",
+  "AudioContextState",
+  "AudioDestinationNode",
+  "AudioNode",
+  "AudioParam",
+  "AudioScheduledSourceNode",
+  "AudioWorklet",
+  "AudioWorkletNode",
+  "AudioWorkletNodeOptions",
+  "BaseAudioContext",
+  "ChannelCountMode",
+  "ChannelInterpretation",
+  "ConstantSourceNode",
+  "DedicatedWorkerGlobalScope",
+  "Document",
+  "Element",
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemReadWriteOptions",
+  "FileSystemSyncAccessHandle",
+  "HtmlAudioElement",
+  "HtmlElement",
+  "HtmlMediaElement",
+  "Location",
+  "MediaDevices",
+  "MediaStream",
+  "MediaStreamConstraints",
+  "MediaStreamTrack",
+  "GainNode",
+  "MediaStreamAudioSourceNode",
+  "MediaTrackSettings",
+  "MessageChannel",
+  "MessageEvent",
+  "MessagePort",
+  "Navigator",
+  "Performance",
+  "RtcDataChannel",
+  "RtcDataChannelState",
+  "RtcDataChannelType",
+  "RtcPeerConnection",
+  "RtcPeerConnectionState",
+  "RtcRtpTransceiver",
+  "RtcRtpTransceiverDirection",
+  "RtcRtpTransceiverInit",
+  "RtcSdpType",
+  "RtcSessionDescription",
+  "RtcSessionDescriptionInit",
+  "RtcTrackEvent",
+  "Storage",
+  "StorageManager",
+  "UrlSearchParams",
+  "Window",
+  "Worker",
+  "Worklet",
+  "WorkerNavigator",
+  "WorkerOptions",
+] }

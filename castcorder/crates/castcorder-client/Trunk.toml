@@ -1,0 +1,7 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[tools]
+# Must match the wasm-bindgen crate pinned in Cargo.toml.
+wasm_bindgen = "0.2.129"

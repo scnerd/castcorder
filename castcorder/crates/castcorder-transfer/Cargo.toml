@@ -1,0 +1,18 @@
+[package]
+name = "castcorder-transfer"
+description = "Verified, resumable blob transfer on bao-tree over an ordered message channel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+castcorder-port-disk.workspace = true
+castcorder-protocol.workspace = true
+bao-tree.workspace = true
+blake3.workspace = true

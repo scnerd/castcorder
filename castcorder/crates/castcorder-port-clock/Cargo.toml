@@ -1,0 +1,12 @@
+[package]
+name = "castcorder-port-clock"
+description = "Clock port: monotonic and wall time, real and simulated with offset and drift"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

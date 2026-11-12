@@ -1,6 +1,24 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# castcorder-capture-gst needs a GStreamer install, so plain `cargo build` skips it.
+# Tasks that use --workspace must add `--exclude castcorder-capture-gst`; `task test:gst`
+# builds it.
+default-members = [
+  "crates/castcorder-app",
+  "crates/castcorder-client",
+  "crates/castcorder-core",
+  "crates/castcorder-host",
+  "crates/castcorder-port-capture",
+  "crates/castcorder-port-clock",
+  "crates/castcorder-port-disk",
+  "crates/castcorder-port-net",
+  "crates/castcorder-protocol",
+  "crates/castcorder-recorder",
+  "crates/castcorder-rendezvous",
+  "crates/castcorder-transfer",
+  "crates/castcorder-transport",
+]
 # Spikes are throwaway experiments with their own manifests; keep them out of the workspace.
 exclude = ["spikes"]
 
@@ -20,3 +38,33 @@ missing_docs = "warn"
 castcorder-protocol = { path = "crates/castcorder-protocol" }
 castcorder-core = { path = "crates/castcorder-core" }
 castcorder-client = { path = "crates/castcorder-client" }
+castcorder-port-clock = { path = "crates/castcorder-port-clock" }
+castcorder-port-net = { path = "crates/castcorder-port-net" }
+castcorder-port-disk = { path = "crates/castcorder-port-disk" }
+castcorder-port-capture = { path = "crates/castcorder-port-capture" }
+castcorder-capture-gst = { path = "crates/castcorder-capture-gst" }
+castcorder-recorder = { path = "crates/castcorder-recorder" }
+# Pure-Rust FLAC, as in the browser-recorder spike; keep behind castcorder-recorder.
+flacenc = { version = "0.5.1", default-features = false }
+claxon = "0.4"
+# Pinned as in the transfer spike (spikes/transfer/FINDINGS.md); keep behind this crate.
+bao-tree = { version = "0.17", default-features = false, features = [
+  "validate",
+] }
+blake3 = { version = "1.8", default-features = false, features = ["std"] }
+castcorder-transfer = { path = "crates/castcorder-transfer" }
+serde = { version = "1", default-features = false, features = [
+  "derive",
+  "alloc",
+] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+castcorder-transport = { path = "crates/castcorder-transport" }
+# Pinned as in the SFU spike (spikes/sfu/FINDINGS.md): str0m is pre-1.0. Keep it
+# behind castcorder-transport. Never enable its openssl backend.
+str0m = { version = "=0.25.0", default-features = false }
+tracing = "0.1"
+serde_json = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "registry",
+  "std",
+] }
