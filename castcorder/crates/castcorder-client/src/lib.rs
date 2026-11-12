@@ -32,6 +32,8 @@ pub mod app;
 #[cfg(target_arch = "wasm32")]
 mod js;
 #[cfg(target_arch = "wasm32")]
+mod logfiles;
+#[cfg(target_arch = "wasm32")]
 mod logging;
 #[cfg(target_arch = "wasm32")]
 pub mod outbox;

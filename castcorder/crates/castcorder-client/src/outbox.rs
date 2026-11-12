@@ -30,7 +30,9 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::FileSystemSyncAccessHandle;
 
 use crate::js::{describe, get, num, object, set, string};
-use crate::worker::{at, entry_names, is_busy, list, open_sync, post, read_all, tracks_dir};
+use crate::worker::{
+    at, entry_names, is_busy, list, named_dir, open_sync, post, read_all, tracks_dir,
+};
 
 /// An OPFS sync access handle as a [`StorageFile`]. JS handles are not `Send`,
 /// so the handle lives in a thread-local registry and this is only its id.
@@ -215,6 +217,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             warn!(track = %track, error = %e, "track not added to outbox");
         }
     }
+    add_log_files().await?;
     let offers = Array::new();
     OUTBOX.with(|o| {
         if let Some(o) = o.borrow().as_ref() {
@@ -270,9 +273,16 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
     if confirmed.is_empty() {
         return Ok(());
     }
-    let dir = tracks_dir().await?;
     for c in confirmed {
-        let file = if c.format == "json" {
+        let log = c.kind == SourceKind::Log;
+        let dir = if log {
+            named_dir(crate::logfiles::LOGS_DIR).await?
+        } else {
+            tracks_dir().await?
+        };
+        let file = if log {
+            format!("{}.jsonl", c.name)
+        } else if c.format == "json" {
             format!("{}.json", c.name.trim_end_matches("-sidecar"))
         } else {
             format!("{}.{}", c.name, c.format)
@@ -286,6 +296,66 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
         post(&o);
     }
     list().await
+}
+
+/// Add every closed log file not yet in the outbox (the current one may still
+/// grow, and a file must not change after it was added). Logs go last: the host
+/// pulls them after tracks.
+async fn add_log_files() -> Result<(), JsValue> {
+    let Some(device) = castcorder_core::logging::LogContext::get(
+        &crate::logging::context(),
+        castcorder_core::logging::DEVICE,
+    )
+    .filter(|d| !d.is_empty()) else {
+        return Ok(());
+    };
+    crate::logfiles::lock().await;
+    let r = add_log_files_locked(&device).await;
+    crate::logfiles::unlock();
+    r
+}
+
+async fn add_log_files_locked(device: &str) -> Result<(), JsValue> {
+    let dir = named_dir(crate::logfiles::LOGS_DIR).await?;
+    let current = crate::logfiles::current_name();
+    for n in entry_names(&dir)
+        .await?
+        .iter()
+        .filter(|n| n.ends_with(".jsonl"))
+    {
+        let stem = n.trim_end_matches(".jsonl").to_string();
+        if current.as_deref() == Some(n.as_str())
+            || OUTBOX.with(|o| o.borrow().as_ref().is_some_and(|o| o.contains(&stem)))
+        {
+            continue;
+        }
+        let Ok(h) = open_sync(&dir, n, false).await else {
+            continue;
+        };
+        if h.get_size().unwrap_or(0.0) == 0.0 {
+            h.close();
+            continue;
+        }
+        let offer = TrackOffer {
+            device: device.to_string(),
+            take: TakeId(0),
+            source: SourceId("log".into()),
+            kind: SourceKind::Log,
+            name: stem.clone(),
+            size: 0,
+            root: [0; 32],
+            format: "jsonl".into(),
+        };
+        let file = OpfsFile::register(n.clone(), h);
+        let r = OUTBOX.with(|o| {
+            let mut o = o.borrow_mut();
+            o.as_mut().expect("created by prepare").add(offer, file)
+        });
+        if let Err(e) = r {
+            warn!(file = %n, error = %e, "log file not added to outbox");
+        }
+    }
+    Ok(())
 }
 
 /// `xfer-pull {room}`.

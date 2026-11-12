@@ -28,6 +28,7 @@ castcorder-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # Browser-only dependencies; the native build compiles only the pure modules.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

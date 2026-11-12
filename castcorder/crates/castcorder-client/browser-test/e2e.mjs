@@ -14,10 +14,14 @@
 //    (Chrome's int16 -> float scaling, every frame aligned, no dropped,
 //    duplicated or inserted frames), about 5 s long, 44.1 kHz stereo.
 //
+// 6. Each guest's closed log files arrive in <call>/logs on the host (lowest priority,
+//    after the tracks), are valid JSON lines with the call and device fields, and
+//    the merge-logs example prints them with the host's own log merged by time.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -197,6 +201,52 @@ try {
     const left = await waitFor(async () => ((await opfsNames(p)).length === 0 ? [] : null), 'guest ' + n + ' OPFS emptied after sync', 20000);
     check(left.length === 0, 'guest ' + n + ' deleted its local copies after verified receipt');
   }
+  // Logs (cast-zoa): each guest closed its log file when the take stopped and
+  // offered it as the lowest-priority outbox item; the host stores it under
+  // <call>/logs/<device>-<name>.jsonl beside its own host-<start>.jsonl.
+  const LOGS_DIR = join(LIBRARY, 'browser-test', 'logs');
+  const guestLogFiles = () => (existsSync(LOGS_DIR) ? readdirSync(LOGS_DIR) : [])
+    .filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl' && !f.startsWith('host-'));
+  const devicesWithLogs = () => new Set(guestLogFiles().map((f) => f.split('-log-')[0]));
+  await waitFor(async () => {
+    const m = join(LOGS_DIR, 'manifest.jsonl');
+    const verified = existsSync(m)
+      ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
+    return verified >= 2 && devicesWithLogs().size >= 2;
+  }, 'both guests\' log files verified on the host', 60000, 250);
+  const logFiles = readdirSync(LOGS_DIR).sort();
+  console.log('host logs: ' + logFiles.join(' '));
+  check(devicesWithLogs().size >= 2 && !logFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
+    'log files of ' + devicesWithLogs().size + ' guest devices arrived in <call>/logs, with no transfer state left');
+  check(logFiles.some((f) => f.startsWith('host-') && f.endsWith('.jsonl')), 'the host wrote its own host-<start>.jsonl');
+  let withBoth = 0, parsed = 0;
+  for (const f of logFiles.filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl')) {
+    const lines = readFileSync(join(LOGS_DIR, f), 'utf8').split('\n').filter((l) => l.length > 0);
+    let ok = lines.length > 0;
+    for (const l of lines) {
+      try {
+        const v = JSON.parse(l);
+        ok = ok && typeof v.ts === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(v.ts)
+          && typeof v.mono_ms === 'number' && typeof v.level === 'string' && typeof v.target === 'string'
+          && typeof v.message === 'string' && typeof v.fields === 'object';
+        if (!f.startsWith('host-') && v.fields.call && v.fields.device) withBoth++;
+      } catch { ok = false; }
+    }
+    parsed += ok ? 1 : 0;
+    if (!ok) console.log('BAD log file ' + f);
+  }
+  check(parsed === logFiles.filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl').length,
+    'every log file is valid JSON lines in the shared shape');
+  check(withBoth > 0, 'guest log lines carry the call and device fields (' + withBoth + ' lines)');
+  const merged = spawnSync('cargo', ['run', '--quiet', '-p', 'castcorder-core', '--example', 'merge-logs', '--', LOGS_DIR],
+    { cwd: join(WORKSPACE), encoding: 'utf8', shell: process.platform === 'win32' });
+  const mergedLines = (merged.stdout || '').split('\n').filter((l) => l.length > 0);
+  writeFileSync(join(RESULTS, 'merged-logs.txt'), merged.stdout || '');
+  const stamps = mergedLines.map((l) => l.split(' ')[0]);
+  check(merged.status === 0 && mergedLines.length > 10 && stamps.every((s, i) => i === 0 || stamps[i - 1] <= s)
+    && mergedLines.some((l) => l.includes('[host host]')) && mergedLines.some((l) => !l.includes('[host host]')),
+    'merge-logs prints host and guest lines merged by time (' + mergedLines.length + ' lines)');
+
   const hostFiles = readdirSync(TAKE_DIR).sort();
   console.log('host take01: ' + hostFiles.join(' '));
   check(['take01_A_mic.json', 'take01_A_mic.wav', 'take01_B_mic.json', 'take01_B_mic.wav'].every((f) => hostFiles.includes(f))

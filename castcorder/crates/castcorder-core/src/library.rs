@@ -3,6 +3,8 @@
 //! # Layout
 //!
 //! ```text
+//! <library>/<call>/logs/<device>-<file>.jsonl      a guest log file (SourceKind::Log,
+//!                                                  take 0; manifest.jsonl beside it)
 //! <library>/<call>/takeNN/manifest.jsonl          the take's manifest
 //! <library>/<call>/takeNN/takeNN_<who>_<src>.wav  a track, received in place
 //!                         ... .wav.obao, .wav.journal   while it is incomplete
@@ -34,7 +36,7 @@ use std::io;
 
 use castcorder_port_disk::{Storage, StorageFile};
 use castcorder_protocol::rpc::MessageChannel;
-use castcorder_protocol::{TakeId, TrackOffer};
+use castcorder_protocol::{SourceKind, TakeId, TrackOffer};
 use castcorder_transfer::receiver::{Receiver, ReceiverConfig, ReceiverStores, RecvError, State};
 use castcorder_transfer::wire::Msg;
 use serde::{Deserialize, Serialize};
@@ -86,6 +88,15 @@ impl<S: Storage> Take<S> {
         self.log.sync()?;
         self.log_len += line.len() as u64;
         Ok(())
+    }
+}
+
+/// The directory of a take; take 0 (logs) is `logs`.
+fn take_dir_name(take: TakeId) -> String {
+    if take.0 == 0 {
+        "logs".into()
+    } else {
+        format!("take{:02}", take.0)
     }
 }
 
@@ -144,7 +155,7 @@ impl<S: Storage> Library<S> {
     }
 
     fn load_take(&self, take: TakeId) -> io::Result<Take<S>> {
-        let dir = self.dir.subdir(&format!("take{:02}", take.0))?;
+        let dir = self.dir.subdir(&take_dir_name(take))?;
         let existed = dir.exists(MANIFEST)?;
         let mut log = dir.open(MANIFEST)?;
         if !existed {
@@ -214,10 +225,11 @@ impl<S: Storage> Library<S> {
     /// existing entry. `participant` names the file.
     pub fn offer(&mut self, participant: &str, offer: &TrackOffer) -> io::Result<ManifestEntry> {
         let call = self.call.clone();
-        if offer.take.0 == 0 || offer.device.is_empty() || offer.name.is_empty() {
+        let log = offer.kind == SourceKind::Log;
+        if (offer.take.0 == 0) != log || offer.device.is_empty() || offer.name.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "offer needs a take, a device and a name",
+                "offer needs a take (logs: take 0), a device and a name",
             ));
         }
         let t = self.take(offer.take)?;
@@ -243,7 +255,18 @@ impl<S: Storage> Library<S> {
             } else {
                 format!("{who}-{n}")
             };
-            let f = format!("take{:02}_{who}_{src}.{ext}", offer.take.0);
+            let f = if log {
+                // Logs: <device>-<log name>.jsonl, beside the takes, in <call>/logs/.
+                let name = clean(&offer.name, 64, "log");
+                format!("{}-{name}.{ext}", clean(&offer.device, 32, "device"))
+            } else {
+                format!("take{:02}_{who}_{src}.{ext}", offer.take.0)
+            };
+            let f = if n == 1 || !log {
+                f
+            } else {
+                format!("{n}-{f}")
+            };
             let taken = t.entries.values().any(|e| e.file == f)
                 || t.dir.exists(&f)?
                 || sidecars(&f).iter().any(|s| t.dir.exists(s).unwrap_or(true));

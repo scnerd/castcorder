@@ -16,5 +16,6 @@
 //! - [`sync`]: what both sides share (geometry, ordering).
 
 pub mod library;
+pub mod logging;
 pub mod outbox;
 pub mod sync;

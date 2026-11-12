@@ -43,6 +43,9 @@ pub enum SourceKind {
     Audio,
     /// A webcam or other video input.
     Video,
+    /// A closed log file (JSON lines). Always appended last: postcard encodes
+    /// the variant index.
+    Log,
 }
 
 /// One source as listed to a client.
@@ -336,6 +339,9 @@ mod tests {
         wire.extend([0; 32]);
         wire.push(0);
         assert_eq!(encode(&Request::OfferTrack(offer)), wire);
+        assert_eq!(encode(&SourceKind::Audio), vec![0]);
+        assert_eq!(encode(&SourceKind::Video), vec![1]);
+        assert_eq!(encode(&SourceKind::Log), vec![2]);
         assert_eq!(
             encode(&Response::TrackAccepted {
                 file: String::new(),

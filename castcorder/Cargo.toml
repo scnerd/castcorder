@@ -63,3 +63,7 @@ castcorder-transport = { path = "crates/castcorder-transport" }
 str0m = { version = "=0.25.0", default-features = false }
 tracing = "0.1"
 serde_json = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "registry",
+  "std",
+] }

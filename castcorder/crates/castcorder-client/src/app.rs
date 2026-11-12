@@ -185,6 +185,24 @@ fn post_worker(msg: &JsValue, transfer: Option<&Array>) {
     });
 }
 
+/// Ship the page's buffered log lines to the worker, which writes them to its
+/// OPFS log files; with `rotate`, have it close the current file too (so it
+/// can be offered to the host).
+fn flush_logs(rotate: bool) {
+    if with_engine(|e| e.worker.is_none()) {
+        return;
+    }
+    let text = crate::logging::take_text();
+    if !text.is_empty() {
+        let msg = worker_cmd("log");
+        set(&msg, "text", text);
+        post_worker(&msg, None);
+    }
+    if rotate {
+        post_worker(&worker_cmd("log-rotate"), None);
+    }
+}
+
 fn worker_cmd(cmd: &str) -> JsValue {
     let o = object();
     set(&o, "cmd", cmd);
@@ -551,6 +569,7 @@ fn stop_track(take: TakeId) {
         e.ctx.clone()
     });
     info!(call = %ctx.call, device = %ctx.device, take = take.0, "take stopped: closing track");
+    flush_logs(false);
     post_worker(&worker_cmd("stop"), None);
 }
 
@@ -687,6 +706,13 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     };
     info!(call = %ctx.call, device = %ctx.device, name = %name, "joining");
     with_engine(|e| e.ctx = ctx.clone());
+    let lc = crate::logging::context();
+    lc.set(castcorder_core::logging::CALL, &ctx.call);
+    lc.set(castcorder_core::logging::DEVICE, &ctx.device);
+    let msg = worker_cmd("log-context");
+    set(&msg, "call", ctx.call.as_str());
+    set(&msg, "device", ctx.device.as_str());
+    post_worker(&msg, None);
     ui.joined.set(true);
     ui.connection.set("opening microphones".into());
 
@@ -837,6 +863,8 @@ fn leave(ui: Ui) {
     }
     post_worker(&worker_cmd("xfer-reset"), None);
     post_worker(&worker_cmd("close-source"), None);
+    // Last: close this session's log file so it can be offered at the next join.
+    flush_logs(true);
     for id in engine.timers {
         window().clear_interval_with_handle(id);
     }
@@ -943,6 +971,7 @@ fn App() -> impl IntoView {
 /// Entry point of the UI binary.
 pub fn main() {
     console_error_panic_hook::set_once();
-    crate::logging::init();
+    crate::logging::init("page");
     leptos::mount::mount_to_body(App);
+    every(500, || flush_logs(false));
 }

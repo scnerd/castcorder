@@ -35,12 +35,13 @@ impl SyncConfig {
     }
 }
 
-/// The one ordering rule of the outbox: audio before video, oldest take first
+/// The one ordering rule of the outbox: audio, then video, then logs; oldest take first
 /// (then by name, for determinism). Smaller sorts first.
 pub fn sync_order(offer: &TrackOffer) -> (u8, u32, String) {
     let kind = match offer.kind {
         SourceKind::Audio => 0,
         SourceKind::Video => 1,
+        SourceKind::Log => 2,
     };
     (kind, offer.take.0, offer.name.clone())
 }
@@ -79,5 +80,18 @@ mod tests {
         v.sort_by_key(sync_order);
         let names: Vec<&str> = v.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, ["c", "b", "a", "d"]);
+    }
+
+    #[test]
+    fn logs_sort_after_audio_and_video_of_any_take() {
+        let mut v = [
+            offer(SourceKind::Log, 0, "log-1"),
+            offer(SourceKind::Video, 9, "v"),
+            offer(SourceKind::Audio, 9, "a"),
+            offer(SourceKind::Log, 0, "log-0"),
+        ];
+        v.sort_by_key(sync_order);
+        let names: Vec<&str> = v.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["a", "v", "log-0", "log-1"]);
     }
 }

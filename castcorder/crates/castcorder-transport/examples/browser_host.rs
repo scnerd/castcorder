@@ -20,6 +20,9 @@
 //! take's manifest and pulled over each guest's "data" channel whenever no take
 //! records, into `DIR/browser-test/takeNN/`. Without it, `OfferTrack` is refused.
 //!
+//! With a library the host also writes JSON-lines logs to `DIR/browser-test/logs/host-<start>.jsonl`
+//! (10 MB rotation), and guests' log files land beside them (`<device>-<file>.jsonl`).
+//!
 //! Prints `HOST_READY http=http://127.0.0.1:PORT udp=ADDR` once listening.
 //! Everything printed is ASCII.
 
@@ -220,12 +223,6 @@ fn main() {
             "castcorder_transport=info,castcorder_core=info,browser_host=info",
         )
     });
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_ansi(false)
-        .with_writer(std::io::stderr)
-        .init();
-
     let mut dist: Option<PathBuf> = None;
     let mut library: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -238,6 +235,8 @@ fn main() {
             }
         }
     }
+
+    init_logging(filter, library.as_deref());
 
     let library = library.map(|dir| {
         let root = FsStorage::new(dir).expect("library directory");
@@ -416,4 +415,60 @@ fn respond(status: u16, content_type: &str, body: &str) -> tiny_http::ResponseBo
         .with_status_code(status)
         .with_header(header)
         .boxed()
+}
+
+/// Console logs always; with a library, also JSON lines in
+/// `<library>/browser-test/logs/host-<start>.jsonl` (rotated at 10 MB), in the
+/// shape every machine in the call logs (castcorder_core::logging).
+fn init_logging(filter: tracing_subscriber::EnvFilter, library: Option<&Path>) {
+    use castcorder_core::logging::{JsonLayer, LogContext, RotatingLog, Stamp, utc_compact};
+    use castcorder_port_disk::Storage;
+    use std::sync::Mutex;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let console = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(std::io::stderr);
+    let json = library.map(|dir| {
+        let wall = || {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        };
+        let logs = FsStorage::new(dir)
+            .and_then(|r| r.subdir("browser-test"))
+            .and_then(|r| r.subdir("logs"))
+            .expect("logs directory");
+        let file = Mutex::new(RotatingLog::new(
+            logs,
+            format!("host-{}", utc_compact(wall())),
+            10 * 1024 * 1024,
+        ));
+        let context = LogContext::new();
+        context.set("call", "browser-test");
+        context.set("device", "host");
+        context.set("realm", "host");
+        let start = Instant::now();
+        JsonLayer::new(
+            tracing::Level::INFO,
+            context,
+            move || Stamp {
+                wall_ms: wall(),
+                mono_ms: start.elapsed().as_secs_f64() * 1000.0,
+            },
+            move |line| {
+                if let Ok(mut f) = file.lock() {
+                    let _ = f.write_line(&line);
+                }
+            },
+        )
+    });
+    tracing_subscriber::registry()
+        .with(console)
+        .with(json)
+        .with(filter)
+        .init();
 }

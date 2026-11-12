@@ -15,7 +15,9 @@
 //! length.
 //!
 //! Messages in (`cmd`): `source {readable}`, `start {name, meta}`, `stop`,
-//! `close-source`, `list`. Messages out (`type`): `ready`, `level {peak}`,
+//! `close-source`, `list`, `log {text}` (the page's log lines), `log-context {call,
+//! device}`, `log-rotate` (close the current log file and offer it, see
+//! [`crate::logfiles`]). Messages out (`type`): `ready`, `level {peak}`,
 //! `recording {name}`, `stats {name, frames, seconds}`, `stopped {name, frames}`,
 //! `list {tracks}`, `error {message}`.
 
@@ -65,6 +67,11 @@ pub(crate) fn post_error(context: &str, e: &JsValue) {
 }
 
 pub(crate) async fn tracks_dir() -> Result<FileSystemDirectoryHandle, JsValue> {
+    named_dir(TRACKS_DIR).await
+}
+
+/// A directory of the OPFS root, created if needed.
+pub(crate) async fn named_dir(name: &str) -> Result<FileSystemDirectoryHandle, JsValue> {
     let storage = scope().navigator().storage();
     let root: FileSystemDirectoryHandle = JsFuture::from(storage.get_directory())
         .await?
@@ -72,7 +79,7 @@ pub(crate) async fn tracks_dir() -> Result<FileSystemDirectoryHandle, JsValue> {
     let opts = FileSystemGetDirectoryOptions::new();
     opts.set_create(true);
     Ok(
-        JsFuture::from(root.get_directory_handle_with_options(TRACKS_DIR, &opts))
+        JsFuture::from(root.get_directory_handle_with_options(name, &opts))
             .await?
             .unchecked_into(),
     )
@@ -358,6 +365,8 @@ async fn stop() -> Result<(), JsValue> {
     set(&o, "frames", a.frames as f64);
     post(&o);
     list().await?;
+    // Close the log file: closed files may be offered, and this take is over.
+    crate::logfiles::flush(true).await?;
     crate::outbox::prepare_current().await
 }
 
@@ -501,7 +510,20 @@ pub(crate) async fn list() -> Result<(), JsValue> {
 /// Entry point of the worker binary.
 pub fn main() {
     console_error_panic_hook::set_once();
-    crate::logging::init();
+    crate::logging::init("worker");
+    let every = Closure::<dyn FnMut()>::new(|| {
+        spawn_local(async {
+            if let Err(e) = crate::logfiles::flush(false).await {
+                warn!(error = %describe(&e), "log files not written");
+            }
+        });
+    });
+    let _ = call(
+        &js_sys::global(),
+        "setInterval",
+        &[every.as_ref().unchecked_ref(), &JsValue::from(1000)],
+    );
+    every.forget();
     let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
         let msg = e.data();
         let cmd = string(&msg, "cmd");
@@ -518,6 +540,20 @@ pub fn main() {
                     Ok(())
                 }
                 "list" => list().await,
+                "log" => {
+                    crate::logging::push_text(&string(&msg, "text"));
+                    Ok(())
+                }
+                "log-context" => {
+                    let ctx = crate::logging::context();
+                    ctx.set(castcorder_core::logging::CALL, &string(&msg, "call"));
+                    ctx.set(castcorder_core::logging::DEVICE, &string(&msg, "device"));
+                    Ok(())
+                }
+                "log-rotate" => match crate::logfiles::flush(true).await {
+                    Ok(()) => crate::outbox::prepare_current().await,
+                    Err(e) => Err(e),
+                },
                 "outbox" => crate::outbox::prepare(msg).await,
                 "xfer-in" => crate::outbox::xfer_in(msg).await,
                 "xfer-pull" => {
