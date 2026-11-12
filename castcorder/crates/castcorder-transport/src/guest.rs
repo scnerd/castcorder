@@ -1,6 +1,7 @@
 //! One guest's connection: the port of the SFU spike's `Client`, with every clock
 //! read and socket write going through the ports.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
 use crate::channel::{ChannelKind, Shared, lock};
+use crate::relay::Relay;
 use crate::signal::Signal;
 use crate::{GoneReason, GuestId, GuestStats, HostEvent};
 
@@ -71,6 +73,24 @@ pub(crate) enum Propagated {
         mid_in: Mid,
         kind: KeyframeRequestKind,
     },
+}
+
+/// Where str0m's transmits go: straight out of the socket, or through the TURN
+/// client when sourced from the relayed candidate.
+pub(crate) struct Wire<'a, S> {
+    pub(crate) socket: &'a S,
+    pub(crate) relay: &'a mut Relay,
+    pub(crate) now: Duration,
+}
+
+impl<S: DatagramSocket> Wire<'_, S> {
+    pub(crate) fn send(&mut self, source: SocketAddr, to: SocketAddr, contents: &[u8]) {
+        if self.relay.relayed() == Some(source) {
+            self.relay.send(self.socket, to, contents, self.now);
+        } else if let Err(e) = self.socket.send_to(contents, to) {
+            debug!(error = %e, to = %to, "send_to failed");
+        }
+    }
 }
 
 /// Settings each guest needs from the host config.
@@ -160,7 +180,7 @@ impl Guest {
     /// Poll until str0m has only a timeout left; transmit everything it produced.
     pub(crate) fn poll_until_timeout<S: DatagramSocket>(
         &mut self,
-        socket: &S,
+        wire: &mut Wire<'_, S>,
         now: Instant,
     ) -> Option<Instant> {
         loop {
@@ -170,11 +190,7 @@ impl Guest {
             self.negotiate_if_needed();
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => return Some(t),
-                Ok(Output::Transmit(t)) => {
-                    if let Err(e) = socket.send_to(&t.contents, t.destination) {
-                        debug!(error = %e, to = %t.destination, "send_to failed");
-                    }
-                }
+                Ok(Output::Transmit(t)) => wire.send(t.source, t.destination, &t.contents),
                 Ok(Output::Event(e)) => self.handle_event(e, now),
                 Err(e) => {
                     warn!(error = ?e, "poll_output failed, disconnecting");

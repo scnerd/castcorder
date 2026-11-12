@@ -68,6 +68,32 @@ tasks:
       - node setup.mjs
       - node system.mjs
 
+  test:relay:
+    desc: Forced-relay system test - a relay-only host and two relay-only Chromium guests hold a call through coturn (needs Docker)
+    summary: |
+      Builds castcorder-host, castcorder-rendezvous and the client (trunk), then
+      runs castcorder/crates/castcorder-client/browser-test/relay.mjs: coturn
+      (coturn/coturn:4.6 in Docker, use-auth-secret with a random per-run
+      secret, only its UDP listening port published on a Docker-picked port),
+      the rendezvous minting TURN credentials for it (--turn), the host with
+      --relay-only, and two guests joining by call link with
+      ?iceTransportPolicy=relay. Audio must flow and a take must sync.
+      Docker Desktop is reached on 127.0.0.1; a Docker Engine inside WSL2 on the
+      WSL VM's address (CASTCORDER_TURN_HOST overrides). Honours DOCKER_HOST.
+      Not part of `task test` or `task check`.
+      Other build dirs: CARGO_TARGET_DIR=... task test:relay CLIENT_DIST=dist-agent
+    dir: castcorder/crates/castcorder-client/browser-test
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
+    cmds:
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
+      - cd .. && trunk build --release --dist {{.CLIENT_DIST}}
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node relay.mjs
+
   test:browser:
     desc: Tier 4 browser tests (Playwright with headless Chromium, installed locally on first run)
     cmds:

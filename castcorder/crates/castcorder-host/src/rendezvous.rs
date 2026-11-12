@@ -12,6 +12,10 @@
 //!   ephemeral key. It reconnects with backoff.
 //! - The rendezvous's STUN port is handed to the transport, which learns the
 //!   host's server-reflexive address through its own UDP socket.
+//! - The WebSocket URL names the host id (`/ws?host=...`), so a rendezvous
+//!   with a TURN server puts relay credentials in the hello; the first UDP
+//!   `turn:` server is handed to the transport, which allocates a relayed
+//!   address on it for guests that cannot reach this machine directly.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -21,9 +25,10 @@ use std::thread;
 use std::time::Duration;
 
 use castcorder_link::wire::{
-    AnswerPlain, ClientMsg, OfferPlain, ServerMsg, b64, from_json, to_json, unb64,
+    AnswerPlain, ClientMsg, IceServer, OfferPlain, ServerMsg, b64, from_json, to_json, unb64,
 };
 use castcorder_link::{CallLink, CallSecret, HostKey};
+use castcorder_transport::TurnServer;
 use tracing::{info, warn};
 use tungstenite::{Message, WebSocket};
 
@@ -201,9 +206,13 @@ fn session(
 ) -> Result<(), String> {
     let t = target(&cfg.base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
-    let (mut ws, _) = tungstenite::client(t.ws_url.as_str(), stream).map_err(|e| e.to_string())?;
+    // Naming our host id asks the rendezvous for relay (TURN) credentials.
+    let url = format!("{}?host={}", t.ws_url, cfg.key.id().encode());
+    let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     let ServerMsg::Hello {
-        nonce, stun_port, ..
+        nonce,
+        stun_port,
+        ice_servers,
     } = read_msg(&mut ws)?
     else {
         return Err("expected hello".into());
@@ -238,6 +247,13 @@ fn session(
             None => warn!(host = %t.host, port, "cannot resolve the rendezvous STUN address"),
         }
     }
+    match turn_server(&ice_servers) {
+        Some(server) => {
+            info!(server = %server.addr, "relay (TURN) server from the rendezvous");
+            let _ = tx.send(Command::Turn { server });
+        }
+        None => info!("the rendezvous offers no relay (TURN) server"),
+    }
     if let Some(f) = on_link.take() {
         f(&cfg.link());
     }
@@ -263,6 +279,45 @@ fn session(
             other => warn!(frame = ?other, "unexpected frame from the rendezvous"),
         }
     }
+}
+
+/// The first UDP `turn:` server with credentials among `servers`, resolved.
+fn turn_server(servers: &[IceServer]) -> Option<TurnServer> {
+    servers.iter().find_map(|s| {
+        let (username, password) = (s.username.clone()?, s.credential.clone()?);
+        s.urls.iter().find_map(|u| {
+            let addr = turn_addr(u)?;
+            Some(TurnServer {
+                addr,
+                username: username.clone(),
+                password: password.clone(),
+            })
+        })
+    })
+}
+
+/// `turn:HOST[:PORT][?transport=udp]` to a socket address (UDP only).
+fn turn_addr(url: &str) -> Option<SocketAddr> {
+    let rest = url.strip_prefix("turn:")?;
+    let (hostport, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if query
+        .split('&')
+        .any(|kv| kv.starts_with("transport=") && kv != "transport=udp")
+    {
+        return None;
+    }
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => match p.parse() {
+            Ok(p) => (h, p),
+            Err(_) => (hostport, 3478),
+        },
+        _ => (hostport, 3478),
+    };
+    let all: Vec<SocketAddr> = (host.trim_matches(['[', ']']), port)
+        .to_socket_addrs()
+        .ok()?
+        .collect();
+    all.iter().find(|a| a.is_ipv4()).or(all.first()).copied()
 }
 
 /// Open one guest's offer and produce the sealed answer (or `None` if it
@@ -323,6 +378,43 @@ mod tests {
         assert_eq!(t.ws_url, "ws://127.0.0.1:48080/ws");
         assert!(target("ftp://x").is_err());
         assert!(target("http://").is_err());
+    }
+
+    #[test]
+    fn turn_urls_parse() {
+        let a = |s: &str| turn_addr(s).map(|a| a.to_string());
+        assert_eq!(a("turn:127.0.0.1:3478").as_deref(), Some("127.0.0.1:3478"));
+        assert_eq!(
+            a("turn:127.0.0.1?transport=udp").as_deref(),
+            Some("127.0.0.1:3478")
+        );
+        assert_eq!(a("turn:[::1]:5349").as_deref(), Some("[::1]:5349"));
+        assert_eq!(a("turn:127.0.0.1:3478?transport=tcp"), None);
+        assert_eq!(a("turns:127.0.0.1:5349"), None);
+        assert_eq!(a("stun:127.0.0.1:3478"), None);
+        let servers = vec![
+            IceServer {
+                urls: vec!["stun:127.0.0.1:3479".into()],
+                username: None,
+                credential: None,
+            },
+            IceServer {
+                urls: vec![
+                    "turn:127.0.0.1:3478?transport=tcp".into(),
+                    "turn:127.0.0.1:3478?transport=udp".into(),
+                ],
+                username: Some("1:h".into()),
+                credential: Some("pw".into()),
+            },
+        ];
+        assert_eq!(
+            turn_server(&servers),
+            Some(TurnServer {
+                addr: "127.0.0.1:3478".parse().unwrap(),
+                username: "1:h".into(),
+                password: "pw".into(),
+            })
+        );
     }
 
     #[test]

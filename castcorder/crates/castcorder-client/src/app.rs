@@ -1206,9 +1206,14 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     let url = ctx.url.clone();
     // From a call link: signal through the rendezvous, whose hello names the
     // ICE servers (STUN, so the offer carries this browser's public address).
+    // Naming the host asks the rendezvous for relay (TURN) credentials too.
     let link = LINK.with(|l| l.borrow().clone());
-    let mailbox = match link {
-        Some(_) => Some(crate::mailbox::Mailbox::open(&url).await?),
+    let mailbox = match &link {
+        Some(l) => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            let ws = format!("{url}{sep}host={}", l.host.encode());
+            Some(crate::mailbox::Mailbox::open(&ws).await?)
+        }
         None => None,
     };
     if !current() {
@@ -1218,6 +1223,11 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
         Some(mb) => {
             let cfg: RtcConfiguration = object().unchecked_into();
             set(&cfg, "iceServers", mb.ice_servers.clone());
+            // Debug: `?iceTransportPolicy=relay` forces the TURN relay.
+            if let Some(policy) = query_param("iceTransportPolicy") {
+                info!(policy = %policy, "ice transport policy forced");
+                set(&cfg, "iceTransportPolicy", policy.as_str());
+            }
             RtcPeerConnection::new_with_configuration(&cfg)?
         }
         None => RtcPeerConnection::new()?,

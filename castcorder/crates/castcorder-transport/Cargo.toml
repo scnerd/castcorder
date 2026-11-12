@@ -23,6 +23,7 @@ castcorder-port-net.workspace = true
 castcorder-link.workspace = true
 castcorder-protocol.workspace = true
 str0m.workspace = true
+turn-client-proto.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,4 +32,5 @@ serde_json.workspace = true
 castcorder-core.workspace = true
 castcorder-port-disk.workspace = true
 tiny_http = "0.12"
+turn-server-proto.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

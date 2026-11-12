@@ -17,8 +17,11 @@ axum = { version = "0.8", default-features = false, features = [
   "tokio",
   "ws",
 ] }
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 castcorder-link.workspace = true
 getrandom = "0.3"
+hmac = "0.13"
+sha1 = { version = "0.11", default-features = false }
 tokio = { version = "1", features = [
   "fs",
   "macros",

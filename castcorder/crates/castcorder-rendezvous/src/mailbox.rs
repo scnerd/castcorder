@@ -201,6 +201,19 @@ impl Mailbox {
         Ok(id)
     }
 
+    /// May relay credentials naming `host` be minted for a connection now?
+    /// Costs one token from that host key's bucket (the bucket offers to it
+    /// draw on), so one host's link cannot be used to mint without bound; the
+    /// connection itself has already paid its per-IP token in [`Self::open`].
+    pub fn mint_allowed(&mut self, host: HostId, now: Instant) -> bool {
+        self.maybe_prune(now);
+        let ok = take(&mut self.host_buckets, host, self.limits.host, now);
+        if !ok {
+            warn!(host = %host.short(), "relay credentials refused: host rate limited");
+        }
+        ok
+    }
+
     /// A text frame arrived on `conn`.
     pub fn receive(&mut self, conn: ConnId, text: &str, now: Instant) -> Vec<Out> {
         let Some(c) = self.conns.get(&conn) else {
@@ -570,5 +583,35 @@ mod tests {
         t.now += Duration::from_secs(600);
         t.mb.maybe_prune(t.now);
         assert!(t.mb.ip_buckets.is_empty() && t.mb.host_buckets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mint_tests {
+    use super::*;
+    use castcorder_link::HostKey;
+
+    #[test]
+    fn relay_credentials_draw_on_the_host_key_bucket() {
+        let mut mb = Mailbox::new(Limits {
+            ip: Rate {
+                per_minute: 60,
+                burst: 10,
+            },
+            host: Rate {
+                per_minute: 60,
+                burst: 2,
+            },
+        });
+        let now = Instant::now();
+        let (a, b) = (
+            HostKey::from_secret([1; 32]).id(),
+            HostKey::from_secret([2; 32]).id(),
+        );
+        assert!(mb.mint_allowed(a, now));
+        assert!(mb.mint_allowed(a, now));
+        assert!(!mb.mint_allowed(a, now), "the third in a burst is refused");
+        assert!(mb.mint_allowed(b, now), "other host keys are unaffected");
+        assert!(mb.mint_allowed(a, now + Duration::from_secs(1)));
     }
 }

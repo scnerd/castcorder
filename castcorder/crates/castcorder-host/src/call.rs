@@ -50,6 +50,11 @@ pub enum Command {
         /// The rendezvous's STUN address.
         server: std::net::SocketAddr,
     },
+    /// Allocate a relayed address on this TURN server.
+    Turn {
+        /// The server and the credentials the rendezvous minted.
+        server: castcorder_transport::TurnServer,
+    },
 }
 
 /// The producer-side state of the call.
@@ -294,6 +299,7 @@ impl Call {
                 let _ = reply.send(self.status_json());
             }
             Command::Stun { server } => host.set_stun_server(Some(server)),
+            Command::Turn { server } => host.set_turn_server(Some(server)),
         }
     }
 }

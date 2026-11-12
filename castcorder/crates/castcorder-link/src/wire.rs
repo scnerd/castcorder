@@ -3,6 +3,9 @@
 //!
 //! ```text
 //! server -> any    {"type":"hello","nonce":B64,"stun_port":N|null,"ice_servers":[{"urls":[...]}]}
+//!                  with a TURN server configured and the URL naming a host
+//!                  (`/ws?host=HOST_ID`), ice_servers also holds
+//!                  {"urls":["turn:..."],"username":U,"credential":C}
 //! host -> server   {"type":"register","host":HOST_ID,"sig":B64}     sig over seal::register_message(nonce)
 //! server -> host   {"type":"registered","observed":"ip:port"}       the host's address as the server saw it
 //! guest -> server  {"type":"offer","to":HOST_ID,"sealed":B64}

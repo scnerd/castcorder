@@ -12,16 +12,17 @@ use std::time::{Duration, Instant};
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use castcorder_link::stun;
 use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
+use castcorder_link::{HostId, stun};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::mailbox::{ConnId, Limits, Mailbox, Out, Rate};
+use crate::turn::{TurnConfig, mint};
 
 /// Largest WebSocket frame accepted (a sealed SDP is a few KiB).
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -45,6 +46,8 @@ pub struct Config {
     /// Rate-limit by the first X-Forwarded-For address (only behind a proxy
     /// that sets it).
     pub trust_forwarded_for: bool,
+    /// A TURN server to mint relay credentials for, if any.
+    pub turn: Option<TurnConfig>,
 }
 
 struct Hub {
@@ -53,6 +56,7 @@ struct Hub {
     clients: HashMap<String, PathBuf>,
     public_host: Option<String>,
     trust_forwarded_for: bool,
+    turn: Option<TurnConfig>,
 }
 
 /// The bound ports, and the future that serves them.
@@ -86,6 +90,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         clients: cfg.clients.into_iter().collect(),
         public_host: cfg.public_host,
         trust_forwarded_for: cfg.trust_forwarded_for,
+        turn: cfg.turn,
     });
     let app = Router::new()
         .route("/", get(index))
@@ -202,15 +207,33 @@ fn ice_servers(hub: &Hub, headers: &HeaderMap) -> Vec<IceServer> {
 async fn ws(
     State(hub): State<Arc<Hub>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    uri: Uri,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let ip = client_ip(&hub, peer, &headers);
     let ice = ice_servers(&hub, &headers);
+    let host = relay_host(&uri);
     upgrade
         .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice))
+        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice, host))
+}
+
+/// The host a connection asks relay credentials for: `/ws?host=<host id>`,
+/// sent by a host for itself and by a guest for the host it calls.
+fn relay_host(uri: &Uri) -> Option<HostId> {
+    uri.query()?
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("host="))
+        .and_then(|h| HostId::parse(h).ok())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn dispatch(senders: &HashMap<ConnId, mpsc::UnboundedSender<Message>>, outs: Vec<Out>) {
@@ -235,7 +258,8 @@ async fn connection(
     mut socket: WebSocket,
     ip: IpAddr,
     peer: SocketAddr,
-    ice: Vec<IceServer>,
+    mut ice: Vec<IceServer>,
+    host: Option<HostId>,
 ) {
     let mut nonce = [0u8; 32];
     if getrandom::fill(&mut nonce).is_err() {
@@ -245,9 +269,16 @@ async fn connection(
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let opened = {
         let mut g = hub.mailbox.lock().expect("mailbox lock");
-        let r = g.0.open(ip, peer, nonce, Instant::now());
+        let now = Instant::now();
+        let r = g.0.open(ip, peer, nonce, now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
+            if let (Some(turn), Some(host)) = (&hub.turn, host)
+                && g.0.mint_allowed(host, now)
+            {
+                info!(conn = id, host = %host.short(), ttl_s = turn.ttl.as_secs(), "relay credentials minted");
+                ice.push(mint(turn, &host, unix_now()));
+            }
         }
         r
     };

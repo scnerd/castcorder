@@ -21,8 +21,11 @@
 //! [`Host::set_stun_server`] has learned one, the server-reflexive address of
 //! the host's socket (STUN Binding through the same socket, refreshed every
 //! 20 s to keep the NAT mapping open), so a guest outside the host's network
-//! can reach it where the NAT allows. Relay (TURN) candidates are not yet
-//! offered.
+//! can reach it where the NAT allows. Once [`Host::set_turn_server`] has an
+//! allocation on a TURN server (RFC 8656 over UDP, through the same socket),
+//! the answer also offers that relayed address, for guests that cannot reach
+//! the host any other way; [`HostConfig::relay_only`] offers nothing else
+//! (tests force relay with it). See `relay.rs`.
 //!
 //! # Wire contract for guests
 //!
@@ -91,12 +94,15 @@ use tracing::{debug, info, info_span, trace, warn};
 
 mod channel;
 mod guest;
+mod relay;
 pub mod signal;
 
 pub use channel::{ChannelError, ChannelKind, GuestChannel, MAX_MESSAGE};
+pub use relay::{RelayStats, TurnServer};
 
 use crate::channel::lock;
-use crate::guest::{Guest, Propagated, Timing};
+use crate::guest::{Guest, Propagated, Timing, Wire};
+use crate::relay::{FromServer, Relay};
 
 /// Identifies one guest connection for the life of a [`Host`]. A guest that
 /// rejoins gets a new id.
@@ -131,6 +137,10 @@ pub struct HostConfig {
     /// longest common prefix), since a wildcard socket cannot tell which
     /// address it arrived on.
     pub advertise: Vec<SocketAddr>,
+    /// Offer only the TURN relayed candidate (no host, no server-reflexive):
+    /// [`Host::accept`] refuses offers until the allocation exists. For
+    /// testing the relay path.
+    pub relay_only: bool,
 }
 
 impl Default for HostConfig {
@@ -143,6 +153,7 @@ impl Default for HostConfig {
             initial_bandwidth_estimate_kbps: Some(1500),
             send_buffer: 1024 * 1024,
             advertise: Vec::new(),
+            relay_only: false,
         }
     }
 }
@@ -249,6 +260,7 @@ pub struct Host<S, C> {
     events: VecDeque<HostEvent>,
     queue: VecDeque<Propagated>,
     stun: Stun,
+    relay: Relay,
 }
 
 /// Server-reflexive discovery: Binding requests to one STUN server, sent from
@@ -293,7 +305,30 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             events: VecDeque::new(),
             queue: VecDeque::new(),
             stun: Stun::default(),
+            relay: Relay::default(),
         }
+    }
+
+    /// Allocate a relayed address on this TURN server (now, and again after
+    /// a failure; the allocation and its permissions are refreshed while it
+    /// lives), or drop the allocation with `None`. Setting the same server
+    /// and credentials again changes nothing. Once allocated, every later
+    /// [`Host::accept`] offers the relayed candidate.
+    pub fn set_turn_server(&mut self, server: Option<TurnServer>) {
+        let now_d = self.clock.monotonic();
+        let base = server.as_ref().map(|s| self.destination_for(s.addr));
+        let local = base.unwrap_or(self.local);
+        self.relay.set_server(server, local, &self.socket, now_d);
+    }
+
+    /// The relayed address on the TURN server, once allocated.
+    pub fn relayed(&self) -> Option<SocketAddr> {
+        self.relay.relayed()
+    }
+
+    /// Counters for the TURN relay.
+    pub fn relay_stats(&self) -> RelayStats {
+        self.relay.stats.clone()
     }
 
     /// Learn this host's server-reflexive address from a STUN server, asking
@@ -402,13 +437,30 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             b = b.enable_bwe(Some(Bitrate::kbps(k)));
         }
         let mut rtc = b.build(now);
-        for addr in &self.advertise {
+        let relay_only = self.config.relay_only;
+        if relay_only && self.relay.relayed().is_none() {
+            return Err(AcceptError::Rejected(
+                "relay only, and no TURN allocation yet".into(),
+            ));
+        }
+        for addr in self.advertise.iter().filter(|_| !relay_only) {
             let cand = Candidate::host(*addr, "udp")
                 .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
             rtc.add_local_candidate(cand);
         }
+        if let (Some(relayed), Some(server)) = (self.relay.relayed(), self.relay.server()) {
+            match Candidate::relayed(relayed, self.destination_for(server), "udp") {
+                Ok(c) => {
+                    if rtc.add_local_candidate(c).is_none() {
+                        debug!(relayed = %relayed, "relay candidate redundant, not added");
+                    }
+                }
+                Err(e) => warn!(relayed = %relayed, error = ?e, "relay candidate refused"),
+            }
+        }
         if let (Some(r), Some(server)) = (self.stun.reflexive, self.stun.server)
             && !self.advertise.contains(&r)
+            && !relay_only
         {
             let base = self.destination_for(server);
             match Candidate::server_reflexive(r, base, "udp") {
@@ -466,7 +518,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         }
 
         let timing = self.timing();
-        let mut deadline = (now_d + MAX_WAIT).min(self.stun_tick(now_d));
+        let mut deadline = (now_d + MAX_WAIT)
+            .min(self.stun_tick(now_d))
+            .min(self.relay.tick(&self.socket, now_d));
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             g.handle_input(Input::Timeout(now));
@@ -475,12 +529,17 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
 
         self.remove_gone();
 
+        let mut wire = Wire {
+            socket: &self.socket,
+            relay: &mut self.relay,
+            now: now_d,
+        };
         // Poll every guest until only timeouts are left, propagating what each
         // produced; repeat, since propagation makes others produce output.
         loop {
             for g in &mut self.guests {
                 let _e = g.span.clone().entered();
-                if let Some(t) = g.poll_until_timeout(&self.socket, now) {
+                if let Some(t) = g.poll_until_timeout(&mut wire, now) {
                     deadline = deadline.min(t.saturating_duration_since(self.base));
                 }
                 self.queue.extend(g.outbox.drain(..));
@@ -498,7 +557,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             deadline = deadline.min(g.tick(now_d, &timing));
-            if let Some(t) = g.poll_until_timeout(&self.socket, now) {
+            if let Some(t) = g.poll_until_timeout(&mut wire, now) {
                 deadline = deadline.min(t.saturating_duration_since(self.base));
             }
             self.events.extend(g.events.drain(..));
@@ -508,6 +567,23 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     }
 
     fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant) {
+        let now_d = now.saturating_duration_since(self.base);
+        // TURN first: the server's responses and relayed peer data share the
+        // socket with everything else.
+        let (payload, source, destination) = if self.relay.server() == Some(source) {
+            match self.relay.recv(&self.socket, payload, source, now_d) {
+                FromServer::Handled => return,
+                FromServer::Peer(data, peer) => {
+                    let Some(relayed) = self.relay.relayed() else {
+                        return;
+                    };
+                    (data, peer, relayed)
+                }
+                FromServer::NotTurn(p) => (p, source, self.destination_for(source)),
+            }
+        } else {
+            (payload, source, self.destination_for(source))
+        };
         if self.stun_answer(&payload, source) {
             return;
         }
@@ -520,7 +596,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             Receive {
                 proto: Protocol::Udp,
                 source,
-                destination: self.destination_for(source),
+                destination,
                 contents,
             },
         );
@@ -532,7 +608,12 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         g.handle_input(input);
         // Poll right away: str0m's DTLS layer holds at most 30 unprocessed
         // records and fails the whole connection if fed more without polling.
-        g.poll_until_timeout(&self.socket, now);
+        let mut wire = Wire {
+            socket: &self.socket,
+            relay: &mut self.relay,
+            now: now_d,
+        };
+        g.poll_until_timeout(&mut wire, now);
         self.queue.extend(g.outbox.drain(..));
         self.events.extend(g.events.drain(..));
     }

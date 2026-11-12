@@ -12,7 +12,7 @@
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
-//! [--rendezvous URL]`
+//! [--rendezvous URL] [--relay-only]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
@@ -21,6 +21,10 @@
 //! that rendezvous under its host key and, once registered, prints the call
 //! link for guests anywhere and `CALL_LINK <link>` (see [`rendezvous`]). The
 //! LAN pages and `POST /offer` keep working beside it.
+//!
+//! `--relay-only` (for testing the relay path) offers guests only the TURN
+//! relayed candidate from the rendezvous: no host or server-reflexive ones.
+//! Offers are refused until the relay is allocated.
 
 mod call;
 mod http;
@@ -40,7 +44,7 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL]";
+[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only]";
 
 struct Args {
     dist: PathBuf,
@@ -52,6 +56,7 @@ struct Args {
     udp_port: u16,
     advertise: Vec<IpAddr>,
     rendezvous: Option<String>,
+    relay_only: bool,
 }
 
 fn fail(msg: &str) -> ! {
@@ -82,6 +87,7 @@ fn parse_args() -> Args {
         udp_port: 47802,
         advertise: vec![],
         rendezvous: None,
+        relay_only: false,
     };
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -107,6 +113,7 @@ fn parse_args() -> Args {
                 }
                 a.rendezvous = Some(url.trim_end_matches('/').to_string());
             }
+            "--relay-only" => a.relay_only = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -194,6 +201,7 @@ fn main() {
                 .iter()
                 .map(|ip| SocketAddr::new(*ip, udp.port()))
                 .collect(),
+            relay_only: args.relay_only,
             ..HostConfig::default()
         },
     );
