@@ -9,7 +9,10 @@ use castcorder_port_net::DatagramSocket;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
-use str0m::media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::format::Codec;
+use str0m::media::{
+    Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid,
+};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
@@ -572,6 +575,44 @@ impl Guest {
         };
         if let Err(e) = w.write(pt, data.network_time, data.time, data.data.clone()) {
             warn!(error = ?e, "forwarding write failed, disconnecting");
+            self.mark_gone(GoneReason::Failed(format!("{e}")));
+            return;
+        }
+        self.stats.frames_out += 1;
+    }
+
+    /// Send one Opus frame of the host's own local track, if it is open toward
+    /// this guest.
+    pub(crate) fn write_local_audio(
+        &mut self,
+        track: &Arc<TrackIn>,
+        now: Instant,
+        time: MediaTime,
+        data: &[u8],
+    ) {
+        let Some(mid) = self
+            .tracks_out
+            .iter()
+            .find(|o| {
+                matches!(o.state, TrackOutState::Open(_))
+                    && o.track_in.upgrade().is_some_and(|i| Arc::ptr_eq(&i, track))
+            })
+            .and_then(|o| o.mid())
+        else {
+            return;
+        };
+        let Some(w) = self.rtc.writer(mid) else {
+            return;
+        };
+        let Some(pt) = w
+            .payload_params()
+            .find(|p| p.spec().codec == Codec::Opus)
+            .map(|p| p.pt())
+        else {
+            return;
+        };
+        if let Err(e) = w.write(pt, now, time, data.to_vec()) {
+            warn!(error = ?e, "local audio write failed, disconnecting");
             self.mark_gone(GoneReason::Failed(format!("{e}")));
             return;
         }

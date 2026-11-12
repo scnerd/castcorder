@@ -40,6 +40,15 @@
 //! - Forwarded tracks carry the stream id `<device>-<guest id>`.
 //! - One codec per kind per call: Opus and VP8.
 //!
+//! # The host's own participant
+//!
+//! [`Host::add_local_audio`] adds an audio track the host itself sends (the
+//! person at the host machine, captured natively): every guest gets it like
+//! another guest's track, by the same renegotiation, under the stream id
+//! `<device>-<id>`; [`Host::send_local_audio`] writes its Opus frames.
+//! [`Host::set_guest_audio_tap`] keeps a copy of every guest's Opus frames for
+//! [`Host::next_guest_audio`], so the host can play the call locally.
+//!
 //! # The spike's sharp edges, as behaviour
 //!
 //! 1. Each connection is polled right after every datagram it accepts (str0m's
@@ -88,6 +97,8 @@ use castcorder_port_net::DatagramSocket;
 use str0m::bwe::Bitrate;
 use str0m::change::SdpOffer;
 use str0m::crypto::CryptoProvider;
+use str0m::format::Codec;
+use str0m::media::{Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Input, Rtc};
 use tracing::{debug, info, info_span, trace, warn};
@@ -101,7 +112,7 @@ pub use channel::{ChannelError, ChannelKind, GuestChannel, MAX_MESSAGE};
 pub use relay::{RelayStats, TurnServer};
 
 use crate::channel::lock;
-use crate::guest::{Guest, Propagated, Timing, Wire};
+use crate::guest::{Guest, Propagated, Timing, TrackIn, Wire};
 use crate::relay::{FromServer, Relay};
 
 /// Identifies one guest connection for the life of a [`Host`]. A guest that
@@ -241,6 +252,37 @@ impl std::fmt::Display for AcceptError {
 
 impl std::error::Error for AcceptError {}
 
+/// An audio track the host itself sends to every guest; see
+/// [`Host::add_local_audio`]. Dropping it does not remove the track: call
+/// [`Host::remove_local_audio`].
+#[derive(Debug)]
+pub struct LocalAudio {
+    track: Arc<TrackIn>,
+}
+
+impl LocalAudio {
+    /// The id the track is forwarded under (`<device>-<id>` stream ids); never
+    /// a guest's.
+    pub fn id(&self) -> GuestId {
+        self.track.origin
+    }
+}
+
+/// One Opus frame a guest sent, copied for local playback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestAudio {
+    /// Which guest sent it.
+    pub guest: GuestId,
+    /// Its RTP time, in 48 kHz ticks.
+    pub rtp_time: u64,
+    /// The Opus frame.
+    pub data: Vec<u8>,
+}
+
+/// Most guest audio frames kept for [`Host::next_guest_audio`]; older ones are
+/// dropped (about 2 s of four guests at 20 ms).
+const GUEST_AUDIO_KEEP: usize = 400;
+
 /// Most datagrams drained per [`Host::poll`] before the others get a turn.
 const MAX_DATAGRAMS_PER_POLL: usize = 4096;
 /// The longest [`Host::poll`] ever asks to sleep.
@@ -261,6 +303,8 @@ pub struct Host<S, C> {
     queue: VecDeque<Propagated>,
     stun: Stun,
     relay: Relay,
+    local_tracks: Vec<Arc<TrackIn>>,
+    guest_audio: Option<VecDeque<GuestAudio>>,
 }
 
 /// Server-reflexive discovery: Binding requests to one STUN server, sent from
@@ -306,6 +350,8 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             queue: VecDeque::new(),
             stun: Stun::default(),
             relay: Relay::default(),
+            local_tracks: Vec::new(),
+            guest_audio: None,
         }
     }
 
@@ -486,6 +532,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {
             g.handle_track_open(Arc::downgrade(&t.id));
         }
+        for t in &self.local_tracks {
+            g.handle_track_open(Arc::downgrade(t));
+        }
         self.guests.push(g);
         Ok((id, answer.to_sdp_string()))
     }
@@ -549,6 +598,18 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 break;
             }
             while let Some(p) = self.queue.pop_front() {
+                if let (Some(tap), Propagated::MediaData(from, d)) = (&mut self.guest_audio, &p)
+                    && d.params.spec().codec == Codec::Opus
+                {
+                    if tap.len() == GUEST_AUDIO_KEEP {
+                        tap.pop_front();
+                    }
+                    tap.push_back(GuestAudio {
+                        guest: *from,
+                        rtp_time: d.time.rebase(Frequency::FORTY_EIGHT_KHZ).numer(),
+                        data: d.data.to_vec(),
+                    });
+                }
                 propagate(&p, &mut self.guests, now);
             }
         }
@@ -704,6 +765,56 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// Counters for one guest.
     pub fn stats(&self, id: GuestId) -> Option<GuestStats> {
         self.guest(id).map(|g| g.stats.clone())
+    }
+
+    /// Add an audio track the host itself sends (Opus, 48 kHz): every guest,
+    /// present and future, gets it by renegotiation like another guest's
+    /// track, with the stream id `<device>-<id>`.
+    pub fn add_local_audio(&mut self, device: &str) -> LocalAudio {
+        let origin = GuestId(self.next_id);
+        self.next_id += 1;
+        let track = Arc::new(TrackIn {
+            origin,
+            origin_device: device.to_string(),
+            mid: Mid::from("local"),
+            kind: MediaKind::Audio,
+        });
+        for g in &mut self.guests {
+            g.handle_track_open(Arc::downgrade(&track));
+        }
+        info!(call = %self.config.call, device = %device, id = origin.0, "local audio track added");
+        self.local_tracks.push(track.clone());
+        LocalAudio { track }
+    }
+
+    /// Send one Opus frame on a local track to every guest it is open toward.
+    /// `rtp_time` counts 48 kHz samples and must grow by each frame's duration
+    /// (a gap is fine). A guest whose copy is not negotiated yet misses it.
+    pub fn send_local_audio(&mut self, track: &LocalAudio, rtp_time: u64, opus: &[u8]) {
+        let (now, _) = self.now();
+        let time = MediaTime::new(rtp_time, Frequency::FORTY_EIGHT_KHZ);
+        for g in &mut self.guests {
+            let _e = g.span.clone().entered();
+            g.write_local_audio(&track.track, now, time, opus);
+        }
+    }
+
+    /// Remove a local track; every guest renegotiates it away.
+    pub fn remove_local_audio(&mut self, track: LocalAudio) {
+        self.local_tracks.retain(|t| !Arc::ptr_eq(t, &track.track));
+        info!(id = track.id().0, "local audio track removed");
+    }
+
+    /// Keep (or stop keeping) a copy of every guest's Opus frames for
+    /// [`Host::next_guest_audio`]. Off by default; when nobody takes them
+    /// only the newest are kept.
+    pub fn set_guest_audio_tap(&mut self, on: bool) {
+        self.guest_audio = on.then(VecDeque::new);
+    }
+
+    /// The oldest guest audio frame not yet taken, while the tap is on.
+    pub fn next_guest_audio(&mut self) -> Option<GuestAudio> {
+        self.guest_audio.as_mut()?.pop_front()
     }
 
     /// Drop a guest; it is reported gone with [`GoneReason::Removed`] on the

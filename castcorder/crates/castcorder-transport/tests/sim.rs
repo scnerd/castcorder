@@ -410,3 +410,72 @@ fn a_host_advertising_several_addresses_connects_through_the_matching_one() {
         w.host.stats(id).unwrap().connected && w.g(i).channels_open()
     });
 }
+
+#[test]
+fn the_hosts_own_audio_reaches_every_guest_and_guest_audio_is_tapped() {
+    let mut w = World::two_guests();
+    w.host.set_guest_audio_tap(true);
+    // Added mid-call: both guests get it by renegotiation (A and B already
+    // hold two tracks each, so three means the local one is open too).
+    let local = w.host.add_local_audio("hostmic");
+    let prefix = format!("hostmic-{}", local.id().0);
+    let (a, b) = (w.id(0), w.id(1));
+    w.run_until(Duration::from_secs(5), |w| {
+        w.host.stats(a).unwrap().tracks_out_open == 3
+            && w.host.stats(b).unwrap().tracks_out_open == 3
+    });
+    // A guest joining later gets it at join (with A's and B's two each).
+    let (c, _) = w.join("C");
+    w.run_until(Duration::from_secs(5), |w| {
+        let id = w.id(c);
+        w.host.stats(id).unwrap().tracks_out_open == 5 && w.g(c).channels_open()
+    });
+
+    for i in 0..30u64 {
+        let frame = format!("opus-from-host-{i}").into_bytes();
+        w.host.send_local_audio(&local, 960 * (i + 1), &frame);
+        w.g(0).send_audio(format!("opus-from-A-{i}").as_bytes());
+        w.run_for(Duration::from_millis(20));
+    }
+    w.run_for(Duration::from_millis(200));
+
+    let expected: Vec<Vec<u8>> = (0..30u64)
+        .map(|i| format!("opus-from-host-{i}").into_bytes())
+        .collect();
+    for g in 0..3 {
+        let got: Vec<Vec<u8>> = w
+            .g(g)
+            .received_from(&prefix, MediaKind::Audio)
+            .iter()
+            .map(|r| r.data.clone())
+            .collect();
+        assert_eq!(got, expected, "guest {g} gets the host's audio unchanged");
+    }
+
+    // The tap holds A's audio, in order, for local playback.
+    let mut tapped = vec![];
+    while let Some(f) = w.host.next_guest_audio() {
+        assert_eq!(f.guest, a, "only A sent audio");
+        tapped.push(f);
+    }
+    let want: Vec<Vec<u8>> = (0..30u64)
+        .map(|i| format!("opus-from-A-{i}").into_bytes())
+        .collect();
+    assert_eq!(
+        tapped.iter().map(|f| f.data.clone()).collect::<Vec<_>>(),
+        want
+    );
+    assert!(
+        tapped
+            .windows(2)
+            .all(|p| p[1].rtp_time == p[0].rtp_time + 960)
+    );
+
+    // Removing it renegotiates it away from everyone (B keeps A's and C's).
+    let offers = w.g(1).offers_received;
+    w.host.remove_local_audio(local);
+    w.run_until(Duration::from_secs(5), |w| {
+        w.host.stats(b).unwrap().tracks_out_open == 4
+    });
+    assert!(w.g(1).offers_received > offers);
+}
