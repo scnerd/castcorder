@@ -17,7 +17,16 @@
 //    (Chrome's int16 -> float scaling, every frame aligned, no dropped,
 //    duplicated or inserted frames), about 5 s long, 44.1 kHz stereo.
 //
-// 6. Each guest's closed log files arrive in <call>/logs on the host (lowest priority,
+// 6. Take 2 (every mode): guest B's RTCPeerConnection is closed mid-take; B
+//    keeps recording into the same file, shows "reconnecting", rejoins, then
+//    its microphone tracks are stopped (as a phone's system may) and it
+//    reopens them and continues in a new segment. Both segments reach the host.
+// 7. Producer buttons offer only the valid action (start when idle, stop when
+//    recording). After Leave every local MediaStreamTrack is "ended" and every
+//    AudioContext "closed"; leave/rejoin cycles raise no page errors or
+//    unhandled rejections.
+//
+// 8. Each guest's closed log files arrive in <call>/logs on the host (lowest priority,
 //    after the tracks), are valid JSON lines with the call and device fields, and
 //    the merge-logs example prints them with the host's own log merged by time.
 //
@@ -57,9 +66,11 @@ console.log('mode ' + MODE);
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium, firefox } = await import('playwright');
 
-const exe = join(WORKSPACE, 'target', 'release',
+// CARGO_TARGET_DIR and CASTCORDER_DIST let a run use other build dirs (e.g.
+// while a host from `task host` holds target/ and serves dist/).
+const exe = join(process.env.CARGO_TARGET_DIR || join(WORKSPACE, 'target'), 'release',
   process.platform === 'win32' ? 'castcorder-host.exe' : 'castcorder-host');
-const dist = join(CRATE, 'dist');
+const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
 if (!existsSync(exe)) { console.log('FAIL host binary missing: ' + exe); process.exit(1); }
 if (!existsSync(join(dist, 'index.html'))) { console.log('FAIL client not built: ' + dist); process.exit(1); }
 
@@ -143,6 +154,34 @@ async function openGuest(name, extraArgs, base) {
     // or a Chrome that exposes it in workers only).
     await ctx.addInitScript(() => { delete window.MediaStreamTrackProcessor; });
   }
+  // Instrumentation, not a mock: the real objects the app creates are kept so
+  // the test can check them after Leave and cut a connection.
+  await ctx.addInitScript(() => {
+    const tracks = window.__tracks = [];
+    const ctxs = window.__audioContexts = [];
+    const pcs = window.__pcs = [];
+    const gum = MediaDevices.prototype.getUserMedia;
+    MediaDevices.prototype.getUserMedia = async function (...a) {
+      const st = await gum.apply(this, a);
+      for (const t of st.getTracks()) if (!tracks.includes(t)) tracks.push(t);
+      return st;
+    };
+    // Every track the app reads from a stream, too (whatever created it).
+    for (const m of ['getTracks', 'getAudioTracks', 'getVideoTracks']) {
+      const f = MediaStream.prototype[m];
+      MediaStream.prototype[m] = function () {
+        const r = f.call(this);
+        for (const t of r) if (!tracks.includes(t)) tracks.push(t);
+        return r;
+      };
+    }
+    const clone = MediaStreamTrack.prototype.clone;
+    MediaStreamTrack.prototype.clone = function () { const t = clone.call(this); tracks.push(t); return t; };
+    const AC = window.AudioContext;
+    window.AudioContext = class extends AC { constructor(...a) { super(...a); ctxs.push(this); } };
+    const PC = window.RTCPeerConnection;
+    window.RTCPeerConnection = class extends PC { constructor(...a) { super(...a); pcs.push(this); } };
+  });
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
@@ -152,6 +191,9 @@ async function openGuest(name, extraArgs, base) {
 }
 
 const text = async (page, sel) => (await page.textContent(sel)) || '';
+const buttons = async (page) => ({
+  start: await page.isEnabled('#take-start'), stop: await page.isEnabled('#take-stop'),
+});
 const json = async (page, sel) => { const t = await text(page, sel); return t ? JSON.parse(t) : null; };
 async function noErrors(page, name) {
   const e = await text(page, '#errors');
@@ -244,8 +286,12 @@ try {
   await waitFor(async () => (await text(A, '#level-db')) !== '-inf dBFS', 'A level meter');
   await sleep(1000);
 
+  await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take only', 10000);
+  check(true, 'idle: Start take enabled, Stop take disabled');
   await A.click('#take-start');
   await waitFor(async () => (await text(A, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
+  await waitFor(async () => buttons(A).then((b) => !b.start && b.stop), 'producer offers Stop take only', 10000);
+  check(true, 'recording: Start take disabled, Stop take enabled');
   check(true, 'producer started take 1');
   for (const [n, p] of [['A', A], ['B', B]]) {
     await waitFor(async () => { await noErrors(p, n); return (await text(p, '#recording')).includes('recording take'); },
@@ -255,6 +301,8 @@ try {
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);
   check(true, 'producer stopped take 1');
+  await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take again', 10000);
+  check(true, 'idle again: Start take enabled, Stop take disabled');
   const guestsSeen = await text(A, '#guests');
   check(guestsSeen.includes('A (guest') && guestsSeen.includes('B (guest'), 'producer lists the connected guests: ' + guestsSeen);
 
@@ -382,10 +430,97 @@ try {
       + ', dropped ' + c.droppedFrames + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames + ')');
   }
   }
+  // Take 2: B's connection is cut mid-take, then its microphone is lost.
+  await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer ready for take 2', 10000);
+  await A.click('#take-start');
+  await waitFor(async () => (await text(A, '#take-result')).includes('"take":2'), 'take 2 started', 10000);
+  const seg1 = await waitFor(async () => {
+    const r = await text(B, '#recording');
+    return r.includes('recording take0002') ? r : null;
+  }, 'guest B recording take 2', 10000);
+  const tRec = Date.now();
+  await sleep(2000);
+  await B.evaluate(() => { for (const pc of window.__pcs) pc.close(); });
+  const tCut = Date.now();
+  await waitFor(async () => (await text(B, '#state')).includes('reconnecting'), 'B shows reconnecting', 10000);
+  check((await text(B, '#recording')) === seg1, 'B keeps recording the same track while reconnecting (' + seg1 + ')');
+  await waitFor(async () => (await text(B, '#state')) === 'connected' && (await text(B, '#participant')).length > 0,
+    'B reconnected and rejoined', 30000);
+  check(true, 'B reconnected after ' + ((Date.now() - tCut) / 1000).toFixed(1) + ' s and rejoined as participant '
+    + (await text(B, '#participant')) + '; still ' + (await text(B, '#recording')));
+  check((await text(B, '#recording')) === seg1, 'B continued the same track after rejoining');
+  await sleep(1500);
+  await B.evaluate(() => { for (const t of window.__tracks) t.stop(); });
+  const tMicLost = Date.now();
+  const seg2 = await waitFor(async () => {
+    const r = await text(B, '#recording');
+    return r.includes('recording take0002') && r !== seg1 ? r : null;
+  }, 'B reopened its microphone and records a new segment', 30000);
+  check(true, 'B lost its microphone and continues take 2 in a new segment (' + seg2 + ')');
+  await waitFor(async () => (await text(B, '#state')) === 'connected' && (await text(B, '#participant')).length > 0,
+    'B connected again after reopening its microphone', 30000);
+  await sleep(2000);
+  await A.click('#take-stop');
+  await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 2 stopped', 10000);
+  const TAKE2 = join(LIBRARY, 'browser-test', 'take02');
+  const verified2 = () => {
+    const m = join(TAKE2, 'manifest.jsonl');
+    return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
+  };
+  await waitFor(async () => verified2() >= 6, 'host verified take 2: A\'s track and both of B\'s segments, with sidecars', 60000, 250);
+  await waitFor(async () => ((await opfsNames(B)).length === 0 ? true : null), 'guest B OPFS emptied after take 2 sync', 20000);
+  const files2 = readdirSync(TAKE2).sort();
+  console.log('host take02: ' + files2.join(' '));
+  check(['take02_A_mic.wav', 'take02_B_mic.wav', 'take02_B-2_mic.wav', 'take02_B_mic.json', 'take02_B-2_mic.json'].every((f) => files2.includes(f))
+    && !files2.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
+    'both of B\'s take 2 segments synced to the host; B\'s OPFS is empty');
+  const secs = (f) => { const w = parseWav(readFileSync(join(TAKE2, f))); return w.frames / w.rate; };
+  const s1 = secs('take02_B_mic.wav'), s2 = secs('take02_B-2_mic.wav');
+  const expect1 = (tMicLost - tRec) / 1000;
+  check(s1 > expect1 - 1.5, 'B\'s first segment (' + s1.toFixed(2) + ' s) spans the connection drop without a gap (expected ~'
+    + expect1.toFixed(1) + ' s)');
+  check(s2 > 1, 'B\'s second segment holds ' + s2.toFixed(2) + ' s');
+
+  // Leave releases every device and audio context; leave/rejoin is clean.
+  const unreleased = (p) => p.evaluate(() => ({
+    tracks: window.__tracks.filter((t) => t.readyState !== 'ended').map((t) => t.kind + ':' + t.label),
+    total: window.__tracks.length,
+    contexts: window.__audioContexts.filter((c) => c.state !== 'closed').length,
+  }));
+  const released = async (p, n, what) => {
+    let last;
+    try {
+      await waitFor(async () => { last = await unreleased(p); return last.tracks.length === 0 && last.contexts === 0; }, what, 10000);
+    } catch { /* reported below */ }
+    check(last.tracks.length === 0 && last.contexts === 0, 'guest ' + n + ' ' + what + ': ' + last.total + ' tracks all ended'
+      + (last.tracks.length ? ' (still live: ' + last.tracks.join(', ') + ')' : '') + ', open audio contexts ' + last.contexts);
+  };
+  for (const [n, p] of [['A', A], ['B', B]]) {
+    await noErrors(p, n);
+    await p.click('#leave');
+    await released(p, n, 'after Leave');
+  }
+  for (const [n, p] of [['A', A], ['B', B]]) {
+    // Leave while the join is still opening the devices, then a full rejoin.
+    await p.click('#join');
+    await p.click('#leave');
+    await released(p, n, 'after a Leave during Join');
+    await p.click('#join');
+    await waitFor(async () => (await text(p, '#participant')).length > 0, 'guest ' + n + ' rejoined', 30000);
+    await p.click('h1');
+    await sleep(1000);
+    await p.click('#leave');
+    await p.click('h1');
+    await released(p, n, 'after rejoin and Leave');
+  }
+  await sleep(500);
+  for (const n of ['A', 'B']) {
+    const bad = logs[n].filter((l) => l.startsWith('[pageerror]') || l.includes('unhandledrejection'));
+    check(bad.length === 0, 'guest ' + n + ': no page errors or unhandled rejections' + (bad.length ? ': ' + bad.slice(0, 3).join(' | ') : ''));
+  }
   for (const [n, p] of [['A', A], ['B', B]]) await noErrors(p, n);
   passed = checks.every((c) => c.ok);
-  for (const p of [A, B]) await p.click('#leave');
-  await sleep(500);
+
 } catch (e) {
   console.log('FAIL test did not complete: ' + String(e && e.stack || e));
 } finally {

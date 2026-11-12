@@ -278,8 +278,10 @@ impl Active {
 
 /// The raw audio source being read.
 enum Source {
-    /// A ReadableStream reader of a MediaStreamTrackProcessor.
-    Reader(JsValue),
+    /// A ReadableStream reader of a MediaStreamTrackProcessor, and the track
+    /// it reads when that was transferred here (stopped with the source: the
+    /// page cannot stop a track it transferred away).
+    Reader(JsValue, Option<JsValue>),
     /// The MessagePort the capture worklet posts batches to.
     Port(MessagePort),
 }
@@ -345,11 +347,21 @@ fn consume(planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64) {
 /// The `source`/`source-track` commands: read a MediaStreamTrackProcessor
 /// readable, answering the page's attempt with `source-ok` on the first audio
 /// or `source-failed`.
-async fn run_reader(readable: Result<JsValue, JsValue>, id: f64, path: &str) {
+async fn run_reader(
+    readable: Result<JsValue, JsValue>,
+    track: Option<JsValue>,
+    id: f64,
+    path: &str,
+) {
     let mut acked = false;
     let r = match readable {
-        Ok(readable) => read_source(readable, id, path, &mut acked).await,
-        Err(e) => Err(e),
+        Ok(readable) => read_source(readable, track, id, path, &mut acked).await,
+        Err(e) => {
+            if let Some(t) = track.as_ref() {
+                let _ = call(t, "stop", &[]);
+            }
+            Err(e)
+        }
     };
     match r {
         Err(e) if !acked => ack(id, path, Some(describe(&e))),
@@ -375,12 +387,13 @@ fn worker_processor(msg: &JsValue) -> Result<JsValue, JsValue> {
 /// active track if a take is recording.
 async fn read_source(
     readable: JsValue,
+    track: Option<JsValue>,
     id: f64,
     path: &str,
     acked: &mut bool,
 ) -> Result<(), JsValue> {
     let reader = call(&readable, "getReader", &[])?;
-    let generation = begin_source(Source::Reader(reader.clone()), path);
+    let generation = begin_source(Source::Reader(reader.clone(), track), path);
     let opts = object();
     set(&opts, "format", "f32-planar");
     let mut planes: Vec<Vec<f32>> = Vec::new();
@@ -617,8 +630,14 @@ pub(crate) fn is_busy() -> bool {
 
 fn close_source() {
     match SOURCE.with(|s| s.borrow_mut().take()) {
-        Some(Source::Reader(r)) => {
-            let _ = call(&r, "cancel", &[]);
+        Some(Source::Reader(r, track)) => {
+            if let Ok(p) = call(&r, "cancel", &[]) {
+                // A reader that already errored rejects cancel(): nothing to do.
+                let _ = call(&p, "catch", &[&Closure::once_into_js(|_: JsValue| {})]);
+            }
+            if let Some(t) = track {
+                let _ = call(&t, "stop", &[]);
+            }
         }
         Some(Source::Port(p)) => {
             p.set_onmessage(None);
@@ -773,12 +792,18 @@ pub fn main() {
             let r = match cmd.as_str() {
                 "source" => {
                     let readable = get(&msg, "readable");
-                    run_reader(Ok(readable), num(&msg, "id"), "mstp-window").await;
+                    run_reader(Ok(readable), None, num(&msg, "id"), "mstp-window").await;
                     Ok(())
                 }
                 "source-track" => {
                     let readable = worker_processor(&msg);
-                    run_reader(readable, num(&msg, "id"), "mstp-worker").await;
+                    run_reader(
+                        readable,
+                        Some(get(&msg, "track")),
+                        num(&msg, "id"),
+                        "mstp-worker",
+                    )
+                    .await;
                     Ok(())
                 }
                 "source-port" => match port_source(&msg) {

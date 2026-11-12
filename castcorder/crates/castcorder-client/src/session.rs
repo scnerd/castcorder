@@ -33,6 +33,39 @@ pub fn track_name(take: TakeId, started_ms: u64) -> String {
     format!("take{:04}-{started_ms}-mic", take.0)
 }
 
+/// A display name as the host accepts it: ASCII letters, digits and '-', at
+/// most 16 characters (it travels unencoded in `?name=` and into file names).
+pub fn clean_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(16)
+        .collect()
+}
+
+/// The display name of a guest who typed none: distinct per browser profile,
+/// from the first four hex digits of its device id ("Guest3F2A").
+pub fn default_name(device: &str) -> String {
+    let hex: String = device
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .take(4)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if hex.is_empty() {
+        "Guest".into()
+    } else {
+        format!("Guest{hex}")
+    }
+}
+
+/// Delay before reconnect attempt `attempt` (1-based), in ms: 1, 2, 4, 8 s,
+/// then every 10 s for as long as the guest stays in the call.
+pub fn reconnect_delay_ms(attempt: u32) -> u32 {
+    1000u32
+        .saturating_mul(1 << attempt.saturating_sub(1).min(4))
+        .min(10_000)
+}
+
 /// Wall-clock length of one observation window, in ms.
 const CLOCK_WINDOW_MS: f64 = 1000.0;
 /// Smallest gain or loss reported, in ms of audio (Chrome inserts 10 ms blocks).
@@ -149,6 +182,24 @@ mod tests {
             on_take_status(Some(TakeId(1)), rec(2)),
             vec![Stop(TakeId(1)), Start(TakeId(2))]
         );
+    }
+
+    #[test]
+    fn default_names_are_distinct_per_device() {
+        assert_eq!(
+            default_name("3f2a91c0-0000-4000-8000-000000000000"),
+            "Guest3F2A"
+        );
+        assert_ne!(default_name("3f2a-x"), default_name("77b1-x"));
+        assert_eq!(default_name("xyz"), "Guest");
+        assert_eq!(clean_name("Ann Lee/<x>"), "AnnLeex");
+        assert_eq!(clean_name("Guest-3F2A"), "Guest-3F2A");
+    }
+
+    #[test]
+    fn reconnect_backs_off_to_ten_seconds() {
+        let d: Vec<u32> = (1..=7).map(reconnect_delay_ms).collect();
+        assert_eq!(d, vec![1000, 2000, 4000, 8000, 10_000, 10_000, 10_000]);
     }
 
     #[test]

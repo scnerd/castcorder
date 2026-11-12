@@ -1,6 +1,9 @@
 # Rust
 target/
 **/target/
+# Alternate build dirs (agents building while a host holds target/ and dist/)
+target-agent/
+**/dist-agent/
 
 # Trunk / web build output
 dist/

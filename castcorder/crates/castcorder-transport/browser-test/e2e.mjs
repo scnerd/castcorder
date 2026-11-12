@@ -19,7 +19,7 @@ const WORKSPACE = join(HERE, '..', '..', '..');
 process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium } = await import('playwright');
 
-const exe = join(WORKSPACE, 'target', 'release', 'examples',
+const exe = join(process.env.CARGO_TARGET_DIR || join(WORKSPACE, 'target'), 'release', 'examples',
   process.platform === 'win32' ? 'browser_host.exe' : 'browser_host');
 if (!existsSync(exe)) { console.log('FAIL host binary missing: ' + exe); process.exit(1); }
 

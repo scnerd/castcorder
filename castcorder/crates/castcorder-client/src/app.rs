@@ -16,6 +16,12 @@
 //! 4. On "control", binary frames are castcorder-protocol messages: send
 //!    `Join`, then `GetTakeStatus`; every `TakeStatusChanged` starts or stops
 //!    the track ([`crate::session::on_take_status`]).
+//! 5. While joined: hold a Screen Wake Lock, and every second check the host
+//!    is still heard and the microphone still live. A lost connection is
+//!    retried with backoff (at once when the page becomes visible or the
+//!    network returns) while recording goes on locally; on rejoin the take
+//!    continues. A microphone that ended is reopened, the take continuing in a
+//!    new segment. Leave stops every track and closes every audio context.
 //!
 //! Forwarded remote audio plays through `<audio>` elements. JS handles live in
 //! a thread-local [`Engine`]; Leptos signals hold only plain values.
@@ -45,7 +51,9 @@ use web_sys::{
 };
 
 use crate::js::{call, describe, get, num, object, set, string, stringify};
-use crate::session::{RecorderCommand, on_take_status, track_name};
+use crate::session::{
+    RecorderCommand, clean_name, default_name, on_take_status, reconnect_delay_ms, track_name,
+};
 use crate::signal::Signal;
 
 /// The data channel the protocol client speaks over: sends go straight to the
@@ -106,8 +114,23 @@ struct Engine {
     recording: Option<TakeId>,
     offers: VecDeque<String>,
     answering: bool,
+    /// Interval timers of this join (the 1 s tick).
     timers: Vec<i32>,
     mid_origin: Vec<(String, String)>,
+    /// The host's last take status (survives a dropped connection).
+    status: Option<TakeStatus>,
+    /// When the current connection attempt started and when the host was last
+    /// heard on "control" (Date.now() ms; 0 = not yet).
+    conn_started: f64,
+    last_rx: f64,
+    /// Failed connection attempts in a row, and the pending retry timeout.
+    attempts: u32,
+    retry: Option<i32>,
+    /// The Screen Wake Lock sentinel while one is held.
+    wake: Option<JsValue>,
+    /// The microphone is being reopened (its track ended under us).
+    restarting: bool,
+    last_restart: f64,
 }
 
 thread_local! {
@@ -117,6 +140,72 @@ thread_local! {
     /// The capture attempt waiting for the worker's `source-ok`/`source-failed`.
     static SOURCE_ACK: RefCell<Option<(f64, js_sys::Function)>> = const { RefCell::new(None) };
     static SOURCE_ATTEMPT: Cell<f64> = const { Cell::new(0.0) };
+    /// Bumped by every join and leave: async work of an older join stops.
+    static JOIN_EPOCH: Cell<u32> = const { Cell::new(0) };
+    /// Bumped by every connection attempt and drop: callbacks of an older
+    /// RTCPeerConnection are ignored.
+    static CONN_EPOCH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A second Rust handle to the same JS object. Never write `stream.clone()`
+/// or `track.clone()`: web-sys gives MediaStream and MediaStreamTrack an
+/// inherent `clone()` that calls the JS method, which opens new device tracks
+/// (the old code kept those clones and left the real microphone running after
+/// Leave).
+fn handle<T: Clone>(x: &T) -> T {
+    x.clone()
+}
+
+fn join_epoch() -> u32 {
+    JOIN_EPOCH.get()
+}
+
+fn stale(epoch: u32) -> bool {
+    JOIN_EPOCH.get() != epoch
+}
+
+/// Discard a promise without leaving an unhandled rejection: a failure is
+/// logged as a warning.
+fn quiet(p: Result<impl Into<JsValue>, JsValue>, what: &'static str) {
+    let p: JsValue = match p {
+        Ok(p) => p.into(),
+        Err(e) => {
+            warn!(error = %describe(&e), "{what} failed");
+            return;
+        }
+    };
+    if p.is_instance_of::<Promise>() {
+        let on_err = Closure::once_into_js(move |e: JsValue| {
+            warn!(error = %describe(&e), "{what} failed");
+        });
+        let _ = call(&p, "catch", &[&on_err]);
+    }
+}
+
+/// Stop every track of `streams` and `tracks`.
+fn stop_tracks(streams: &[Option<MediaStream>], tracks: &[MediaStreamTrack]) {
+    for s in streams.iter().flatten() {
+        for t in s.get_tracks().iter() {
+            t.unchecked_into::<MediaStreamTrack>().stop();
+        }
+    }
+    for t in tracks {
+        t.stop();
+    }
+}
+
+/// Close an AudioContext unless it is closed already.
+fn close_audio(ctx: Option<AudioContext>, worklet: Option<AudioWorkletNode>) {
+    if let Some(n) = worklet
+        && let Ok(p) = n.port()
+    {
+        let _ = p.post_message(&worker_cmd("stop"));
+    }
+    if let Some(c) = ctx
+        && c.state() != AudioContextState::Closed
+    {
+        quiet(c.close(), "AudioContext close");
+    }
 }
 
 fn with_engine<R>(f: impl FnOnce(&mut Engine) -> R) -> R {
@@ -431,9 +520,12 @@ async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> {
 
 /// A JS clone() of `track`: a second track on the same source, stopped
 /// independently. Kept in the engine so leave stops it.
-fn clone_track(track: &MediaStreamTrack) -> Result<MediaStreamTrack, JsValue> {
+fn clone_track(track: &MediaStreamTrack, epoch: u32) -> Result<MediaStreamTrack, JsValue> {
+    if stale(epoch) {
+        return Err("left the call".into());
+    }
     let clone: MediaStreamTrack = call(track, "clone", &[])?.unchecked_into();
-    with_engine(|e| e.sources.push(clone.clone()));
+    with_engine(|e| e.sources.push(handle(&clone)));
     Ok(clone)
 }
 
@@ -492,11 +584,11 @@ async fn try_source(msg: JsValue, transfer: Option<&Array>, timeout_ms: i32) -> 
 
 /// Path (a): MediaStreamTrackProcessor on the page; its readable goes to the
 /// worker (Chromium cannot transfer the track itself).
-async fn capture_mstp_window(track: &MediaStreamTrack) -> Result<(), String> {
+async fn capture_mstp_window(track: &MediaStreamTrack, epoch: u32) -> Result<(), String> {
     let ctor: js_sys::Function = get(&window(), "MediaStreamTrackProcessor")
         .dyn_into()
         .map_err(|_| "MediaStreamTrackProcessor is not exposed on the page".to_string())?;
-    let clone = clone_track(track).map_err(|e| describe(&e))?;
+    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
     let init = object();
     set(&init, "track", &clone);
     let processor = Reflect::construct(&ctor, &Array::of1(&init)).map_err(|e| describe(&e))?;
@@ -507,7 +599,7 @@ async fn capture_mstp_window(track: &MediaStreamTrack) -> Result<(), String> {
 }
 
 /// Path (b): MediaStreamTrackProcessor in the worker, the track transferred.
-async fn capture_mstp_worker(track: &MediaStreamTrack) -> Result<(), String> {
+async fn capture_mstp_worker(track: &MediaStreamTrack, epoch: u32) -> Result<(), String> {
     match MSTP_IN_WORKER.get() {
         Some(true) => {}
         Some(false) => {
@@ -515,7 +607,7 @@ async fn capture_mstp_worker(track: &MediaStreamTrack) -> Result<(), String> {
         }
         None => return Err("the storage worker has not reported its features".into()),
     }
-    let clone = clone_track(track).map_err(|e| describe(&e))?;
+    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
     let msg = worker_cmd("source-track");
     set(&msg, "track", &clone);
     // Throws DataCloneError where MediaStreamTrack is not transferable.
@@ -530,11 +622,11 @@ const WORKLET_URL: &str = "./capture-worklet.js";
 /// track's sample rate where the browser says it, and its output is kept
 /// non-silent (-80 dBFS DC): Chrome renders a silent output slower than real
 /// time (spike FINDINGS.md).
-async fn capture_worklet(track: &MediaStreamTrack, ui: Ui) -> Result<(), String> {
+async fn capture_worklet(track: &MediaStreamTrack, ui: Ui, epoch: u32) -> Result<(), String> {
     let settings = track.get_settings();
     let track_rate = num(&settings, "sampleRate");
     let channels = (num(&settings, "channelCount") as u32).clamp(1, 2);
-    let clone = clone_track(track).map_err(|e| describe(&e))?;
+    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
     let stream = MediaStream::new_with_tracks(&Array::of1(&clone)).map_err(|e| describe(&e))?;
     let new_ctx = |rate: Option<f64>| -> Result<AudioContext, JsValue> {
         let opts = AudioContextOptions::new();
@@ -551,19 +643,20 @@ async fn capture_worklet(track: &MediaStreamTrack, ui: Ui) -> Result<(), String>
             // Firefox refuses a source whose rate differs from the context's.
             Err(e) if rate.is_some() => {
                 warn!(error = %describe(&e), track_rate, "AudioContext at the track rate refused the source; using the default rate");
-                let _ = ctx.close();
+                quiet(ctx.close(), "AudioContext close");
                 rate = None;
             }
             Err(e) => {
-                let _ = ctx.close();
+                quiet(ctx.close(), "AudioContext close");
                 return Err(describe(&e));
             }
         }
     };
+    // A fresh context per join (and per microphone restart); leave closes it.
     with_engine(|e| e.audio = Some(ctx.clone()));
     let build = async {
         // Not awaited: a context that autoplay keeps suspended would hang here.
-        let _ = ctx.resume();
+        quiet(ctx.resume(), "AudioContext resume");
         JsFuture::from(ctx.audio_worklet()?.add_module(WORKLET_URL)?).await?;
         let popts = object();
         set(&popts, "channels", channels);
@@ -592,24 +685,22 @@ async fn capture_worklet(track: &MediaStreamTrack, ui: Ui) -> Result<(), String>
             .post_message_with_transferable(&to_worklet, &Array::of1(&ch.port1()))?;
         Ok::<_, JsValue>((node, ch.port2()))
     };
-    let (node, port) = build.await.map_err(|e| describe(&e))?;
+    let built = build.await;
+    if stale(epoch) {
+        close_audio(Some(ctx), built.ok().map(|(n, _)| n));
+        return Err("left the call".into());
+    }
+    let (node, port) = built.map_err(|e| describe(&e))?;
     with_engine(|e| e.worklet = Some(node));
     let ctx_rate = f64::from(ctx.sample_rate());
     info!(track_rate, context_rate = ctx_rate, channels, state = ?ctx.state(), "capture worklet built");
     let suspended = ctx.state() == AudioContextState::Suspended;
     if suspended {
-        // Autoplay policy: the next click on the page resumes it.
+        // Autoplay policy: the next click on the page resumes it (the one
+        // page-wide listener, resume_audio, which never touches a closed context).
         warn!("AudioContext suspended by the autoplay policy; waiting for a click");
         ui.warning
             .set("Recording needs one more click: click anywhere on this page.".into());
-        let c = ctx.clone();
-        let resume = Closure::<dyn FnMut()>::new(move || {
-            let _ = c.resume();
-        });
-        if let Some(d) = window().document() {
-            let _ = d.add_event_listener_with_callback("click", resume.as_ref().unchecked_ref());
-        }
-        resume.forget();
     }
     let msg = worker_cmd("source-port");
     set(&msg, "port", &port);
@@ -626,7 +717,7 @@ async fn capture_worklet(track: &MediaStreamTrack, ui: Ui) -> Result<(), String>
 /// Choose and start the recording capture path, logging the choice with the
 /// browser and the raw track's settings. Never fails the join: without raw
 /// capture the call goes on, with a warning on the page and in the log.
-async fn start_capture(ui: Ui, raw: MediaStream) {
+async fn start_capture(ui: Ui, raw: MediaStream, epoch: u32) {
     let ctx = with_engine(|e| e.ctx.clone());
     let user_agent = window().navigator().user_agent().unwrap_or_default();
     let track = first_audio(&raw);
@@ -638,11 +729,17 @@ async fn start_capture(ui: Ui, raw: MediaStream) {
     let mut chosen = "none";
     if let Some(track) = track.as_ref() {
         for path in ["mstp-window", "mstp-worker", "worklet"] {
+            if stale(epoch) {
+                return;
+            }
             let r = match path {
-                "mstp-window" => capture_mstp_window(track).await,
-                "mstp-worker" => capture_mstp_worker(track).await,
-                _ => capture_worklet(track, ui).await,
+                "mstp-window" => capture_mstp_window(track, epoch).await,
+                "mstp-worker" => capture_mstp_worker(track, epoch).await,
+                _ => capture_worklet(track, ui, epoch).await,
             };
+            if stale(epoch) {
+                return;
+            }
             match r {
                 Ok(()) => {
                     chosen = path;
@@ -742,7 +839,9 @@ fn pump_rpc(ui: Ui) {
             e.join_request = None;
             match r {
                 Response::Joined { participant } => {
-                    info!(call = %ctx.call, device = %ctx.device, participant = participant.0, "joined");
+                    let rejoined = e.attempts > 0;
+                    e.attempts = 0;
+                    info!(call = %ctx.call, device = %ctx.device, participant = participant.0, rejoined, recording = ?e.recording, "joined");
                     e.participant = Some(participant);
                     ui.participant.set(participant.0.to_string());
                     match rpc.send(Request::GetTakeStatus) {
@@ -785,13 +884,7 @@ fn pump_rpc(ui: Ui) {
     });
     for s in statuses {
         info!(call = %ctx.call, device = %ctx.device, status = ?s, "take status");
-        let current = with_engine(|e| e.recording);
-        for c in on_take_status(current, s) {
-            match c {
-                RecorderCommand::Start(take) => start_track(ui, take),
-                RecorderCommand::Stop(take) => stop_track(take),
-            }
-        }
+        let current = apply_status(ui, s);
         if s == TakeStatus::Idle && current.is_none() {
             // (After a stop the worker syncs by itself once the track is closed.)
             // Host connected and nothing recording: sync the outbox.
@@ -800,6 +893,22 @@ fn pump_rpc(ui: Ui) {
             post_worker(&msg, None);
         }
     }
+}
+
+/// Bring the recorder in line with the host's take status `s` (and remember
+/// it); returns what was recording before.
+fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
+    let current = with_engine(|e| {
+        e.status = Some(s);
+        e.recording
+    });
+    for c in on_take_status(current, s) {
+        match c {
+            RecorderCommand::Start(take) => start_track(ui, take),
+            RecorderCommand::Stop(take) => stop_track(take),
+        }
+    }
+    current
 }
 
 fn start_track(ui: Ui, take: TakeId) {
@@ -860,6 +969,7 @@ fn stop_track(take: TakeId) {
 }
 
 fn on_control_message(ui: Ui, ev: MessageEvent) {
+    with_engine(|e| e.last_rx = js_sys::Date::now());
     let data = ev.data();
     if let Some(text) = data.as_string() {
         match Signal::from_json(&text) {
@@ -868,8 +978,9 @@ fn on_control_message(ui: Ui, ev: MessageEvent) {
                 answer_offers(ui);
             }
             Some(Signal::Bye) => {
-                warn!("host said bye");
-                leave(ui);
+                // Not a leave: the guest stays in the call, keeps recording and
+                // reconnects (the host may be restarting).
+                connection_lost(ui, join_epoch(), "the host said bye");
             }
             Some(Signal::Hb | Signal::Answer { .. }) => {}
             None => warn!(frame = %text, "unknown text frame on control"),
@@ -971,23 +1082,45 @@ fn every(ms: i32, f: impl FnMut() + 'static) -> Option<i32> {
     id
 }
 
+/// The host sends a heartbeat every second and drops a guest after 4 s of
+/// silence: this long without a message from it means the connection is gone.
+const HOST_SILENCE_MS: f64 = 5000.0;
+/// How long one connection attempt may take to open "control".
+const CONNECT_TIMEOUT_MS: f64 = 20_000.0;
+/// Least time between two attempts to reopen a microphone that ended.
+const MEDIA_RETRY_MS: f64 = 5000.0;
+
+const NAME_KEY: &str = "castcorder.name";
+
+fn stored_name() -> Option<String> {
+    window()
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item(NAME_KEY)
+        .ok()
+        .flatten()
+        .filter(|n| !n.is_empty())
+}
+
 async fn join(ui: Ui) -> Result<(), JsValue> {
-    let name: String = ui
-        .name
-        .get_untracked()
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(16)
-        .collect();
-    let name = if name.is_empty() {
-        "guest".to_string()
+    let epoch = join_epoch().wrapping_add(1);
+    JOIN_EPOCH.set(epoch);
+    let device = device_id();
+    let typed = clean_name(&ui.name.get_untracked());
+    let name = if typed.is_empty() {
+        default_name(&device)
     } else {
-        name
+        typed
     };
+    ui.name.set(name.clone());
+    if let Some(s) = window().local_storage().ok().flatten() {
+        let _ = s.set_item(NAME_KEY, &name);
+    }
     let url = ui.signal_url.get_untracked();
     let ctx = Ctx {
         call: url.clone(),
-        device: device_id(),
+        device,
         name: name.clone(),
     };
     info!(call = %ctx.call, device = %ctx.device, name = %name, "joining");
@@ -1003,24 +1136,67 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     ui.connection.set("opening microphones".into());
 
     let (raw, live) = open_media().await?;
+    if stale(epoch) {
+        // Left while the browser was opening the devices.
+        stop_tracks(&[Some(raw), Some(live)], &[]);
+        return Ok(());
+    }
     with_engine(|e| {
-        e.raw = Some(raw.clone());
-        e.live = Some(live.clone());
+        e.raw = Some(handle(&raw));
+        e.live = Some(handle(&live));
         e.capture = None;
     });
     // Recording capture starts beside the call and never holds up or fails
     // the join (see start_capture).
-    spawn_local(start_capture(ui, raw.clone()));
+    spawn_local(start_capture(ui, raw, epoch));
+    acquire_wake_lock(epoch);
+    let tick = every(1000, move || on_tick(ui, epoch));
+    with_engine(|e| e.timers.extend(tick));
+    connect(ui, epoch);
+    Ok(())
+}
 
+/// Start one connection attempt; a failure schedules the next.
+fn connect(ui: Ui, epoch: u32) {
+    let conn = CONN_EPOCH.get().wrapping_add(1);
+    CONN_EPOCH.set(conn);
+    let attempt = with_engine(|e| {
+        e.conn_started = js_sys::Date::now();
+        e.last_rx = 0.0;
+        e.attempts
+    });
+    ui.connection.set(if attempt == 0 {
+        "connecting".into()
+    } else {
+        format!("reconnecting... (attempt {attempt})")
+    });
+    spawn_local(async move {
+        if let Err(err) = connect_once(ui, epoch, conn).await
+            && !stale(epoch)
+            && CONN_EPOCH.get() == conn
+        {
+            connection_lost(ui, epoch, &describe(&err));
+        }
+    });
+}
+
+async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
+    let current = move || !stale(epoch) && CONN_EPOCH.get() == conn;
+    let (live, ctx) = with_engine(|e| (e.live.clone(), e.ctx.clone()));
+    let url = ctx.call.clone();
     let pc = RtcPeerConnection::new()?;
+    // Stored before the first await so a drop or leave always closes it.
+    with_engine(|e| e.pc = Some(pc.clone()));
     let mut has_video = false;
-    for t in live.get_tracks().iter() {
-        let t: MediaStreamTrack = t.unchecked_into();
-        has_video |= t.kind() == "video";
-        let init = object();
-        set(&init, "direction", "sendonly");
-        set(&init, "streams", Array::of1(&live));
-        call(&pc, "addTransceiver", &[&t, &init])?;
+    if let Some(live) = live.as_ref() {
+        for t in live.get_tracks().iter() {
+            let t: MediaStreamTrack = t.unchecked_into();
+            has_video |= t.kind() == "video";
+            let init = object();
+            set(&init, "direction", "sendonly");
+            set(&init, "streams", Array::of1(live));
+            call(&pc, "addTransceiver", &[&t, &init])?;
+        }
     }
     if !has_video {
         // The wire contract's first offer carries audio and video m-lines.
@@ -1033,7 +1209,11 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     let data = pc.create_data_channel("data");
     data.set_binary_type(RtcDataChannelType::Arraybuffer);
     data.set_buffered_amount_low_threshold(DATA_LOW);
-    let ondata = Closure::<dyn FnMut(MessageEvent)>::new(on_data_message);
+    let ondata = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
+        if current() {
+            on_data_message(ev);
+        }
+    });
     data.set_onmessage(Some(ondata.as_ref().unchecked_ref()));
     ondata.forget();
     let onlow = Closure::<dyn FnMut()>::new(pull_frames);
@@ -1041,25 +1221,53 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     onlow.forget();
     post_worker(&worker_cmd("xfer-reset"), None);
 
-    let onmsg =
-        Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| on_control_message(ui, ev));
+    let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
+        if current() {
+            on_control_message(ui, ev);
+        }
+    });
     control.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
     onmsg.forget();
-    let ontrack = Closure::<dyn FnMut(RtcTrackEvent)>::new(on_track);
+    let ontrack = Closure::<dyn FnMut(RtcTrackEvent)>::new(move |ev: RtcTrackEvent| {
+        if current() {
+            on_track(ev);
+        }
+    });
     pc.set_ontrack(Some(ontrack.as_ref().unchecked_ref()));
     ontrack.forget();
     let pc2 = pc.clone();
     let onstate = Closure::<dyn FnMut()>::new(move || {
+        if !current() {
+            return;
+        }
         let state = format!("{:?}", pc2.connection_state()).to_lowercase();
-        let ctx = with_engine(|e| e.ctx.clone());
+        let (ctx, attempts) = with_engine(|e| (e.ctx.clone(), e.attempts));
         info!(call = %ctx.call, device = %ctx.device, state = %state, "connection state");
-        ui.connection.set(state);
+        ui.connection.set(match state.as_str() {
+            "new" | "connecting" if attempts > 0 => {
+                format!("reconnecting... (attempt {attempts})")
+            }
+            "disconnected" => "disconnected (waiting for the host)".into(),
+            _ => state.clone(),
+        });
+        if matches!(
+            pc2.connection_state(),
+            web_sys::RtcPeerConnectionState::Failed | web_sys::RtcPeerConnectionState::Closed
+        ) {
+            connection_lost(ui, epoch, &format!("peer connection {state}"));
+        }
     });
     pc.set_onconnectionstatechange(Some(onstate.as_ref().unchecked_ref()));
     onstate.forget();
     let ctl = control.clone();
     let onopen = Closure::<dyn FnMut()>::new(move || {
-        let ctx = with_engine(|e| e.ctx.clone());
+        if !current() {
+            return;
+        }
+        let ctx = with_engine(|e| {
+            e.last_rx = js_sys::Date::now();
+            e.ctx.clone()
+        });
         info!(call = %ctx.call, device = %ctx.device, "control channel open; sending Join");
         let rpc = RpcClient::new(DcChannel {
             dc: ctl.clone(),
@@ -1081,15 +1289,20 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     control.set_onopen(Some(onopen.as_ref().unchecked_ref()));
     onopen.forget();
     with_engine(|e| {
-        e.pc = Some(pc.clone());
         e.control = Some(control.clone());
         e.data = Some(data.clone());
     });
 
     let offer = JsFuture::from(pc.create_offer()).await?;
+    if !current() {
+        return Ok(());
+    }
     let local = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
     local.set_sdp(&string(&offer, "sdp"));
     JsFuture::from(pc.set_local_description(&local)).await?;
+    if !current() {
+        return Ok(());
+    }
     let body = object();
     set(&body, "type", "offer");
     set(&body, "sdp", string(&offer, "sdp"));
@@ -1101,13 +1314,16 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     set(&init, "headers", headers);
     set(&init, "body", stringify(&body));
     let sep = if url.contains('?') { '&' } else { '?' };
-    let target = format!("{url}{sep}name={name}");
+    let target = format!("{url}{sep}name={}", ctx.name);
     let resp = JsFuture::from(Promise::from(call(
         &window(),
         "fetch",
         &[&JsValue::from_str(&target), &init],
     )?))
     .await?;
+    if !current() {
+        return Ok(());
+    }
     if !get(&resp, "ok").is_truthy() {
         let text = JsFuture::from(Promise::from(call(&resp, "text", &[])?)).await?;
         return Err(JsValue::from_str(&format!(
@@ -1116,25 +1332,267 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
         )));
     }
     let answer = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
+    if !current() {
+        return Ok(());
+    }
     let remote = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
     remote.set_sdp(&string(&answer, "sdp"));
     JsFuture::from(pc.set_remote_description(&remote)).await?;
     info!(call = %ctx.call, device = %ctx.device, "answer applied");
-
-    let hb = every(1000, || send_signal(&Signal::Hb));
-    let stats = every(1000, move || {
-        spawn_local(async move {
-            if let Err(e) = refresh_inbound(ui).await {
-                warn!(error = %describe(&e), "stats failed");
-            }
-        })
-    });
-    with_engine(|e| e.timers.extend(hb.into_iter().chain(stats)));
     Ok(())
 }
 
-fn leave(ui: Ui) {
+/// Every second while joined: heartbeat, watch the connection and the
+/// microphone, refresh the inbound counters.
+fn on_tick(ui: Ui, epoch: u32) {
+    if stale(epoch) {
+        return;
+    }
+    send_signal(&Signal::Hb);
+    check_connection(ui, epoch);
+    check_media(ui, epoch);
+    spawn_local(async move {
+        if let Err(e) = refresh_inbound(ui).await {
+            warn!(error = %describe(&e), "stats failed");
+        }
+    });
+}
+
+/// Declare the connection lost if the host has gone quiet, "control" closed,
+/// or the attempt never opened. Events alone are not enough: a closed
+/// RTCPeerConnection fires none, and a sleeping phone misses them.
+fn check_connection(ui: Ui, epoch: u32) {
+    let now = js_sys::Date::now();
+    let reason = with_engine(|e| {
+        let pc = e.pc.as_ref()?;
+        if matches!(
+            pc.connection_state(),
+            web_sys::RtcPeerConnectionState::Failed | web_sys::RtcPeerConnectionState::Closed
+        ) {
+            return Some(format!("peer connection {:?}", pc.connection_state()).to_lowercase());
+        }
+        let ctl = e.control.as_ref()?;
+        if matches!(
+            ctl.ready_state(),
+            web_sys::RtcDataChannelState::Closing | web_sys::RtcDataChannelState::Closed
+        ) {
+            return Some("control channel closed".into());
+        }
+        if e.last_rx > 0.0 {
+            (now - e.last_rx > HOST_SILENCE_MS).then(|| {
+                format!(
+                    "nothing from the host for {:.0} s",
+                    (now - e.last_rx) / 1000.0
+                )
+            })
+        } else {
+            (now - e.conn_started > CONNECT_TIMEOUT_MS)
+                .then(|| "the connection did not open in time".into())
+        }
+    });
+    if let Some(r) = reason {
+        connection_lost(ui, epoch, &r);
+    }
+}
+
+/// The connection to the host is gone: drop it, keep recording, and retry.
+fn connection_lost(ui: Ui, epoch: u32, reason: &str) {
+    if stale(epoch) || with_engine(|e| e.retry.is_some()) {
+        return;
+    }
+    let (ctx, recording) = with_engine(|e| (e.ctx.clone(), e.recording));
+    warn!(call = %ctx.call, device = %ctx.device, reason = %reason, recording = ?recording, "connection to the host lost; recording continues locally; reconnecting");
+    disconnect();
+    let attempt = with_engine(|e| {
+        e.attempts += 1;
+        e.attempts
+    });
+    let delay = reconnect_delay_ms(attempt);
+    ui.connection.set(format!(
+        "reconnecting... (attempt {attempt} in {} s)",
+        delay / 1000
+    ));
+    ui.participant.set(String::new());
+    let cb = Closure::once_into_js(move || {
+        with_engine(|e| e.retry = None);
+        if !stale(epoch) {
+            connect(ui, epoch);
+        }
+    });
+    let id = window()
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), delay as i32)
+        .ok();
+    with_engine(|e| e.retry = id);
+}
+
+/// Retry at once if a reconnect is waiting (the page woke up, the network
+/// came back).
+fn retry_now(ui: Ui, epoch: u32) {
+    let Some(id) = with_engine(|e| e.retry.take()) else {
+        return;
+    };
+    window().clear_timeout_with_handle(id);
+    info!("retrying the connection now");
+    connect(ui, epoch);
+}
+
+/// Close the connection to the host (not the media, not the recording).
+fn disconnect() {
     send_signal(&Signal::Bye);
+    CONN_EPOCH.set(CONN_EPOCH.get().wrapping_add(1));
+    let pc = with_engine(|e| {
+        e.control = None;
+        e.data = None;
+        e.rpc = None;
+        e.offered.clear();
+        e.offer_requests.clear();
+        e.join_request = None;
+        e.status_request = None;
+        e.participant = None;
+        e.offers.clear();
+        e.answering = false;
+        e.mid_origin.clear();
+        e.last_rx = 0.0;
+        e.pc.take()
+    });
+    if let Some(pc) = pc {
+        pc.close();
+    }
+    post_worker(&worker_cmd("xfer-reset"), None);
+    if let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    {
+        remote.set_inner_html("");
+    }
+}
+
+/// Reopen the microphone if its track ended under us (a phone's system can
+/// stop it); a recording take continues in a new segment file.
+fn check_media(ui: Ui, epoch: u32) {
+    let now = js_sys::Date::now();
+    let ended = with_engine(|e| {
+        !e.restarting
+            && now - e.last_restart > MEDIA_RETRY_MS
+            && e.raw
+                .as_ref()
+                .and_then(first_audio)
+                .is_some_and(|t| string(&t, "readyState") == "ended")
+    });
+    if ended {
+        spawn_local(restart_media(ui, epoch));
+    }
+}
+
+async fn restart_media(ui: Ui, epoch: u32) {
+    let (ctx, take, raw, live, sources, audio, worklet) = with_engine(|e| {
+        e.restarting = true;
+        e.last_restart = js_sys::Date::now();
+        e.capture = None;
+        (
+            e.ctx.clone(),
+            e.recording.take(),
+            e.raw.take(),
+            e.live.take(),
+            std::mem::take(&mut e.sources),
+            e.audio.take(),
+            e.worklet.take(),
+        )
+    });
+    warn!(call = %ctx.call, device = %ctx.device, recording = ?take, "microphone track ended; reopening it (a recording take continues in a new segment)");
+    if take.is_some() {
+        flush_logs(false);
+        post_worker(&worker_cmd("stop"), None);
+    }
+    post_worker(&worker_cmd("close-source"), None);
+    stop_tracks(&[raw, live], &sources);
+    close_audio(audio, worklet);
+    match open_media().await {
+        Ok((raw, live)) if !stale(epoch) => {
+            with_engine(|e| {
+                e.raw = Some(handle(&raw));
+                e.live = Some(live);
+            });
+            start_capture(ui, raw, epoch).await;
+            if stale(epoch) {
+                return;
+            }
+            if let Some(s) = with_engine(|e| e.status) {
+                apply_status(ui, s);
+            }
+            // The call's stream must carry the new tracks: connect afresh.
+            if with_engine(|e| e.pc.is_some()) {
+                connection_lost(ui, epoch, "microphone reopened");
+            }
+        }
+        Ok((raw, live)) => stop_tracks(&[Some(raw), Some(live)], &[]),
+        Err(e) => {
+            warn!(call = %ctx.call, device = %ctx.device, error = %describe(&e), "microphone could not be reopened; retrying");
+            ui.warning
+                .set(format!("Microphone lost; retrying. ({})", describe(&e)));
+        }
+    }
+    with_engine(|e| e.restarting = false);
+}
+
+/// Hold a Screen Wake Lock while joined, so a phone keeps the call (and the
+/// page's timers) alive; the browser releases it whenever the page is hidden,
+/// so it is requested again on visibilitychange.
+fn acquire_wake_lock(epoch: u32) {
+    let held = with_engine(|e| {
+        e.wake
+            .as_ref()
+            .is_some_and(|s| !get(s, "released").is_truthy())
+    });
+    let wl = get(&window().navigator(), "wakeLock");
+    if held || wl.is_undefined() || wl.is_null() {
+        return;
+    }
+    spawn_local(async move {
+        let r = match call(&wl, "request", &[&JsValue::from_str("screen")]) {
+            Ok(p) => JsFuture::from(Promise::from(p)).await,
+            Err(e) => Err(e),
+        };
+        match r {
+            Ok(sentinel) if stale(epoch) => {
+                quiet(call(&sentinel, "release", &[]), "wake lock release")
+            }
+            Ok(sentinel) => {
+                info!("screen wake lock held");
+                with_engine(|e| e.wake = Some(sentinel));
+            }
+            Err(e) => warn!(error = %describe(&e), "screen wake lock refused"),
+        }
+    });
+}
+
+/// The page became visible or the network came back: take the wake lock
+/// again, check the connection, and retry at once if one is waiting.
+fn on_wake(ui: Ui) {
+    if !ui.joined.get_untracked() {
+        return;
+    }
+    let epoch = join_epoch();
+    if string(&window().document().expect("document"), "visibilityState") == "visible" {
+        acquire_wake_lock(epoch);
+    }
+    check_connection(ui, epoch);
+    retry_now(ui, epoch);
+}
+
+/// A click resumes a capture context that the autoplay policy suspended.
+/// Only the current join's context, and only while it is suspended.
+fn resume_audio() {
+    if let Some(c) = with_engine(|e| e.audio.clone())
+        && c.state() == AudioContextState::Suspended
+    {
+        quiet(c.resume(), "AudioContext resume");
+    }
+}
+
+fn leave(ui: Ui) {
+    JOIN_EPOCH.set(JOIN_EPOCH.get().wrapping_add(1));
+    disconnect();
     let engine = with_engine(|e| {
         let worker = e.worker.take();
         std::mem::replace(
@@ -1146,43 +1604,32 @@ fn leave(ui: Ui) {
         )
     });
     info!(call = %engine.ctx.call, device = %engine.ctx.device, "leaving");
-    if engine.recording.is_some() {
-        post_worker(&worker_cmd("stop"), None);
-    }
-    post_worker(&worker_cmd("xfer-reset"), None);
-    post_worker(&worker_cmd("close-source"), None);
-    // Last: close this session's log file so it can be offered at the next join.
-    flush_logs(true);
     for id in engine.timers {
         window().clear_interval_with_handle(id);
     }
-    if let Some(pc) = engine.pc {
-        pc.close();
+    if let Some(id) = engine.retry {
+        window().clear_timeout_with_handle(id);
     }
-    for s in [engine.raw, engine.live].into_iter().flatten() {
-        for t in s.get_tracks().iter() {
-            t.unchecked_into::<MediaStreamTrack>().stop();
-        }
+    if engine.recording.is_some() {
+        post_worker(&worker_cmd("stop"), None);
     }
-    for t in engine.sources {
-        t.stop();
+    post_worker(&worker_cmd("close-source"), None);
+    // Last: close this session's log file so it can be offered at the next join.
+    flush_logs(true);
+    // Release the microphone and camera: every track, clones included.
+    stop_tracks(&[engine.raw, engine.live], &engine.sources);
+    close_audio(engine.audio, engine.worklet);
+    if let Some(s) = engine.wake {
+        quiet(call(&s, "release", &[]), "wake lock release");
     }
-    if let Some(n) = engine.worklet
-        && let Ok(p) = n.port()
-    {
-        let _ = p.post_message(&worker_cmd("stop"));
+    // A capture attempt still waiting for the worker gives up now.
+    if let Some((_, resolve)) = SOURCE_ACK.with(|a| a.borrow_mut().take()) {
+        let o = object();
+        set(&o, "type", "source-failed");
+        set(&o, "message", "left the call");
+        let _ = resolve.call1(&JsValue::NULL, &o);
     }
-    if let Some(c) = engine.audio {
-        let _ = c.close();
-    }
-    SOURCE_ACK.with(|a| a.borrow_mut().take());
     ui.warning.set(String::new());
-    if let Some(remote) = window()
-        .document()
-        .and_then(|d| d.get_element_by_id("remote"))
-    {
-        remote.set_inner_html("");
-    }
     ui.joined.set(false);
     ui.connection.set("left".into());
     ui.participant.set(String::new());
@@ -1227,6 +1674,8 @@ fn Producer() -> impl IntoView {
     let take = RwSignal::new(String::new());
     let guests = RwSignal::new(Vec::<String>::new());
     let result = RwSignal::new(String::new());
+    // A start or stop request in flight.
+    let busy = RwSignal::new(false);
     let refresh = move || {
         spawn_local(async move {
             if let Ok(text) = host_request("GET", "/status").await
@@ -1253,21 +1702,26 @@ fn Producer() -> impl IntoView {
         }
     });
     let post = move |path: &'static str| {
+        busy.set(true);
         spawn_local(async move {
             match host_request("POST", path).await {
                 Ok(t) => result.set(t),
                 Err(e) => result.set(describe(&e)),
             }
+            busy.set(false);
             refresh();
         })
     };
+    // Only the valid action is offered, from the take status the page polls.
+    let can_start = move || !busy.get() && take.get().starts_with("idle");
+    let can_stop = move || !busy.get() && take.get().starts_with("recording");
     view! {
         <Show when=move || producer.get()>
             <h2>"Producer"</h2>
             <p>
-                <button id="take-start" on:click=move |_| post("/take/start")>"Start take"</button>
+                <button id="take-start" disabled=move || !can_start() on:click=move |_| post("/take/start")>"Start take"</button>
                 " "
-                <button id="take-stop" on:click=move |_| post("/take/stop")>"Stop take"</button>
+                <button id="take-stop" disabled=move || !can_stop() on:click=move |_| post("/take/stop")>"Stop take"</button>
                 " Take: " <span id="take-status">{move || take.get()}</span>
                 " " <code id="take-result">{move || result.get()}</code>
             </p>
@@ -1285,7 +1739,7 @@ fn Producer() -> impl IntoView {
 fn App() -> impl IntoView {
     let origin = window().location().origin().unwrap_or_default();
     let ui = Ui {
-        name: RwSignal::new(query_param("name").unwrap_or_default()),
+        name: RwSignal::new(query_param("name").or_else(stored_name).unwrap_or_default()),
         signal_url: RwSignal::new(
             query_param("signal").unwrap_or_else(|| format!("{origin}/offer")),
         ),
@@ -1303,6 +1757,18 @@ fn App() -> impl IntoView {
     if let Err(e) = start_worker(ui) {
         ui.error("worker", &e);
     }
+    let placeholder = default_name(&device_id());
+    // Page-wide listeners, installed once (never per join).
+    let listen = |target: &web_sys::EventTarget, event: &str, f: Box<dyn FnMut()>| {
+        let cb = Closure::<dyn FnMut()>::wrap(f);
+        let _ = target.add_event_listener_with_callback(event, cb.as_ref().unchecked_ref());
+        cb.forget();
+    };
+    if let Some(d) = window().document() {
+        listen(&d, "click", Box::new(resume_audio));
+        listen(&d, "visibilitychange", Box::new(move || on_wake(ui)));
+    }
+    listen(&window(), "online", Box::new(move || on_wake(ui)));
     let on_join = move |_| {
         spawn_local(async move {
             if let Err(e) = join(ui).await {
@@ -1318,7 +1784,7 @@ fn App() -> impl IntoView {
     view! {
         <h1>"Castcorder"</h1>
         <p>
-            "Name " <input id="name" prop:value=move || ui.name.get()
+            "Name " <input id="name" placeholder=placeholder prop:value=move || ui.name.get()
                 on:input=move |ev| ui.name.set(event_target_value(&ev)) />
             " Host " <input id="signal" size="50" prop:value=move || ui.signal_url.get()
                 on:input=move |ev| ui.signal_url.set(event_target_value(&ev)) />
