@@ -253,7 +253,7 @@ try {
     const m = join(TAKE_DIR, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
   };
-  await waitFor(() => verified() >= 4, 'both guests\' tracks and sidecars verified on the host', 90000, 250);
+  await waitFor(() => verified() >= 6, 'both guests\' tracks, sidecars and timing metadata verified on the host', 90000, 250);
   const files = readdirSync(TAKE_DIR).sort();
   console.log('host take01: ' + files.join(' '));
   for (const n of ['A', 'B']) {

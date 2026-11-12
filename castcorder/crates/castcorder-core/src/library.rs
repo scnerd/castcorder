@@ -8,6 +8,8 @@
 //! <library>/<call>/takeNN/manifest.jsonl          the take's manifest
 //! <library>/<call>/takeNN/takeNN_<who>_<src>.wav  a track, received in place
 //!                         ... .wav.obao, .wav.journal   while it is incomplete
+//! <library>/<call>/takeNN/aligned/                aligned tracks and marker exports
+//!                                                 (castcorder-align; never in the manifest)
 //! ```
 //!
 //! The manifest is an append-only log of JSON lines (the disk port has no
@@ -99,6 +101,49 @@ impl<S: Storage> Take<S> {
     }
 }
 
+/// Parse a take's manifest (the bytes of [`MANIFEST`]) without touching the
+/// disk: the entries keyed by (device, name), and how many leading bytes were
+/// whole, parsable lines (parsing stops at a torn or unparsable line). For
+/// readers such as the aligned-track renderer, which must not repair or hold
+/// open a manifest the host is appending to.
+pub fn parse_manifest(buf: &[u8]) -> (BTreeMap<(String, String), ManifestEntry>, usize) {
+    let mut entries = BTreeMap::new();
+    let mut valid = 0usize;
+    while let Some(nl) = buf[valid..].iter().position(|b| *b == b'\n') {
+        let Ok(rec) = serde_json::from_slice::<Record>(&buf[valid..valid + nl]) else {
+            break;
+        };
+        match rec {
+            Record::Offered {
+                offer,
+                participant,
+                file,
+            } => {
+                entries.insert(
+                    (offer.device.clone(), offer.name.clone()),
+                    ManifestEntry {
+                        offer,
+                        participant,
+                        file,
+                        verified: false,
+                    },
+                );
+            }
+            Record::Verified { root, device, name } => {
+                for e in entries.values_mut().filter(|e| {
+                    hex(&e.offer.root) == root
+                        && device.as_ref().is_none_or(|d| *d == e.offer.device)
+                        && name.as_ref().is_none_or(|n| *n == e.offer.name)
+                }) {
+                    e.verified = true;
+                }
+            }
+        }
+        valid += nl + 1;
+    }
+    (entries, valid)
+}
+
 /// The directory of a take; take 0 (logs) is `logs`.
 fn take_dir_name(take: TakeId) -> String {
     if take.0 == 0 {
@@ -116,6 +161,21 @@ fn clean(s: &str, max: usize, fallback: &str) -> String {
         .take(max)
         .collect();
     if c.is_empty() { fallback.into() } else { c }
+}
+
+/// A file extension from an offer's format: `[A-Za-z0-9-]` parts joined by
+/// single dots (`timing.jsonl`), at most 16 characters, lower case; `bin` if
+/// nothing is left.
+fn clean_ext(format: &str) -> String {
+    let parts: Vec<String> = format
+        .split('.')
+        .map(|p| clean(p, 16, ""))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut ext = parts.join(".");
+    ext.truncate(16);
+    let ext = ext.trim_end_matches('.').to_ascii_lowercase();
+    if ext.is_empty() { "bin".into() } else { ext }
 }
 
 fn sidecars(file: &str) -> [String; 2] {
@@ -172,40 +232,7 @@ impl<S: Storage> Library<S> {
         let len = log.len()?;
         let mut buf = vec![0u8; len as usize];
         castcorder_transfer::io::read_exact_at(&mut log, 0, &mut buf)?;
-        let mut entries = BTreeMap::new();
-        let mut valid = 0usize;
-        while let Some(nl) = buf[valid..].iter().position(|b| *b == b'\n') {
-            let Ok(rec) = serde_json::from_slice::<Record>(&buf[valid..valid + nl]) else {
-                break;
-            };
-            match rec {
-                Record::Offered {
-                    offer,
-                    participant,
-                    file,
-                } => {
-                    entries.insert(
-                        (offer.device.clone(), offer.name.clone()),
-                        ManifestEntry {
-                            offer,
-                            participant,
-                            file,
-                            verified: false,
-                        },
-                    );
-                }
-                Record::Verified { root, device, name } => {
-                    for e in entries.values_mut().filter(|e| {
-                        hex(&e.offer.root) == root
-                            && device.as_ref().is_none_or(|d| *d == e.offer.device)
-                            && name.as_ref().is_none_or(|n| *n == e.offer.name)
-                    }) {
-                        e.verified = true;
-                    }
-                }
-            }
-            valid += nl + 1;
-        }
+        let (entries, valid) = parse_manifest(&buf);
         if valid as u64 != len {
             warn!(call = %self.call, take = take.0, kept = valid, len, "manifest had a torn tail; truncated");
             log.set_len(valid as u64)?;
@@ -260,7 +287,7 @@ impl<S: Storage> Library<S> {
         }
         let who = clean(participant, 32, "guest");
         let src = clean(&offer.source.0, 32, "src");
-        let ext = clean(&offer.format, 8, "bin").to_ascii_lowercase();
+        let ext = clean_ext(&offer.format);
         let mut n = 1;
         let file = loop {
             let who = if n == 1 {
@@ -670,5 +697,19 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             progress = true;
         }
         Ok(progress)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_ext;
+
+    #[test]
+    fn extensions_keep_single_dots_only() {
+        assert_eq!(clean_ext("wav"), "wav");
+        assert_eq!(clean_ext("timing.jsonl"), "timing.jsonl");
+        assert_eq!(clean_ext("../x..JSON"), "x.json");
+        assert_eq!(clean_ext("."), "bin");
+        assert_eq!(clean_ext("abcdefgh.ijklmnop"), "abcdefgh.ijklmno");
     }
 }

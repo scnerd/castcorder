@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+castcorder-port-clock.workspace = true
 castcorder-port-disk.workspace = true
 castcorder-protocol.workspace = true
 castcorder-transfer.workspace = true
@@ -19,3 +20,6 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+castcorder-port-net.workspace = true

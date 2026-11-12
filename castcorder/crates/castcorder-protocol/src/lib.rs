@@ -110,6 +110,13 @@ pub enum Request {
     /// verified receipt there (castcorder-transfer DONE). Only then may the device
     /// delete its copy.
     OfferTrack(TrackOffer),
+    /// One clock exchange (castcorder-core clocksync): the device stamps
+    /// `t0_us` on its own clock; answered with [`Response::ClockPong`]. Sent
+    /// several times a second after joining, then every second.
+    ClockPing {
+        /// Device time the ping was sent, microseconds.
+        t0_us: i64,
+    },
 }
 
 /// Whether a take is recording.
@@ -173,6 +180,18 @@ pub enum Response {
         file: String,
         /// Whether the host already holds it verified (it confirms on "data" too).
         received: bool,
+    },
+    /// The answer to [`Request::ClockPing`], stamped on the host timeline.
+    ClockPong {
+        /// The ping's `t0_us`, echoed.
+        t0_us: i64,
+        /// Host time the ping was taken, microseconds.
+        t1_us: i64,
+        /// Host time this pong was sent, microseconds.
+        t2_us: i64,
+        /// The host timeline's id: a change means the host restarted and
+        /// earlier exchanges no longer apply.
+        timeline: u64,
     },
 }
 
@@ -272,6 +291,9 @@ mod tests {
                 root: [7; 32],
                 format: "wav".into(),
             }),
+            Request::ClockPing {
+                t0_us: 1_767_225_600_000_000,
+            },
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -281,6 +303,15 @@ mod tests {
             assert_eq!(decode::<ClientMessage>(&encode(&msg)).unwrap(), msg);
         }
         let core = vec![
+            CoreMessage::Response {
+                id: RequestId(10),
+                response: Response::ClockPong {
+                    t0_us: -5,
+                    t1_us: 1_767_225_600_000_000,
+                    t2_us: 1_767_225_600_000_050,
+                    timeline: 1_767_225_000_000_000,
+                },
+            },
             CoreMessage::Response {
                 id: RequestId(9),
                 response: Response::TrackAccepted {
@@ -348,6 +379,17 @@ mod tests {
                 received: true
             }),
             vec![6, 0, 1]
+        );
+        // Clock sync (appended): i64 fields are zigzag varints, u64 plain.
+        assert_eq!(encode(&Request::ClockPing { t0_us: -1 }), vec![6, 1]);
+        assert_eq!(
+            encode(&Response::ClockPong {
+                t0_us: 1,
+                t1_us: 2,
+                t2_us: -2,
+                timeline: 5
+            }),
+            vec![7, 2, 4, 3, 5]
         );
         assert_eq!(
             encode(&Event::TakeStatusChanged(TakeStatus::Idle)),

@@ -390,6 +390,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
 
 [[package]]
+name = "castcorder-align"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "castcorder-core",
+ "castcorder-port-capture",
+ "castcorder-port-disk",
+ "castcorder-protocol",
+ "castcorder-recorder",
+ "claxon",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "castcorder-app"
 version = "0.0.0"
 
@@ -430,7 +447,9 @@ dependencies = [
 name = "castcorder-core"
 version = "0.0.0"
 dependencies = [
+ "castcorder-port-clock",
  "castcorder-port-disk",
+ "castcorder-port-net",
  "castcorder-protocol",
  "castcorder-transfer",
  "serde",
@@ -443,6 +462,7 @@ dependencies = [
 name = "castcorder-host"
 version = "0.0.0"
 dependencies = [
+ "castcorder-align",
  "castcorder-capture-gst",
  "castcorder-core",
  "castcorder-link",

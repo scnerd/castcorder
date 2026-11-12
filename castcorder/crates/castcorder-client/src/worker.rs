@@ -11,7 +11,11 @@
 //! frames are only written while a take records.
 //!
 //! Files live in OPFS under `tracks/`: `<track>.wav` (see [`crate::wav`]) and
-//! `<track>.json`, the sidecar rewritten on every flush (once a second). On
+//! `<track>.json`, the sidecar rewritten on every flush (once a second), and
+//! `<track>.timing.jsonl`, the timing metadata (castcorder-core timing),
+//! appended on every flush: reference points from the delivered sample count
+//! against `performance.timeOrigin + now()`, placed on the host timeline by
+//! the clock estimate the page's pings feed (`clock-sample`). On
 //! `list` any track left unfinalised by a crash is repaired from the file
 //! length.
 //!
@@ -27,7 +31,8 @@
 //!
 //! Messages in (`cmd`): `source {id, readable}`, `source-track {id, track}`,
 //! `source-port {id, port, channels, sampleRate}`, `start {name, meta}`, `stop`,
-//! `close-source`, `list`, `log {text}` (the page's log lines), `log-context {call,
+//! `close-source`, `list`, `clock-sample {t0, t1, t2, t3, timeline}` (one clock
+//! exchange, see castcorder-core clocksync), `log {text}` (the page's log lines), `log-context {call,
 //! device}`, `log-rotate` (close the current log file and offer it, see
 //! [`crate::logfiles`]). Messages out (`type`): `ready {mstpInWorker}`,
 //! `source-ok {id, path}`, `source-failed {id, path, message}`, `level {peak}`,
@@ -35,6 +40,10 @@
 //! `list {tracks}`, `error {message}`.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+
+use castcorder_core::clocksync::{ClockEstimator, ClockSample};
+use castcorder_core::timing::{self, Header, RefPoint, RefPoints, TimingLine};
 
 use js_sys::{Array, Float32Array, JSON, Promise};
 use tracing::{info, warn};
@@ -66,6 +75,21 @@ fn scope() -> DedicatedWorkerGlobalScope {
 fn now_ms() -> f64 {
     scope().performance().map(|p| p.now()).unwrap_or(0.0)
 }
+
+/// Device time in microseconds: `performance.timeOrigin + performance.now()`,
+/// as the page stamps clock pings (timing metadata's "device time").
+fn device_now_us() -> f64 {
+    scope()
+        .performance()
+        .map(|p| (p.time_origin() + p.now()) * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// What the device time is, for timing metadata headers.
+const DEVICE_CLOCK: &str = "performance.timeOrigin + performance.now(), us (page and worker)";
+/// What the host time is, for timing metadata headers.
+const HOST_CLOCK: &str =
+    "host timeline: wall clock at host start + monotonic, us since the Unix epoch";
 
 pub(crate) fn post(msg: &JsValue) {
     let _ = scope().post_message(msg);
@@ -156,6 +180,15 @@ struct Active {
     dropped_frames: u64,
     /// The render clock against the wall clock (worklet path only).
     clock: Option<ClockWatch>,
+    /// The timing metadata file (castcorder-core timing), its length, and
+    /// lines not yet written (written with every flush).
+    timing: FileSystemSyncAccessHandle,
+    timing_len: f64,
+    timing_buf: String,
+    /// Reference points, once the first frame set the rate.
+    refs: Option<RefPoints>,
+    /// AudioData timestamps (us) of recent reference frames.
+    ts_at: VecDeque<(u64, f64)>,
 }
 
 /// Most discontinuities listed in one sidecar (the totals keep counting).
@@ -170,6 +203,12 @@ impl Active {
             self.dropped_frames += frames;
         }
         let kind = if inserted { "inserted" } else { "dropped" };
+        self.timing_line(&TimingLine::Discontinuity {
+            frame: self.frames,
+            kind: kind.into(),
+            frames,
+            cause: cause.into(),
+        });
         if self.discontinuities.length() < MAX_DISCONTINUITIES {
             let o = object();
             set(&o, "kind", kind);
@@ -181,6 +220,55 @@ impl Active {
         if self.discontinuities.length() <= 10 {
             warn!(call = %self.call, device = %self.device, take = self.take, kind, frames, cause, at_frame = self.frames, "capture discontinuity");
         }
+    }
+
+    fn timing_line(&mut self, line: &TimingLine) {
+        if self.refs.is_some() {
+            self.timing_buf.push_str(&line.to_line());
+        }
+    }
+
+    /// A finished reference point, placed on the host timeline by the clock
+    /// estimate as it stands.
+    fn reference(&mut self, (frame, device_us): (u64, i64)) {
+        let mut r =
+            CLOCK.with(|c| RefPoint::new(frame, device_us, c.borrow().est.estimate().as_ref()));
+        r.audio_ts_us = self
+            .ts_at
+            .iter()
+            .find(|(f, _)| *f == frame)
+            .map(|(_, ts)| ts.round() as i64);
+        self.timing_line(&TimingLine::Ref(r));
+    }
+
+    /// Start the timing metadata at the first frame: header, the clock
+    /// exchanges so far, the segment.
+    fn start_timing(&mut self, rate: u32, channels: u16) {
+        let (timeline, samples) = CLOCK.with(|c| {
+            let c = c.borrow();
+            (c.timeline, c.est.samples().copied().collect::<Vec<_>>())
+        });
+        self.refs = Some(RefPoints::new(rate, u64::from(rate)));
+        self.timing_line(&TimingLine::Header(Header {
+            version: timing::VERSION,
+            call: self.call.clone(),
+            device: self.device.clone(),
+            take: self.take,
+            track: self.name.clone(),
+            source: string(&self.meta, "source"),
+            sample_rate: rate,
+            channels,
+            device_clock: DEVICE_CLOCK.into(),
+            host_clock: HOST_CLOCK.into(),
+            host_timeline: timeline,
+        }));
+        for s in samples {
+            self.timing_line(&TimingLine::Sync(s));
+        }
+        self.timing_line(&TimingLine::Segment {
+            segment: 1,
+            file: format!("{}.wav", self.name),
+        });
     }
 
     /// Check the render clock after a worklet batch.
@@ -204,6 +292,9 @@ impl Active {
             set(&self.meta, "firstFrameAtMs", js_sys::Date::now());
             (rate, channels)
         });
+        if self.refs.is_none() {
+            self.start_timing(r, ch);
+        }
         if self.frames == 0 && self.frames_at_flush == 0 {
             let r = self
                 .wav
@@ -234,6 +325,7 @@ impl Active {
         }
         self.max_write_ms = self.max_write_ms.max(now_ms() - t0);
         self.frames += n as u64;
+        self.observe_timing(n as u64, r, ts_us);
         if self.frames - self.frames_at_flush >= u64::from(r) {
             self.flush(false);
             let o = object();
@@ -245,8 +337,45 @@ impl Active {
         }
     }
 
+    /// After `n` frames were appended: note the AudioData timestamp of a
+    /// reference frame among them, and observe their delivery.
+    fn observe_timing(&mut self, n: u64, rate: u32, ts_us: f64) {
+        let start = self.frames - n;
+        let every = u64::from(rate.max(1));
+        let k = start.div_ceil(every) * every;
+        if k < self.frames {
+            let ts = ts_us + (k - start) as f64 / f64::from(rate.max(1)) * 1e6;
+            self.ts_at.push_back((k, ts));
+            if self.ts_at.len() > 4 {
+                self.ts_at.pop_front();
+            }
+        }
+        let frames = self.frames;
+        let now = device_now_us();
+        if let Some(p) = self.refs.as_mut().and_then(|r| r.observe(frames, now)) {
+            self.reference(p);
+        }
+    }
+
+    /// Append the pending timing lines.
+    fn flush_timing(&mut self) {
+        if self.timing_buf.is_empty() {
+            return;
+        }
+        let buf = std::mem::take(&mut self.timing_buf);
+        let r = self
+            .timing
+            .write_with_u8_array_and_options(buf.as_bytes(), &at(self.timing_len))
+            .and_then(|n| self.timing.flush().map(|()| n));
+        match r {
+            Ok(n) => self.timing_len += n,
+            Err(e) => post_error("timing", &e),
+        }
+    }
+
     /// Patch the header, flush the file, rewrite the sidecar.
     fn flush(&mut self, finalised: bool) {
+        self.flush_timing();
         let t0 = now_ms();
         if let Some((rate, ch)) = self.format {
             let header = wav_header(rate, ch, self.frames);
@@ -296,6 +425,68 @@ thread_local! {
     static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
     static STARTING: Cell<bool> = const { Cell::new(false) };
     static STOP_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// The clock estimate against the host (pings from the page).
+    static CLOCK: RefCell<ClockState> = RefCell::new(ClockState::default());
+}
+
+/// The clock estimator and the host timeline its samples are on.
+#[derive(Default)]
+struct ClockState {
+    timeline: u64,
+    est: ClockEstimator,
+    accepted: u32,
+}
+
+/// `clock-sample {t0, t1, t2, t3, timeline}`: one ping exchange from the page.
+fn clock_sample(msg: &JsValue) {
+    let s = ClockSample {
+        t0_us: num(msg, "t0") as i64,
+        t1_us: num(msg, "t1") as i64,
+        t2_us: num(msg, "t2") as i64,
+        t3_us: num(msg, "t3").round() as i64,
+    };
+    let timeline = num(msg, "timeline") as u64;
+    let accepted = CLOCK.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.timeline != timeline {
+            if c.timeline != 0 {
+                info!(
+                    old = c.timeline,
+                    new = timeline,
+                    "host timeline changed; clock estimate restarted"
+                );
+            }
+            *c = ClockState {
+                timeline,
+                ..ClockState::default()
+            };
+        }
+        if !c.est.push(s) {
+            return false;
+        }
+        c.accepted += 1;
+        if let Some(e) = c.est.estimate()
+            && (c.accepted <= 1 || c.accepted % 30 == 0)
+        {
+            info!(
+                offset_us = e.offset_us.round(),
+                drift_ppm = (e.drift_ppm * 100.0).round() / 100.0,
+                rtt_us = e.rtt_us,
+                points = e.points,
+                samples = c.accepted,
+                timeline,
+                "clock estimate"
+            );
+        }
+        true
+    });
+    if accepted {
+        ACTIVE.with(|a| {
+            if let Some(a) = a.borrow_mut().as_mut() {
+                a.timing_line(&TimingLine::Sync(s));
+            }
+        });
+    }
 }
 
 /// Answer the page's source attempt `id`: `source-ok`, or `source-failed`.
@@ -564,7 +755,16 @@ async fn open_track(msg: JsValue) -> Result<String, JsValue> {
             return Err(e);
         }
     };
+    let timing = match open_sync(&dir, &format!("{name}{}", timing::SUFFIX), true).await {
+        Ok(t) => t,
+        Err(e) => {
+            wav.close();
+            sidecar.close();
+            return Err(e);
+        }
+    };
     wav.truncate_with_f64(0.0)?;
+    timing.truncate_with_f64(0.0)?;
     let mut active = Active {
         name: name.clone(),
         take,
@@ -584,6 +784,11 @@ async fn open_track(msg: JsValue) -> Result<String, JsValue> {
         inserted_frames: 0,
         dropped_frames: 0,
         clock: None,
+        timing,
+        timing_len: 0.0,
+        timing_buf: String::new(),
+        refs: None,
+        ts_at: VecDeque::new(),
     };
     active.flush(false);
     info!(call = %active.call, device = %active.device, take, track = %name, "track recording");
@@ -599,9 +804,15 @@ async fn stop() -> Result<(), JsValue> {
     let Some(mut a) = ACTIVE.with(|a| a.borrow_mut().take()) else {
         return Ok(());
     };
+    if let Some(p) = a.refs.as_mut().and_then(RefPoints::finish) {
+        a.reference(p);
+    }
+    let frames = a.frames;
+    a.timing_line(&TimingLine::End { frames });
     a.flush(true);
     a.wav.close();
     a.sidecar.close();
+    a.timing.close();
     let seconds = a
         .format
         .map(|(r, _)| a.frames as f64 / f64::from(r.max(1)))
@@ -815,6 +1026,10 @@ pub fn main() {
                 },
                 "start" => start(msg).await,
                 "stop" => stop().await,
+                "clock-sample" => {
+                    clock_sample(&msg);
+                    Ok(())
+                }
                 "close-source" => {
                     close_source();
                     Ok(())

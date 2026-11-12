@@ -12,6 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+castcorder-align.workspace = true
 castcorder-core.workspace = true
 castcorder-link.workspace = true
 castcorder-port-clock.workspace = true

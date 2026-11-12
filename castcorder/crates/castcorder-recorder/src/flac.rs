@@ -100,26 +100,52 @@ pub fn wav_to_flac<S: Storage>(
     let samples = decode_samples(&data, format.sample_format);
     drop(data);
     let frames = (samples.len() / channels) as u64;
+    let bytes = encode_flac(&samples, channels, bits, format.sample_rate, &[])?;
 
+    let mut out = storage.open(flac_name)?;
+    out.set_len(0)?;
+    out.write_at(0, &bytes)?;
+    out.sync()?;
+    Ok(FlacReport {
+        frames,
+        flac_bytes: bytes.len() as u64,
+    })
+}
+
+/// Encode interleaved integer `samples` (`bits` per sample, 16 or 24) as a
+/// FLAC stream in memory, with `tags` as a Vorbis comment block (`KEY`,
+/// value) when there are any, then decode it and check every sample (and
+/// tag) comes back before returning the bytes.
+pub fn encode_flac(
+    samples: &[i32],
+    channels: usize,
+    bits: usize,
+    sample_rate: u32,
+    tags: &[(String, String)],
+) -> Result<Vec<u8>, FlacError> {
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|e| FlacError::Encode(format!("{e:?}")))?;
-    let source = flacenc::source::MemSource::from_samples(
-        &samples,
-        channels,
-        bits,
-        format.sample_rate as usize,
-    );
+    let source =
+        flacenc::source::MemSource::from_samples(samples, channels, bits, sample_rate as usize);
     let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
         .map_err(|e| FlacError::Encode(format!("{e:?}")))?;
     let mut sink = flacenc::bitsink::ByteSink::new();
     stream
         .write(&mut sink)
         .map_err(|e| FlacError::Encode(format!("{e:?}")))?;
-    let bytes = sink.as_slice();
+    let mut bytes = sink.as_slice().to_vec();
+    if !tags.is_empty() {
+        bytes = with_vorbis_comment(bytes, tags)?;
+    }
 
-    let mut reader = claxon::FlacReader::new(io::Cursor::new(bytes))
+    let mut reader = claxon::FlacReader::new(io::Cursor::new(&bytes[..]))
         .map_err(|e| FlacError::Verify(format!("decode: {e}")))?;
+    for (k, v) in tags {
+        if reader.get_tag(k).next() != Some(v.as_str()) {
+            return Err(FlacError::Verify(format!("tag {k} not read back")));
+        }
+    }
     let mut count = 0usize;
     for (i, s) in reader.samples().enumerate() {
         let s = s.map_err(|e| FlacError::Verify(format!("decode: {e}")))?;
@@ -134,13 +160,46 @@ pub fn wav_to_flac<S: Storage>(
             samples.len()
         )));
     }
+    Ok(bytes)
+}
 
-    let mut out = storage.open(flac_name)?;
-    out.set_len(0)?;
-    out.write_at(0, bytes)?;
-    out.sync()?;
-    Ok(FlacReport {
-        frames,
-        flac_bytes: bytes.len() as u64,
-    })
+/// Insert a VORBIS_COMMENT metadata block after the encoder's metadata
+/// blocks (flacenc writes only STREAMINFO), moving the last-block flag.
+fn with_vorbis_comment(bytes: Vec<u8>, tags: &[(String, String)]) -> Result<Vec<u8>, FlacError> {
+    if bytes.get(0..4) != Some(b"fLaC") {
+        return Err(FlacError::Encode("stream does not start with fLaC".into()));
+    }
+    let mut pos = 4usize;
+    loop {
+        let Some(h) = bytes.get(pos..pos + 4) else {
+            return Err(FlacError::Encode("truncated metadata".into()));
+        };
+        let last = h[0] & 0x80 != 0;
+        let len = (usize::from(h[1]) << 16) | (usize::from(h[2]) << 8) | usize::from(h[3]);
+        if last {
+            let mut out = bytes;
+            out[pos] &= 0x7f;
+            let end = pos + 4 + len;
+            let mut body = Vec::new();
+            let vendor = b"castcorder";
+            body.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
+            body.extend_from_slice(vendor);
+            body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+            for (k, v) in tags {
+                let c = format!("{k}={v}");
+                body.extend_from_slice(&(c.len() as u32).to_le_bytes());
+                body.extend_from_slice(c.as_bytes());
+            }
+            let mut block = vec![
+                0x80 | 4,
+                (body.len() >> 16) as u8,
+                (body.len() >> 8) as u8,
+                body.len() as u8,
+            ];
+            block.extend_from_slice(&body);
+            out.splice(end..end, block);
+            return Ok(out);
+        }
+        pos += 4 + len;
+    }
 }

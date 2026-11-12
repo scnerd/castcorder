@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
@@ -32,13 +33,13 @@ pub enum Command {
     },
     /// Start a take.
     StartTake {
-        /// The take started, or why not.
-        reply: mpsc::Sender<Result<TakeId, String>>,
+        /// The take started and when (host timeline, us), or why not.
+        reply: mpsc::Sender<Result<(TakeId, i64), String>>,
     },
     /// Stop the recording take.
     StopTake {
-        /// The take stopped, or why not.
-        reply: mpsc::Sender<Result<TakeId, String>>,
+        /// The take stopped and when (host timeline, us), or why not.
+        reply: mpsc::Sender<Result<(TakeId, i64), String>>,
     },
     /// The take status and the connected guests, as JSON text.
     Status {
@@ -113,12 +114,63 @@ pub struct Call {
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
     participant: Option<Participant>,
     local: Option<LocalAudio>,
+    timeline: HostTimeline<SystemClock>,
+    /// Takes to align go to the align thread (`None`: alignment is off).
+    align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
+}
+
+/// Render aligned tracks on their own thread, one take at a time (never on
+/// the host thread: it answers clock pings, and their delay is error).
+/// Requests for a take already queued are merged; a take whose tracks keep
+/// arriving is aligned again after each.
+fn spawn_aligner(cfg: castcorder_align::AlignConfig) -> mpsc::Sender<(TakeId, FsStorage)> {
+    let (tx, rx) = mpsc::channel::<(TakeId, FsStorage)>();
+    let spawned = thread::Builder::new().name("align".into()).spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut jobs: BTreeMap<u32, FsStorage> = BTreeMap::new();
+            jobs.insert(first.0.0, first.1);
+            while let Ok((t, d)) = rx.try_recv() {
+                jobs.insert(t.0, d);
+            }
+            for (take, dir) in jobs {
+                // The host's own recorder finalises its timing file just
+                // after the take stops; give it a moment.
+                for _ in 0..50 {
+                    if castcorder_align::local_tracks_finalised(&dir).unwrap_or(true) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+                info!(take, dir = %dir.root().display(), "aligning take");
+                match castcorder_align::align_take(&dir, &cfg) {
+                    Ok(s) => info!(
+                        take,
+                        tracks = s.tracks.len(),
+                        skipped = s.skipped.len(),
+                        frames = s.frames,
+                        rate = s.sample_rate,
+                        "aligned tracks written"
+                    ),
+                    Err(e) => warn!(take, error = %e, "take not aligned"),
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        warn!(error = %e, "align thread not started; takes will not be aligned");
+    }
+    tx
 }
 
 impl Call {
     /// A call collecting into `library`; take numbers continue after
-    /// `last_take` (the highest take already in the call's directory).
-    pub fn new(library: Library<FsStorage>, last_take: u32) -> Self {
+    /// `last_take` (the highest take already in the call's directory). Clock
+    /// pongs and take times are on `timeline`.
+    pub fn new(
+        library: Library<FsStorage>,
+        last_take: u32,
+        timeline: HostTimeline<SystemClock>,
+    ) -> Self {
         Self {
             status: TakeStatus::Idle,
             last_take,
@@ -129,6 +181,48 @@ impl Call {
             pullers: BTreeMap::new(),
             participant: None,
             local: None,
+            timeline,
+            align: None,
+        }
+    }
+
+    /// Align each take once its guests' audio tracks and timing metadata
+    /// are all verified, and again when a late track arrives.
+    pub fn with_alignment(mut self, cfg: castcorder_align::AlignConfig) -> Self {
+        self.align = Some(spawn_aligner(cfg));
+        self
+    }
+
+    /// Queue alignment of the takes that just completed a track, if all
+    /// their tracks are in.
+    fn align_completed(&mut self, takes: Vec<TakeId>) {
+        let Some(tx) = &self.align else {
+            return;
+        };
+        for take in takes {
+            if take.0 == 0 || self.status == (TakeStatus::Recording { take }) {
+                continue;
+            }
+            let ready = self
+                .library
+                .entries(take)
+                .map(|e| castcorder_align::ready(&e));
+            match (ready, self.library.take_dir(take)) {
+                (Ok(true), Ok(dir)) => {
+                    if tx.send((take, dir.clone())).is_err() {
+                        warn!(take = take.0, "align thread gone; take not aligned");
+                    }
+                }
+                (Ok(false), _) => {
+                    info!(
+                        take = take.0,
+                        "track received; take still waiting for tracks before alignment"
+                    )
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    warn!(take = take.0, error = %e, "take not aligned: library unreadable")
+                }
+            }
         }
     }
 
@@ -156,6 +250,7 @@ impl Call {
     fn sync(&mut self) {
         let recording = matches!(self.status, TakeStatus::Recording { .. });
         let mut gone = Vec::new();
+        let mut completed: Vec<TakeId> = Vec::new();
         for (id, p) in &mut self.pullers {
             if let Err(e) = p.poll(&mut self.library, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
@@ -163,9 +258,17 @@ impl Call {
             } else if p.is_closed() {
                 gone.push(*id);
             }
+            for e in p.take_completed() {
+                if !completed.contains(&e.offer.take) {
+                    completed.push(e.offer.take);
+                }
+            }
         }
         for id in gone {
             self.drop_puller(id);
+        }
+        if !completed.is_empty() {
+            self.align_completed(completed);
         }
     }
 
@@ -196,14 +299,15 @@ impl Call {
         }
     }
 
-    fn start_take(&mut self) -> Result<TakeId, String> {
+    fn start_take(&mut self) -> Result<(TakeId, i64), String> {
         if let TakeStatus::Recording { take } = self.status {
             return Err(format!("take {} is already recording", take.0));
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
         self.status = TakeStatus::Recording { take };
-        info!(call = %self.library.call(), take = take.0, "take started");
+        let host_us = self.timeline.now_us();
+        info!(call = %self.library.call(), take = take.0, host_us, "take started");
         if let Some(p) = &self.participant {
             match self.library.take_dir(take) {
                 Ok(dir) => {
@@ -218,20 +322,21 @@ impl Call {
             }
         }
         self.broadcast();
-        Ok(take)
+        Ok((take, host_us))
     }
 
-    fn stop_take(&mut self) -> Result<TakeId, String> {
+    fn stop_take(&mut self) -> Result<(TakeId, i64), String> {
         let TakeStatus::Recording { take } = self.status else {
             return Err("no take is recording".into());
         };
         self.status = TakeStatus::Idle;
-        info!(call = %self.library.call(), take = take.0, "take stopped");
+        let host_us = self.timeline.now_us();
+        info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
         if let Some(p) = &self.participant {
             let _ = p.takes.send(TakeCtl::Stop { done: None });
         }
         self.broadcast();
-        Ok(take)
+        Ok((take, host_us))
     }
 
     fn status_json(&self) -> String {
@@ -260,8 +365,10 @@ impl Call {
         }
     }
 
-    /// Answer every request that has arrived from every guest.
-    fn serve(&mut self) {
+    /// Answer every request that has arrived from every guest. Returns whether
+    /// a clock pong was sent (worth flushing at once: its delay is error).
+    fn serve(&mut self) -> bool {
+        let mut pongs = false;
         let ids: Vec<GuestId> = self.rpc.keys().copied().collect();
         for id in ids {
             while let Some(rpc) = self.rpc.get_mut(&id) {
@@ -273,6 +380,20 @@ impl Call {
                         break;
                     }
                 };
+                let t1_us = self.timeline.now_us();
+                if let Request::ClockPing { t0_us } = request {
+                    // Not logged: one a second per guest (ten at first).
+                    let pong = Response::ClockPong {
+                        t0_us,
+                        t1_us,
+                        t2_us: self.timeline.now_us(),
+                        timeline: self.timeline.id(),
+                    };
+                    if let Some(rpc) = self.rpc.get_mut(&id) {
+                        pongs |= rpc.respond(rid, pong).is_ok();
+                    }
+                    continue;
+                }
                 info!(guest = id.0, request = ?request, "request");
                 let response = match request {
                     Request::Join {
@@ -293,17 +414,18 @@ impl Call {
                         }
                     }
                     Request::OfferTrack(offer) => self.offer_track(id, &offer),
+                    Request::ClockPing { .. } => unreachable!("answered above"),
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => match self.start_take() {
-                        Ok(take) => Response::TakeStarted { take },
+                        Ok((take, _)) => Response::TakeStarted { take },
                         Err(message) => Response::Error {
                             kind: ErrorKind::InvalidState,
                             message,
                         },
                     },
                     Request::StopTake => match self.stop_take() {
-                        Ok(take) => Response::TakeStopped { take },
+                        Ok((take, _)) => Response::TakeStopped { take },
                         Err(message) => Response::Error {
                             kind: ErrorKind::InvalidState,
                             message,
@@ -315,6 +437,7 @@ impl Call {
                 }
             }
         }
+        pongs
     }
 
     /// Drive `host` and this call forever on a new thread, taking commands
@@ -356,7 +479,9 @@ impl Call {
                     while let Some(a) = host.next_guest_audio() {
                         self.hear(Heard::Audio(a));
                     }
-                    self.serve();
+                    if self.serve() {
+                        host.poll();
+                    }
                     self.sync();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
