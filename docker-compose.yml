@@ -1,12 +1,32 @@
-# Local dev only. Placeholder services; the real rendezvous image arrives with M1.
+# Local dev: the rendezvous and coturn. Build the client first (task host or
+# `trunk build --release` in castcorder/crates/castcorder-client); it is served
+# at http://localhost:8080/v/0.0.0/. Point a host at it with
+#   castcorder-host --dist ... --rendezvous http://localhost:8080
 services:
   rendezvous:
-    # TODO: replace with a build of castcorder/crates/castcorder-rendezvous once it does something.
-    image: busybox:1.37
-    command: ["sh", "-c", "echo rendezvous placeholder; sleep infinity"]
-    profiles: ["rendezvous"]
+    build:
+      context: ./castcorder
+      dockerfile: rendezvous.Dockerfile
+    command:
+      - --listen
+      - 0.0.0.0:8080
+      - --stun
+      - 0.0.0.0:3479
+      - --client
+      - 0.0.0=/srv/client/0.0.0
+      # Guests' browsers are told stun:<this name>:3479.
+      - --public-host
+      - localhost
+    environment:
+      RUST_LOG: info
+    volumes:
+      - type: bind
+        source: ./castcorder/crates/castcorder-client/${CLIENT_DIST:-dist}
+        target: /srv/client/0.0.0
+        read_only: true
     ports:
-      - "8080:8080"
+      - "8080:8080/tcp"
+      - "3479:3479/udp"
 
   coturn:
     image: coturn/coturn:4.6

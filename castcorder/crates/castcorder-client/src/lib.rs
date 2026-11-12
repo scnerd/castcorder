@@ -18,6 +18,10 @@
 //!   (`OfferTrack` on "control"); the main thread relays the "data" channel to the
 //!   worker, which serves verified ranges and deletes a file only on the host's
 //!   DONE.
+//! - `mailbox`: for a page opened from a call link
+//!   (`/v/<version>/#<host-id>.<call-secret>`), signaling through the
+//!   rendezvous with the offer sealed to the host key (castcorder-link);
+//!   otherwise the offer is POSTed to the host's `/offer` (LAN mode).
 //! - [`wav`], [`signal`], [`session`]: the pure parts, unit-tested natively.
 //!
 //! Natively only the pure modules compile; the browser modules are wasm32-only.
@@ -35,6 +39,8 @@ mod js;
 mod logfiles;
 #[cfg(target_arch = "wasm32")]
 mod logging;
+#[cfg(target_arch = "wasm32")]
+mod mailbox;
 #[cfg(target_arch = "wasm32")]
 pub mod outbox;
 #[cfg(target_arch = "wasm32")]

@@ -17,6 +17,16 @@
 //! that first exchange the host is the only offerer: renegotiation on join and
 //! leave travels in-band on the guest's "control" data channel.
 //!
+//! The answer offers the advertised host candidates and, once
+//! [`Host::set_stun_server`] has learned one, the server-reflexive address of
+//! the host's socket (STUN Binding through the same socket, refreshed every
+//! 20 s to keep the NAT mapping open), so a guest outside the host's network
+//! can reach it where the NAT allows. Once [`Host::set_turn_server`] has an
+//! allocation on a TURN server (RFC 8656 over UDP, through the same socket),
+//! the answer also offers that relayed address, for guests that cannot reach
+//! the host any other way; [`HostConfig::relay_only`] offers nothing else
+//! (tests force relay with it). See `relay.rs`.
+//!
 //! # Wire contract for guests
 //!
 //! - The first offer contains the guest's send-only audio and video and two data
@@ -29,6 +39,15 @@
 //! - "data" carries bulk binary messages (at most [`MAX_MESSAGE`], 64 KiB advised).
 //! - Forwarded tracks carry the stream id `<device>-<guest id>`.
 //! - One codec per kind per call: Opus and VP8.
+//!
+//! # The host's own participant
+//!
+//! [`Host::add_local_audio`] adds an audio track the host itself sends (the
+//! person at the host machine, captured natively): every guest gets it like
+//! another guest's track, by the same renegotiation, under the stream id
+//! `<device>-<id>`; [`Host::send_local_audio`] writes its Opus frames.
+//! [`Host::set_guest_audio_tap`] keeps a copy of every guest's Opus frames for
+//! [`Host::next_guest_audio`], so the host can play the call locally.
 //!
 //! # The spike's sharp edges, as behaviour
 //!
@@ -78,18 +97,23 @@ use castcorder_port_net::DatagramSocket;
 use str0m::bwe::Bitrate;
 use str0m::change::SdpOffer;
 use str0m::crypto::CryptoProvider;
+use str0m::format::Codec;
+use str0m::media::{Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Input, Rtc};
 use tracing::{debug, info, info_span, trace, warn};
 
 mod channel;
 mod guest;
+mod relay;
 pub mod signal;
 
 pub use channel::{ChannelError, ChannelKind, GuestChannel, MAX_MESSAGE};
+pub use relay::{RelayStats, TurnServer};
 
 use crate::channel::lock;
-use crate::guest::{Guest, Propagated, Timing};
+use crate::guest::{Guest, Propagated, Timing, TrackIn, Wire};
+use crate::relay::{FromServer, Relay};
 
 /// Identifies one guest connection for the life of a [`Host`]. A guest that
 /// rejoins gets a new id.
@@ -124,6 +148,10 @@ pub struct HostConfig {
     /// longest common prefix), since a wildcard socket cannot tell which
     /// address it arrived on.
     pub advertise: Vec<SocketAddr>,
+    /// Offer only the TURN relayed candidate (no host, no server-reflexive):
+    /// [`Host::accept`] refuses offers until the allocation exists. For
+    /// testing the relay path.
+    pub relay_only: bool,
 }
 
 impl Default for HostConfig {
@@ -136,6 +164,7 @@ impl Default for HostConfig {
             initial_bandwidth_estimate_kbps: Some(1500),
             send_buffer: 1024 * 1024,
             advertise: Vec::new(),
+            relay_only: false,
         }
     }
 }
@@ -223,6 +252,37 @@ impl std::fmt::Display for AcceptError {
 
 impl std::error::Error for AcceptError {}
 
+/// An audio track the host itself sends to every guest; see
+/// [`Host::add_local_audio`]. Dropping it does not remove the track: call
+/// [`Host::remove_local_audio`].
+#[derive(Debug)]
+pub struct LocalAudio {
+    track: Arc<TrackIn>,
+}
+
+impl LocalAudio {
+    /// The id the track is forwarded under (`<device>-<id>` stream ids); never
+    /// a guest's.
+    pub fn id(&self) -> GuestId {
+        self.track.origin
+    }
+}
+
+/// One Opus frame a guest sent, copied for local playback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestAudio {
+    /// Which guest sent it.
+    pub guest: GuestId,
+    /// Its RTP time, in 48 kHz ticks.
+    pub rtp_time: u64,
+    /// The Opus frame.
+    pub data: Vec<u8>,
+}
+
+/// Most guest audio frames kept for [`Host::next_guest_audio`]; older ones are
+/// dropped (about 2 s of four guests at 20 ms).
+const GUEST_AUDIO_KEEP: usize = 400;
+
 /// Most datagrams drained per [`Host::poll`] before the others get a turn.
 const MAX_DATAGRAMS_PER_POLL: usize = 4096;
 /// The longest [`Host::poll`] ever asks to sleep.
@@ -241,7 +301,27 @@ pub struct Host<S, C> {
     next_id: u64,
     events: VecDeque<HostEvent>,
     queue: VecDeque<Propagated>,
+    stun: Stun,
+    relay: Relay,
+    local_tracks: Vec<Arc<TrackIn>>,
+    guest_audio: Option<VecDeque<GuestAudio>>,
 }
+
+/// Server-reflexive discovery: Binding requests to one STUN server, sent from
+/// the host's own socket so the NAT mapping found is the one guests reach.
+#[derive(Default)]
+struct Stun {
+    server: Option<SocketAddr>,
+    txid: Option<castcorder_link::stun::TxId>,
+    seq: u64,
+    next: Duration,
+    reflexive: Option<SocketAddr>,
+}
+
+/// Re-query (and so keep the NAT mapping alive) this often once known.
+const STUN_REFRESH: Duration = Duration::from_secs(20);
+/// Retry this often until the first answer.
+const STUN_RETRY: Duration = Duration::from_secs(2);
 
 impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// A host serving every guest on `socket`, keeping time with `clock`.
@@ -268,7 +348,98 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             next_id: 0,
             events: VecDeque::new(),
             queue: VecDeque::new(),
+            stun: Stun::default(),
+            relay: Relay::default(),
+            local_tracks: Vec::new(),
+            guest_audio: None,
         }
+    }
+
+    /// Allocate a relayed address on this TURN server (now, and again after
+    /// a failure; the allocation and its permissions are refreshed while it
+    /// lives), or drop the allocation with `None`. Setting the same server
+    /// and credentials again changes nothing. Once allocated, every later
+    /// [`Host::accept`] offers the relayed candidate.
+    pub fn set_turn_server(&mut self, server: Option<TurnServer>) {
+        let now_d = self.clock.monotonic();
+        let base = server.as_ref().map(|s| self.destination_for(s.addr));
+        let local = base.unwrap_or(self.local);
+        self.relay.set_server(server, local, &self.socket, now_d);
+    }
+
+    /// The relayed address on the TURN server, once allocated.
+    pub fn relayed(&self) -> Option<SocketAddr> {
+        self.relay.relayed()
+    }
+
+    /// Counters for the TURN relay.
+    pub fn relay_stats(&self) -> RelayStats {
+        self.relay.stats.clone()
+    }
+
+    /// Learn this host's server-reflexive address from a STUN server, asking
+    /// from the host's socket now and every 20 s (which also keeps a NAT
+    /// mapping open), or stop with `None`. Once known, every later
+    /// [`Host::accept`] offers it as a srflx candidate beside the host ones.
+    pub fn set_stun_server(&mut self, server: Option<SocketAddr>) {
+        info!(server = ?server.map(|s| s.to_string()), "stun server set");
+        self.stun = Stun {
+            server,
+            ..Stun::default()
+        };
+    }
+
+    /// The server-reflexive address learned from the STUN server, if any.
+    pub fn reflexive(&self) -> Option<SocketAddr> {
+        self.stun.reflexive
+    }
+
+    fn stun_tick(&mut self, now_d: Duration) -> Duration {
+        let Some(server) = self.stun.server else {
+            return now_d + MAX_WAIT;
+        };
+        if now_d >= self.stun.next {
+            // Unique per host and request; not a secret (the response must
+            // also come from the server's address).
+            self.stun.seq += 1;
+            let mut txid = [0u8; 12];
+            txid[..4].copy_from_slice(&(self.local.port() as u32).to_be_bytes());
+            txid[4..].copy_from_slice(&(now_d.as_nanos() as u64 ^ self.stun.seq).to_be_bytes());
+            self.stun.txid = Some(txid);
+            if let Err(e) = self
+                .socket
+                .send_to(&castcorder_link::stun::binding_request(txid), server)
+            {
+                debug!(error = %e, server = %server, "stun request not sent");
+            }
+            self.stun.next = now_d
+                + if self.stun.reflexive.is_some() {
+                    STUN_REFRESH
+                } else {
+                    STUN_RETRY
+                };
+        }
+        self.stun.next
+    }
+
+    /// A STUN answer to our own request: record the reflexive address.
+    fn stun_answer(&mut self, payload: &[u8], source: SocketAddr) -> bool {
+        if self.stun.server != Some(source) {
+            return false;
+        }
+        let Some((txid, mapped)) = castcorder_link::stun::parse_binding_success(payload) else {
+            return false;
+        };
+        if self.stun.txid != Some(txid) {
+            return false;
+        }
+        self.stun.txid = None;
+        if self.stun.reflexive != Some(mapped) {
+            info!(reflexive = %mapped, server = %source, "server-reflexive address learned");
+            self.stun.reflexive = Some(mapped);
+            self.stun.next = self.stun.next.min(self.clock.monotonic() + STUN_REFRESH);
+        }
+        true
     }
 
     /// The address every guest connects to.
@@ -312,10 +483,40 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             b = b.enable_bwe(Some(Bitrate::kbps(k)));
         }
         let mut rtc = b.build(now);
-        for addr in &self.advertise {
+        let relay_only = self.config.relay_only;
+        if relay_only && self.relay.relayed().is_none() {
+            return Err(AcceptError::Rejected(
+                "relay only, and no TURN allocation yet".into(),
+            ));
+        }
+        for addr in self.advertise.iter().filter(|_| !relay_only) {
             let cand = Candidate::host(*addr, "udp")
                 .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
             rtc.add_local_candidate(cand);
+        }
+        if let (Some(relayed), Some(server)) = (self.relay.relayed(), self.relay.server()) {
+            match Candidate::relayed(relayed, self.destination_for(server), "udp") {
+                Ok(c) => {
+                    if rtc.add_local_candidate(c).is_none() {
+                        debug!(relayed = %relayed, "relay candidate redundant, not added");
+                    }
+                }
+                Err(e) => warn!(relayed = %relayed, error = ?e, "relay candidate refused"),
+            }
+        }
+        if let (Some(r), Some(server)) = (self.stun.reflexive, self.stun.server)
+            && !self.advertise.contains(&r)
+            && !relay_only
+        {
+            let base = self.destination_for(server);
+            match Candidate::server_reflexive(r, base, "udp") {
+                Ok(c) => {
+                    if rtc.add_local_candidate(c).is_none() {
+                        debug!(reflexive = %r, "srflx candidate redundant, not added");
+                    }
+                }
+                Err(e) => debug!(reflexive = %r, error = ?e, "srflx candidate refused"),
+            }
         }
         let answer = rtc
             .sdp_api()
@@ -330,6 +531,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         // Renegotiate on join: the newcomer gets every existing track.
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {
             g.handle_track_open(Arc::downgrade(&t.id));
+        }
+        for t in &self.local_tracks {
+            g.handle_track_open(Arc::downgrade(t));
         }
         self.guests.push(g);
         Ok((id, answer.to_sdp_string()))
@@ -363,7 +567,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         }
 
         let timing = self.timing();
-        let mut deadline = now_d + MAX_WAIT;
+        let mut deadline = (now_d + MAX_WAIT)
+            .min(self.stun_tick(now_d))
+            .min(self.relay.tick(&self.socket, now_d));
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             g.handle_input(Input::Timeout(now));
@@ -372,12 +578,17 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
 
         self.remove_gone();
 
+        let mut wire = Wire {
+            socket: &self.socket,
+            relay: &mut self.relay,
+            now: now_d,
+        };
         // Poll every guest until only timeouts are left, propagating what each
         // produced; repeat, since propagation makes others produce output.
         loop {
             for g in &mut self.guests {
                 let _e = g.span.clone().entered();
-                if let Some(t) = g.poll_until_timeout(&self.socket, now) {
+                if let Some(t) = g.poll_until_timeout(&mut wire, now) {
                     deadline = deadline.min(t.saturating_duration_since(self.base));
                 }
                 self.queue.extend(g.outbox.drain(..));
@@ -387,6 +598,18 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 break;
             }
             while let Some(p) = self.queue.pop_front() {
+                if let (Some(tap), Propagated::MediaData(from, d)) = (&mut self.guest_audio, &p)
+                    && d.params.spec().codec == Codec::Opus
+                {
+                    if tap.len() == GUEST_AUDIO_KEEP {
+                        tap.pop_front();
+                    }
+                    tap.push_back(GuestAudio {
+                        guest: *from,
+                        rtp_time: d.time.rebase(Frequency::FORTY_EIGHT_KHZ).numer(),
+                        data: d.data.to_vec(),
+                    });
+                }
                 propagate(&p, &mut self.guests, now);
             }
         }
@@ -395,7 +618,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             deadline = deadline.min(g.tick(now_d, &timing));
-            if let Some(t) = g.poll_until_timeout(&self.socket, now) {
+            if let Some(t) = g.poll_until_timeout(&mut wire, now) {
                 deadline = deadline.min(t.saturating_duration_since(self.base));
             }
             self.events.extend(g.events.drain(..));
@@ -405,6 +628,26 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     }
 
     fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant) {
+        let now_d = now.saturating_duration_since(self.base);
+        // TURN first: the server's responses and relayed peer data share the
+        // socket with everything else.
+        let (payload, source, destination) = if self.relay.server() == Some(source) {
+            match self.relay.recv(&self.socket, payload, source, now_d) {
+                FromServer::Handled => return,
+                FromServer::Peer(data, peer) => {
+                    let Some(relayed) = self.relay.relayed() else {
+                        return;
+                    };
+                    (data, peer, relayed)
+                }
+                FromServer::NotTurn(p) => (p, source, self.destination_for(source)),
+            }
+        } else {
+            (payload, source, self.destination_for(source))
+        };
+        if self.stun_answer(&payload, source) {
+            return;
+        }
         let Ok(contents) = payload.as_slice().try_into() else {
             trace!(from = %source, "unrecognised datagram dropped");
             return;
@@ -414,7 +657,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             Receive {
                 proto: Protocol::Udp,
                 source,
-                destination: self.destination_for(source),
+                destination,
                 contents,
             },
         );
@@ -426,7 +669,12 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         g.handle_input(input);
         // Poll right away: str0m's DTLS layer holds at most 30 unprocessed
         // records and fails the whole connection if fed more without polling.
-        g.poll_until_timeout(&self.socket, now);
+        let mut wire = Wire {
+            socket: &self.socket,
+            relay: &mut self.relay,
+            now: now_d,
+        };
+        g.poll_until_timeout(&mut wire, now);
         self.queue.extend(g.outbox.drain(..));
         self.events.extend(g.events.drain(..));
     }
@@ -517,6 +765,56 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// Counters for one guest.
     pub fn stats(&self, id: GuestId) -> Option<GuestStats> {
         self.guest(id).map(|g| g.stats.clone())
+    }
+
+    /// Add an audio track the host itself sends (Opus, 48 kHz): every guest,
+    /// present and future, gets it by renegotiation like another guest's
+    /// track, with the stream id `<device>-<id>`.
+    pub fn add_local_audio(&mut self, device: &str) -> LocalAudio {
+        let origin = GuestId(self.next_id);
+        self.next_id += 1;
+        let track = Arc::new(TrackIn {
+            origin,
+            origin_device: device.to_string(),
+            mid: Mid::from("local"),
+            kind: MediaKind::Audio,
+        });
+        for g in &mut self.guests {
+            g.handle_track_open(Arc::downgrade(&track));
+        }
+        info!(call = %self.config.call, device = %device, id = origin.0, "local audio track added");
+        self.local_tracks.push(track.clone());
+        LocalAudio { track }
+    }
+
+    /// Send one Opus frame on a local track to every guest it is open toward.
+    /// `rtp_time` counts 48 kHz samples and must grow by each frame's duration
+    /// (a gap is fine). A guest whose copy is not negotiated yet misses it.
+    pub fn send_local_audio(&mut self, track: &LocalAudio, rtp_time: u64, opus: &[u8]) {
+        let (now, _) = self.now();
+        let time = MediaTime::new(rtp_time, Frequency::FORTY_EIGHT_KHZ);
+        for g in &mut self.guests {
+            let _e = g.span.clone().entered();
+            g.write_local_audio(&track.track, now, time, opus);
+        }
+    }
+
+    /// Remove a local track; every guest renegotiates it away.
+    pub fn remove_local_audio(&mut self, track: LocalAudio) {
+        self.local_tracks.retain(|t| !Arc::ptr_eq(t, &track.track));
+        info!(id = track.id().0, "local audio track removed");
+    }
+
+    /// Keep (or stop keeping) a copy of every guest's Opus frames for
+    /// [`Host::next_guest_audio`]. Off by default; when nobody takes them
+    /// only the newest are kept.
+    pub fn set_guest_audio_tap(&mut self, on: bool) {
+        self.guest_audio = on.then(VecDeque::new);
+    }
+
+    /// The oldest guest audio frame not yet taken, while the tap is on.
+    pub fn next_guest_audio(&mut self) -> Option<GuestAudio> {
+        self.guest_audio.as_mut()?.pop_front()
     }
 
     /// Drop a guest; it is reported gone with [`GoneReason::Removed`] on the

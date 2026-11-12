@@ -14,6 +14,12 @@
 //! from the device monitor, or [`EndReason::NoData`] from the watchdog, which is
 //! the only signal when the sound server posts no error, as `pulsesrc` does).
 //! Segmenting, reopening and reconnecting are the caller's business.
+//!
+//! The `*_with_live` opens tee the source: this [`CaptureSource`] is the
+//! recording branch (never leaky, its streaming thread raised to the highest
+//! priority available) and a [`LiveOpus`] is the live branch (leaky queue,
+//! webrtcdsp, Opus); see the `live` module. [`Playback`] plays the call's
+//! Opus streams on this machine and is the echo canceller's reference.
 
 use std::io;
 use std::path::Path;
@@ -21,6 +27,12 @@ use std::time::{Duration, Instant};
 
 use castcorder_port_capture::{AudioBuffer, AudioFormat, CaptureSource, SampleFormat};
 use gst::prelude::*;
+
+mod live;
+mod playback;
+
+pub use live::{LiveOptions, LiveOpus, OpusPacket, raise_current_thread_priority};
+pub use playback::Playback;
 
 /// Device class of audio inputs in GStreamer's device monitor.
 const INPUT_CLASS: &str = "Audio/Source";
@@ -186,30 +198,88 @@ fn format_from_caps(caps: &gst::CapsRef) -> io::Result<AudioFormat> {
 impl GstCapture {
     /// Play a WAV file (`filesrc ! wavparse ! appsink`), as fast as the reader pulls.
     pub fn open_file(path: &Path) -> io::Result<Self> {
+        Ok(Self::open_file_inner(path, None)?.0)
+    }
+
+    /// Play a WAV file teed into this source (the recording branch, as fast as
+    /// the reader pulls) and a live branch producing Opus (see [`LiveOpus`]).
+    pub fn open_file_with_live(path: &Path, live: &LiveOptions) -> io::Result<(Self, LiveOpus)> {
+        let (cap, opus) = Self::open_file_inner(path, Some(live))?;
+        Ok((cap, opus.ok_or_else(|| err("live branch missing"))?))
+    }
+
+    fn open_file_inner(
+        path: &Path,
+        live: Option<&LiveOptions>,
+    ) -> io::Result<(Self, Option<LiveOpus>)> {
         init()?;
         let pipeline = gst::Pipeline::new();
-        let src = gst::ElementFactory::make("filesrc")
+        let file = gst::ElementFactory::make("filesrc")
             .property("location", path.to_string_lossy().as_ref())
             .build()
             .map_err(|e| err(format!("filesrc: {e}")))?;
         let parse = gst::ElementFactory::make("wavparse")
             .build()
             .map_err(|e| err(format!("wavparse: {e}")))?;
+        pipeline
+            .add_many([&file, &parse])
+            .map_err(|e| err(e.to_string()))?;
+        file.link(&parse).map_err(|e| err(format!("link: {e}")))?;
         let sink = build_sink()?;
         // A file may be read ahead only a little: block upstream instead of buffering it all.
         sink.set_max_buffers(32);
-        pipeline
-            .add_many([&src, &parse, sink.upcast_ref()])
-            .map_err(|e| err(e.to_string()))?;
-        gst::Element::link_many([&src, &parse, sink.upcast_ref()])
-            .map_err(|e| err(format!("link: {e}")))?;
-        tracing::info!(path = %path.display(), "capture source chosen: wavparse file");
-        Self::start(pipeline, sink, None, Duration::from_secs(10))
+        let opus = Self::assemble(&pipeline, &parse, &sink, live)?;
+        tracing::info!(path = %path.display(), teed = live.is_some(), "capture source chosen: wavparse file");
+        Ok((
+            Self::start(pipeline, sink, None, Duration::from_secs(10))?,
+            opus,
+        ))
+    }
+
+    /// Link `src` straight into `sink`, or through a tee with a live branch.
+    fn assemble(
+        pipeline: &gst::Pipeline,
+        src: &gst::Element,
+        sink: &gst_app::AppSink,
+        live: Option<&LiveOptions>,
+    ) -> io::Result<Option<LiveOpus>> {
+        if src.parent().is_none() {
+            pipeline.add(src).map_err(|e| err(e.to_string()))?;
+        }
+        match live {
+            Some(opts) => live::build_tee(pipeline, src, sink, opts).map(Some),
+            None => {
+                pipeline.add(sink).map_err(|e| err(e.to_string()))?;
+                src.link(sink)
+                    .map_err(|e| err(format!("link source to sink: {e}")))?;
+                Ok(None)
+            }
+        }
     }
 
     /// Capture from an audio input. `name` is a display name from
     /// [`list_input_devices`]; `None` is the platform default input.
     pub fn open_device(name: Option<&str>, watchdog: Watchdog) -> io::Result<Self> {
+        Ok(Self::open_device_inner(name, watchdog, None)?.0)
+    }
+
+    /// Capture from an audio input teed into this source (the recording
+    /// branch, bit-exact, never dropping) and a live branch producing Opus
+    /// (see [`LiveOpus`]). `name` as for [`GstCapture::open_device`].
+    pub fn open_device_with_live(
+        name: Option<&str>,
+        watchdog: Watchdog,
+        live: &LiveOptions,
+    ) -> io::Result<(Self, LiveOpus)> {
+        let (cap, opus) = Self::open_device_inner(name, watchdog, Some(live))?;
+        Ok((cap, opus.ok_or_else(|| err("live branch missing"))?))
+    }
+
+    fn open_device_inner(
+        name: Option<&str>,
+        watchdog: Watchdog,
+        live_opts: Option<&LiveOptions>,
+    ) -> io::Result<(Self, Option<LiveOpus>)> {
         init()?;
         let monitor = gst::DeviceMonitor::new();
         monitor.add_filter(Some(INPUT_CLASS), None);
@@ -255,11 +325,7 @@ impl GstCapture {
         let sink = build_sink()?;
         // Never block a live device on a slow reader: let the queue grow.
         sink.set_max_buffers(0);
-        pipeline
-            .add_many([&src, sink.upcast_ref()])
-            .map_err(|e| err(e.to_string()))?;
-        src.link(&sink)
-            .map_err(|e| err(format!("link source to sink: {e}")))?;
+        let opus = Self::assemble(&pipeline, &src, &sink, live_opts)?;
         let live = LiveState {
             monitor,
             device_name,
@@ -267,7 +333,10 @@ impl GstCapture {
             last_data: Instant::now(),
             got_data: false,
         };
-        Self::start(pipeline, sink, Some(live), watchdog.first_data)
+        Ok((
+            Self::start(pipeline, sink, Some(live), watchdog.first_data)?,
+            opus,
+        ))
     }
 
     fn start(
@@ -337,7 +406,11 @@ impl GstCapture {
     fn end(&mut self, reason: EndReason) {
         if self.ended.is_none() {
             self.ended = Some(reason);
-            let _ = self.pipeline.set_state(gst::State::Null);
+            // At end of stream the pipeline stays up until drop or stop, so a
+            // live branch can still drain to its own end.
+            if reason != EndReason::Eos {
+                let _ = self.pipeline.set_state(gst::State::Null);
+            }
             if let Some(live) = &self.live {
                 live.monitor.stop();
             }

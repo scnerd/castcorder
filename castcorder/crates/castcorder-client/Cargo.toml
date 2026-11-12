@@ -23,6 +23,7 @@ path = "src/bin/worker.rs"
 
 [dependencies]
 castcorder-core.workspace = true
+castcorder-link.workspace = true
 castcorder-port-disk.workspace = true
 castcorder-protocol.workspace = true
 serde.workspace = true
@@ -50,6 +51,7 @@ web-sys = { version = "0.3", features = [
   "AudioWorklet",
   "AudioWorkletNode",
   "AudioWorkletNodeOptions",
+  "Crypto",
   "BaseAudioContext",
   "ChannelCountMode",
   "ChannelInterpretation",
@@ -81,7 +83,9 @@ web-sys = { version = "0.3", features = [
   "Performance",
   "RtcDataChannel",
   "RtcDataChannelState",
+  "RtcConfiguration",
   "RtcDataChannelType",
+  "RtcIceGatheringState",
   "RtcPeerConnection",
   "RtcPeerConnectionState",
   "RtcRtpTransceiver",
@@ -96,6 +100,7 @@ web-sys = { version = "0.3", features = [
   "UrlSearchParams",
   "Window",
   "Worker",
+  "WebSocket",
   "Worklet",
   "WorkerNavigator",
   "WorkerOptions",

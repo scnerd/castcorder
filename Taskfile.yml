@@ -33,20 +33,66 @@ tasks:
       - uvx --with pre-commit-uv pre-commit run --all-files
 
   test:
-    desc: Everything in check, plus the system and browser tiers (placeholder for now)
+    desc: Everything in check, plus the system and browser tiers
     summary: |
-      Tiers 1-2 (unit, simulation) are in `task check`. Tier 3 (system: real
-      binaries, real rendezvous and coturn, needs Docker) and tier 4 (browser:
-      Playwright with Chromium, needs Docker and Chromium) land with M1.
+      Tiers 1-2 (unit, simulation) are in `task check`. Tier 3 (system: the real
+      host and rendezvous binaries as local processes, a Chromium guest joining
+      by call link; coturn joins it with the TURN task) and tier 4 (browser:
+      Playwright with Chromium and Firefox against the host).
     cmds:
       - task: check
       - task: test:system
       - task: test:browser
 
   test:system:
-    desc: Tier 3 system tests (placeholder; needs Docker once it exists)
+    desc: Tier 3 system test - a browser guest joins by call link only, through castcorder-rendezvous (real processes, headless Chromium)
+    summary: |
+      Builds castcorder-host, castcorder-rendezvous and the client (trunk), then
+      runs castcorder/crates/castcorder-client/browser-test/system.mjs: the
+      rendezvous (mailbox, STUN, the client at /v/<version>/) and the host
+      (--rendezvous) as local processes on OS-picked loopback ports, guest A on
+      the host's localhost page (LAN mode, producer), guest B with only the
+      call link the host printed, guest C with a wrong call secret. B must hear
+      A and B's take must sync into the host library; C must be rejected.
+      No Docker (local processes are simpler and reliable on Windows).
+      Other build dirs: CARGO_TARGET_DIR=... task test:system CLIENT_DIST=dist-agent
+    dir: castcorder/crates/castcorder-client/browser-test
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
     cmds:
-      - echo "test:system - not implemented yet (tier 3, lands with M1)"
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
+      - cd .. && trunk build --release --dist {{.CLIENT_DIST}}
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node system.mjs
+
+  test:relay:
+    desc: Forced-relay system test - a relay-only host and two relay-only Chromium guests hold a call through coturn (needs Docker)
+    summary: |
+      Builds castcorder-host, castcorder-rendezvous and the client (trunk), then
+      runs castcorder/crates/castcorder-client/browser-test/relay.mjs: coturn
+      (coturn/coturn:4.6 in Docker, use-auth-secret with a random per-run
+      secret, only its UDP listening port published on a Docker-picked port),
+      the rendezvous minting TURN credentials for it (--turn), the host with
+      --relay-only, and two guests joining by call link with
+      ?iceTransportPolicy=relay. Audio must flow and a take must sync.
+      Docker Desktop is reached on 127.0.0.1; a Docker Engine inside WSL2 on the
+      WSL VM's address (CASTCORDER_TURN_HOST overrides). Honours DOCKER_HOST.
+      Not part of `task test` or `task check`.
+      Other build dirs: CARGO_TARGET_DIR=... task test:relay CLIENT_DIST=dist-agent
+    dir: castcorder/crates/castcorder-client/browser-test
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
+    cmds:
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
+      - cd .. && trunk build --release --dist {{.CLIENT_DIST}}
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node relay.mjs
 
   test:browser:
     desc: Tier 4 browser tests (Playwright with headless Chromium, installed locally on first run)
@@ -55,7 +101,7 @@ tasks:
       - task: test:browser:client
 
   dev:up:
-    desc: Start the local dev services (rendezvous and coturn placeholders)
+    desc: Start the local dev services (rendezvous on 8080/tcp + 3479/udp serving the client build, and coturn)
     cmds:
       - docker compose up -d
 

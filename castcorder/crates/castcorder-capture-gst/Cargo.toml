@@ -15,6 +15,7 @@ gst-app = { package = "gstreamer-app", version = "0.25", features = ["v1_24"] }
 gst-audio = { package = "gstreamer-audio", version = "0.25", features = [
   "v1_24",
 ] }
+thread-priority = "3"
 tracing.workspace = true
 
 [lints]

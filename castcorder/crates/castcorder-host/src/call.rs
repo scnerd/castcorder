@@ -16,7 +16,7 @@ use castcorder_protocol::{
     ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, TakeId, TakeStatus,
     TrackOffer,
 };
-use castcorder_transport::{GuestChannel, GuestId, Host, HostEvent};
+use castcorder_transport::{GuestAudio, GuestChannel, GuestId, Host, HostEvent, LocalAudio};
 use tracing::{info, warn};
 
 /// A request from the HTTP side to the host thread.
@@ -45,6 +45,61 @@ pub enum Command {
         /// Where the JSON goes.
         reply: mpsc::Sender<String>,
     },
+    /// Learn the host's server-reflexive address from this STUN server.
+    Stun {
+        /// The rendezvous's STUN address.
+        server: std::net::SocketAddr,
+    },
+    /// Allocate a relayed address on this TURN server.
+    Turn {
+        /// The server and the credentials the rendezvous minted.
+        server: castcorder_transport::TurnServer,
+    },
+    /// One Opus frame of the host's own participant (`--participate`).
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    LocalAudio {
+        /// Its RTP time in 48 kHz ticks.
+        rtp_time: u64,
+        /// The frame.
+        data: Vec<u8>,
+    },
+}
+
+/// What the host's own participant's recorder is told about takes.
+#[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+pub enum TakeCtl {
+    /// A take started; record into this take directory.
+    Start {
+        /// The take.
+        take: TakeId,
+        /// Its directory in the library.
+        dir: FsStorage,
+    },
+    /// The take stopped: finalise and convert.
+    Stop {
+        /// Told the files written once they are finalised and converted.
+        done: Option<mpsc::Sender<Vec<String>>>,
+    },
+}
+
+/// What the host's own participant hears.
+#[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+pub enum Heard {
+    /// A guest's Opus frame.
+    Audio(GuestAudio),
+    /// The guest left.
+    Gone(GuestId),
+}
+
+/// The host's own participant, captured natively (`--participate`).
+#[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+pub struct Participant {
+    /// Display name (also the device name of its forwarded stream).
+    pub name: String,
+    /// Take start and stop go to its recorder.
+    pub takes: mpsc::Sender<TakeCtl>,
+    /// Guests' audio goes here for local playback, if it plays.
+    pub heard: Option<mpsc::Sender<Heard>>,
 }
 
 /// The producer-side state of the call.
@@ -56,6 +111,8 @@ pub struct Call {
     names: BTreeMap<GuestId, String>,
     library: Library<FsStorage>,
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
+    participant: Option<Participant>,
+    local: Option<LocalAudio>,
 }
 
 impl Call {
@@ -70,6 +127,28 @@ impl Call {
             names: BTreeMap::new(),
             library,
             pullers: BTreeMap::new(),
+            participant: None,
+            local: None,
+        }
+    }
+
+    /// Add the host's own participant: its audio goes to every guest and its
+    /// recorder records each take.
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    pub fn with_participant(mut self, p: Participant) -> Self {
+        self.participant = Some(p);
+        self
+    }
+
+    /// Pass guest audio to the host's own participant's playback.
+    fn hear(&mut self, h: Heard) {
+        if let Some(tx) = self.participant.as_ref().and_then(|p| p.heard.as_ref())
+            && tx.send(h).is_err()
+        {
+            warn!("local playback stopped");
+            if let Some(p) = &mut self.participant {
+                p.heard = None;
+            }
         }
     }
 
@@ -125,6 +204,19 @@ impl Call {
         let take = TakeId(self.last_take);
         self.status = TakeStatus::Recording { take };
         info!(call = %self.library.call(), take = take.0, "take started");
+        if let Some(p) = &self.participant {
+            match self.library.take_dir(take) {
+                Ok(dir) => {
+                    let _ = p.takes.send(TakeCtl::Start {
+                        take,
+                        dir: dir.clone(),
+                    });
+                }
+                Err(e) => {
+                    warn!(take = take.0, error = %e, "no take directory; host microphone not recorded")
+                }
+            }
+        }
         self.broadcast();
         Ok(take)
     }
@@ -135,6 +227,9 @@ impl Call {
         };
         self.status = TakeStatus::Idle;
         info!(call = %self.library.call(), take = take.0, "take stopped");
+        if let Some(p) = &self.participant {
+            let _ = p.takes.send(TakeCtl::Stop { done: None });
+        }
         self.broadcast();
         Ok(take)
     }
@@ -148,6 +243,11 @@ impl Call {
             .names
             .iter()
             .map(|(id, name)| format!("{name} (guest {})", id.0))
+            .chain(
+                self.participant
+                    .iter()
+                    .map(|p| format!("{} (host microphone)", p.name)),
+            )
             .collect();
         serde_json::json!({ "take": take, "guests": guests }).to_string()
     }
@@ -228,6 +328,10 @@ impl Call {
         thread::Builder::new()
             .name("host".into())
             .spawn(move || {
+                if let Some(p) = &self.participant {
+                    self.local = Some(host.add_local_audio(&p.name));
+                    host.set_guest_audio_tap(p.heard.is_some());
+                }
                 loop {
                     while let Ok(c) = rx.try_recv() {
                         self.command(&mut host, c);
@@ -241,12 +345,16 @@ impl Call {
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
                                 self.drop_puller(guest);
+                                self.hear(Heard::Gone(guest));
                             }
                             HostEvent::GuestConnected { guest } => {
                                 info!(guest = guest.0, "guest connected");
                             }
                             HostEvent::ChannelOpen { .. } => {}
                         }
+                    }
+                    while let Some(a) = host.next_guest_audio() {
+                        self.hear(Heard::Audio(a));
                     }
                     self.serve();
                     self.sync();
@@ -287,6 +395,13 @@ impl Call {
             }
             Command::Status { reply } => {
                 let _ = reply.send(self.status_json());
+            }
+            Command::Stun { server } => host.set_stun_server(Some(server)),
+            Command::Turn { server } => host.set_turn_server(Some(server)),
+            Command::LocalAudio { rtp_time, data } => {
+                if let Some(local) = &self.local {
+                    host.send_local_audio(local, rtp_time, &data);
+                }
             }
         }
     }

@@ -9,6 +9,7 @@ default-members = [
   "crates/castcorder-client",
   "crates/castcorder-core",
   "crates/castcorder-host",
+  "crates/castcorder-link",
   "crates/castcorder-port-capture",
   "crates/castcorder-port-clock",
   "crates/castcorder-port-disk",
@@ -59,9 +60,14 @@ serde = { version = "1", default-features = false, features = [
 ] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 castcorder-transport = { path = "crates/castcorder-transport" }
+castcorder-link = { path = "crates/castcorder-link" }
 # Pinned as in the SFU spike (spikes/sfu/FINDINGS.md): str0m is pre-1.0. Keep it
 # behind castcorder-transport. Never enable its openssl backend.
 str0m = { version = "=0.25.0", default-features = false }
+# Sans-IO TURN (RFC 8656): the client for the host's relayed candidate, and the
+# server half for the in-process relay in tests (cast-zxk). UDP allocations only.
+turn-client-proto = "0.8"
+turn-server-proto = "0.8"
 tracing = "0.1"
 serde_json = "1"
 tracing-subscriber = { version = "0.3", default-features = false, features = [

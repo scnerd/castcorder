@@ -45,9 +45,9 @@ use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     AudioContext, AudioContextOptions, AudioContextState, AudioWorkletNode,
     AudioWorkletNodeOptions, ChannelCountMode, ChannelInterpretation, HtmlAudioElement,
-    MediaStream, MediaStreamConstraints, MediaStreamTrack, MessageEvent, RtcDataChannel,
-    RtcDataChannelType, RtcPeerConnection, RtcSdpType, RtcSessionDescriptionInit, RtcTrackEvent,
-    Worker, WorkerOptions,
+    MediaStream, MediaStreamConstraints, MediaStreamTrack, MessageEvent, RtcConfiguration,
+    RtcDataChannel, RtcDataChannelType, RtcIceGatheringState, RtcPeerConnection, RtcSdpType,
+    RtcSessionDescriptionInit, RtcTrackEvent, Worker, WorkerOptions,
 };
 
 use crate::js::{call, describe, get, num, object, set, string, stringify};
@@ -55,6 +55,7 @@ use crate::session::{
     RecorderCommand, clean_name, default_name, on_take_status, reconnect_delay_ms, track_name,
 };
 use crate::signal::Signal;
+use castcorder_link::CallLink;
 
 /// The data channel the protocol client speaks over: sends go straight to the
 /// RTCDataChannel, received binary frames are queued by its onmessage.
@@ -82,6 +83,9 @@ impl MessageChannel for DcChannel {
 #[derive(Clone, Default)]
 struct Ctx {
     call: String,
+    /// Where offers go: the host's `/offer` URL, or the rendezvous `/ws` URL
+    /// for a page opened from a call link.
+    url: String,
     device: String,
     name: String,
 }
@@ -145,6 +149,8 @@ thread_local! {
     /// Bumped by every connection attempt and drop: callbacks of an older
     /// RTCPeerConnection are ignored.
     static CONN_EPOCH: Cell<u32> = const { Cell::new(0) };
+    /// The call link in the page's fragment, if it was opened from one.
+    static LINK: RefCell<Option<CallLink>> = const { RefCell::new(None) };
 }
 
 /// A second Rust handle to the same JS object. Never write `stream.clone()`
@@ -1118,8 +1124,13 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
         let _ = s.set_item(NAME_KEY, &name);
     }
     let url = ui.signal_url.get_untracked();
+    let call = match LINK.with(|l| l.borrow().clone()) {
+        Some(link) => format!("link-{}", link.host.short()),
+        None => url.clone(),
+    };
     let ctx = Ctx {
-        call: url.clone(),
+        call,
+        url: url.clone(),
         device,
         name: name.clone(),
     };
@@ -1175,7 +1186,16 @@ fn connect(ui: Ui, epoch: u32) {
             && !stale(epoch)
             && CONN_EPOCH.get() == conn
         {
-            connection_lost(ui, epoch, &describe(&err));
+            let why = describe(&err);
+            if why.starts_with(crate::mailbox::REJECTED) {
+                // The host refused this link (wrong call secret): retrying
+                // cannot help. Leave (a local track, if any, is kept).
+                ui.error("join", &err);
+                leave(ui);
+                ui.connection.set("rejected by the host".into());
+            } else {
+                connection_lost(ui, epoch, &why);
+            }
         }
     });
 }
@@ -1183,9 +1203,36 @@ fn connect(ui: Ui, epoch: u32) {
 async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     let current = move || !stale(epoch) && CONN_EPOCH.get() == conn;
     let (live, ctx) = with_engine(|e| (e.live.clone(), e.ctx.clone()));
-    let url = ctx.call.clone();
-    let pc = RtcPeerConnection::new()?;
-    // Stored before the first await so a drop or leave always closes it.
+    let url = ctx.url.clone();
+    // From a call link: signal through the rendezvous, whose hello names the
+    // ICE servers (STUN, so the offer carries this browser's public address).
+    // Naming the host asks the rendezvous for relay (TURN) credentials too.
+    let link = LINK.with(|l| l.borrow().clone());
+    let mailbox = match &link {
+        Some(l) => {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            let ws = format!("{url}{sep}host={}", l.host.encode());
+            Some(crate::mailbox::Mailbox::open(&ws).await?)
+        }
+        None => None,
+    };
+    if !current() {
+        return Ok(());
+    }
+    let pc = match &mailbox {
+        Some(mb) => {
+            let cfg: RtcConfiguration = object().unchecked_into();
+            set(&cfg, "iceServers", mb.ice_servers.clone());
+            // Debug: `?iceTransportPolicy=relay` forces the TURN relay.
+            if let Some(policy) = query_param("iceTransportPolicy") {
+                info!(policy = %policy, "ice transport policy forced");
+                set(&cfg, "iceTransportPolicy", policy.as_str());
+            }
+            RtcPeerConnection::new_with_configuration(&cfg)?
+        }
+        None => RtcPeerConnection::new()?,
+    };
+    // Stored before the next await so a drop or leave always closes it.
     with_engine(|e| e.pc = Some(pc.clone()));
     let mut has_video = false;
     if let Some(live) = live.as_ref() {
@@ -1303,9 +1350,44 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     if !current() {
         return Ok(());
     }
+    let answer_sdp = match (&mailbox, &link) {
+        (Some(mb), Some(link)) => {
+            // No trickle: wait (briefly) for every candidate, srflx included,
+            // before sealing the offer.
+            let start = js_sys::Date::now();
+            while pc.ice_gathering_state() != RtcIceGatheringState::Complete
+                && js_sys::Date::now() - start < 3000.0
+            {
+                crate::mailbox::sleep_ms(50).await;
+                if !current() {
+                    return Ok(());
+                }
+            }
+            let sdp = pc
+                .local_description()
+                .map(|d| d.sdp())
+                .unwrap_or_else(|| string(&offer, "sdp"));
+            info!(call = %ctx.call, device = %ctx.device, gathering = ?pc.ice_gathering_state(), "offer sealed to the host through the rendezvous");
+            mb.exchange(link, &ctx.name, &sdp).await?
+        }
+        _ => direct_offer(&url, &ctx, &string(&offer, "sdp")).await?,
+    };
+    drop(mailbox);
+    if !current() {
+        return Ok(());
+    }
+    let remote = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+    remote.set_sdp(&answer_sdp);
+    JsFuture::from(pc.set_remote_description(&remote)).await?;
+    info!(call = %ctx.call, device = %ctx.device, "answer applied");
+    Ok(())
+}
+
+/// LAN mode: POST the offer to the host's own `/offer` and return the answer SDP.
+async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue> {
     let body = object();
     set(&body, "type", "offer");
-    set(&body, "sdp", string(&offer, "sdp"));
+    set(&body, "sdp", sdp);
     let init = object();
     set(&init, "method", "POST");
     // text/plain keeps the request "simple": no CORS preflight.
@@ -1321,9 +1403,6 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
         &[&JsValue::from_str(&target), &init],
     )?))
     .await?;
-    if !current() {
-        return Ok(());
-    }
     if !get(&resp, "ok").is_truthy() {
         let text = JsFuture::from(Promise::from(call(&resp, "text", &[])?)).await?;
         return Err(JsValue::from_str(&format!(
@@ -1332,14 +1411,7 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
         )));
     }
     let answer = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
-    if !current() {
-        return Ok(());
-    }
-    let remote = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-    remote.set_sdp(&string(&answer, "sdp"));
-    JsFuture::from(pc.set_remote_description(&remote)).await?;
-    info!(call = %ctx.call, device = %ctx.device, "answer applied");
-    Ok(())
+    Ok(string(&answer, "sdp"))
 }
 
 /// Every second while joined: heartbeat, watch the connection and the
@@ -1738,11 +1810,20 @@ fn Producer() -> impl IntoView {
 #[component]
 fn App() -> impl IntoView {
     let origin = window().location().origin().unwrap_or_default();
+    // A call link: `./v/<version>/#<host-id>.<call-secret>` (the fragment never
+    // reaches a server). Then signal through this origin's rendezvous.
+    let hash = window().location().hash().unwrap_or_default();
+    let link = CallLink::parse_fragment(&hash).ok();
+    let bad_link = hash.len() > 1 && link.is_none();
+    let default_signal = if link.is_some() {
+        format!("{}/ws", origin.replacen("http", "ws", 1))
+    } else {
+        format!("{origin}/offer")
+    };
+    LINK.with(|l| *l.borrow_mut() = link);
     let ui = Ui {
         name: RwSignal::new(query_param("name").or_else(stored_name).unwrap_or_default()),
-        signal_url: RwSignal::new(
-            query_param("signal").unwrap_or_else(|| format!("{origin}/offer")),
-        ),
+        signal_url: RwSignal::new(query_param("signal").unwrap_or(default_signal)),
         joined: RwSignal::new(false),
         connection: RwSignal::new("idle".into()),
         participant: RwSignal::new(String::new()),
@@ -1754,6 +1835,10 @@ fn App() -> impl IntoView {
         errors: RwSignal::new(Vec::new()),
         warning: RwSignal::new(String::new()),
     };
+    if bad_link {
+        ui.warning
+            .set("This call link is damaged: ask the host for it again.".into());
+    }
     if let Err(e) = start_worker(ui) {
         ui.error("worker", &e);
     }

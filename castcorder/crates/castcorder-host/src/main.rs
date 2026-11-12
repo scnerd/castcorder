@@ -11,13 +11,33 @@
 //! host's own rotating JSON-lines log.
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
-//! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...`
+//! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
+//! [--rendezvous URL] [--relay-only] [--participate [DEVICE]] [--name NAME]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
+//!
+//! With `--rendezvous URL` (none by default) the host also registers with
+//! that rendezvous under its host key and, once registered, prints the call
+//! link for guests anywhere and `CALL_LINK <link>` (see [`rendezvous`]). The
+//! LAN pages and `POST /offer` keep working beside it.
+//!
+//! `--relay-only` (for testing the relay path) offers guests only the TURN
+//! relayed candidate from the rendezvous: no host or server-reflexive ones.
+//! Offers are refused until the relay is allocated.
+//!
+//! `--participate [DEVICE]` (builds with the `native-capture` feature only)
+//! makes the person at this machine a participant without a browser: the
+//! named input (default: the default microphone) is heard by every guest and
+//! recorded into each take as `takeNN_<name>_mic.wav` (then FLAC), and the
+//! guests are played on the default output. `--name NAME` is their display
+//! name (default `host`). See `native`.
 
 mod call;
 mod http;
+#[cfg(feature = "native-capture")]
+mod native;
+mod rendezvous;
 mod tls;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
@@ -33,7 +53,8 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]...";
+[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] \
+[--participate [DEVICE]] [--name NAME]";
 
 struct Args {
     dist: PathBuf,
@@ -44,6 +65,11 @@ struct Args {
     http_port: u16,
     udp_port: u16,
     advertise: Vec<IpAddr>,
+    rendezvous: Option<String>,
+    relay_only: bool,
+    /// `--participate`: `Some(None)` is the default input.
+    participate: Option<Option<String>>,
+    name: String,
 }
 
 fn fail(msg: &str) -> ! {
@@ -73,8 +99,12 @@ fn parse_args() -> Args {
         http_port: 47801,
         udp_port: 47802,
         advertise: vec![],
+        rendezvous: None,
+        relay_only: false,
+        participate: None,
+        name: "host".into(),
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(flag) = args.next() {
         let mut value = || {
             args.next()
@@ -91,6 +121,32 @@ fn parse_args() -> Args {
             "--http-port" => a.http_port = port(value()),
             "--udp-port" => a.udp_port = port(value()),
             "--advertise" => a.advertise.push(ip(value())),
+            "--rendezvous" => {
+                let url = value();
+                if let Err(e) = rendezvous::validate(&url) {
+                    fail(&e);
+                }
+                a.rendezvous = Some(url.trim_end_matches('/').to_string());
+            }
+            "--relay-only" => a.relay_only = true,
+            "--participate" => {
+                if !cfg!(feature = "native-capture") {
+                    fail("--participate needs a build with the native-capture feature (task host)");
+                }
+                let device = args.next_if(|v| !v.starts_with("--"));
+                a.participate = Some(device);
+            }
+            "--name" => {
+                let n: String = value()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .take(32)
+                    .collect();
+                if n.is_empty() {
+                    fail("--name needs letters, digits or '-'");
+                }
+                a.name = n;
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -178,11 +234,31 @@ fn main() {
                 .iter()
                 .map(|ip| SocketAddr::new(*ip, udp.port()))
                 .collect(),
+            relay_only: args.relay_only,
             ..HostConfig::default()
         },
     );
     let (tx, rx) = mpsc::channel();
-    call::Call::new(library, last_take(&call_dir)).spawn(host, clock, rx);
+    #[allow(unused_mut)]
+    let mut call = call::Call::new(library, last_take(&call_dir));
+    #[cfg(feature = "native-capture")]
+    if let Some(device) = args.participate.clone() {
+        let cfg = native::Config {
+            device,
+            name: args.name.clone(),
+        };
+        call = call.with_participant(native::start(cfg, tx.clone()));
+    }
+    call.spawn(host, clock, rx);
+    let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
+        base: base.clone(),
+        key: rendezvous::host_key(&args.library)
+            .unwrap_or_else(|e| fail(&format!("host key: {e}"))),
+        secret: rendezvous::call_secret(&call_dir)
+            .unwrap_or_else(|e| fail(&format!("call secret: {e}"))),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+    let rendezvous_tx = tx.clone();
 
     let tls = tls::server_config(&args.library, &lan)
         .unwrap_or_else(|e| fail(&format!("certificate: {e}")));
@@ -230,6 +306,16 @@ fn main() {
             .map(|l| l.trim_end_matches('/'))
             .unwrap_or_default()
     );
+    if let Some(cfg) = rendezvous {
+        tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
+        rendezvous::spawn(cfg, rendezvous_tx, |link| {
+            println!();
+            println!("  Guests anywhere open this call link (share it only with them):");
+            println!("    {link}");
+            println!();
+            println!("CALL_LINK {link}");
+        });
+    }
     loop {
         std::thread::park();
     }
@@ -247,7 +333,7 @@ fn init_logging(library: &Path, call: &str) {
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         tracing_subscriber::EnvFilter::new(
-            "castcorder_transport=info,castcorder_core=info,castcorder_host=info",
+            "castcorder_transport=info,castcorder_core=info,castcorder_host=info,castcorder_capture_gst=info",
         )
     });
     let console = tracing_subscriber::fmt::layer()

@@ -19,7 +19,7 @@ tasks:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
       - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
-      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer -p castcorder-link --lib --target wasm32-unknown-unknown --locked -- -D warnings
       # The Browser Guest: its UI and worker binaries only exist on wasm32.
       - cargo clippy -p castcorder-client --lib --bins --target wasm32-unknown-unknown --locked -- -D warnings
 
@@ -51,6 +51,10 @@ tasks:
     cmds:
       - cargo clippy -p castcorder-capture-gst --all-targets -- -D warnings
       - cargo test -p castcorder-capture-gst -- --nocapture
+      # The host with native capture (--participate): the real microphone through
+      # the full path into a library take; skips without an input device.
+      - cargo clippy -p castcorder-host --features native-capture --all-targets -- -D warnings
+      - cargo test -p castcorder-host --features native-capture -- --nocapture
 
   test:browser:transport:
     desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)
@@ -99,6 +103,9 @@ tasks:
       the https link. Stop with Ctrl+C. Pass host flags after --, e.g.
       task host -- --call my-show --library D:\Podcasts
       Files land in %USERPROFILE%\Castcorder\<call>\ by default.
+      Built with the native-capture feature (needs GStreamer, as test:gst):
+      add --participate [DEVICE] --name NAME to take part from this machine
+      without a browser (see README).
     cmds:
       - cd crates/castcorder-client && trunk build --release
-      - cargo run --release --locked -p castcorder-host -- --dist crates/castcorder-client/dist {{.CLI_ARGS}}
+      - cargo run --release --locked -p castcorder-host --features native-capture -- --dist crates/castcorder-client/dist {{.CLI_ARGS}}

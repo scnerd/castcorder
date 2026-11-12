@@ -1,6 +1,7 @@
 //! One guest's connection: the port of the SFU spike's `Client`, with every clock
 //! read and socket write going through the ports.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -8,11 +9,15 @@ use castcorder_port_net::DatagramSocket;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
-use str0m::media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid};
+use str0m::format::Codec;
+use str0m::media::{
+    Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid,
+};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
 use crate::channel::{ChannelKind, Shared, lock};
+use crate::relay::Relay;
 use crate::signal::Signal;
 use crate::{GoneReason, GuestId, GuestStats, HostEvent};
 
@@ -71,6 +76,24 @@ pub(crate) enum Propagated {
         mid_in: Mid,
         kind: KeyframeRequestKind,
     },
+}
+
+/// Where str0m's transmits go: straight out of the socket, or through the TURN
+/// client when sourced from the relayed candidate.
+pub(crate) struct Wire<'a, S> {
+    pub(crate) socket: &'a S,
+    pub(crate) relay: &'a mut Relay,
+    pub(crate) now: Duration,
+}
+
+impl<S: DatagramSocket> Wire<'_, S> {
+    pub(crate) fn send(&mut self, source: SocketAddr, to: SocketAddr, contents: &[u8]) {
+        if self.relay.relayed() == Some(source) {
+            self.relay.send(self.socket, to, contents, self.now);
+        } else if let Err(e) = self.socket.send_to(contents, to) {
+            debug!(error = %e, to = %to, "send_to failed");
+        }
+    }
 }
 
 /// Settings each guest needs from the host config.
@@ -160,7 +183,7 @@ impl Guest {
     /// Poll until str0m has only a timeout left; transmit everything it produced.
     pub(crate) fn poll_until_timeout<S: DatagramSocket>(
         &mut self,
-        socket: &S,
+        wire: &mut Wire<'_, S>,
         now: Instant,
     ) -> Option<Instant> {
         loop {
@@ -170,11 +193,7 @@ impl Guest {
             self.negotiate_if_needed();
             match self.rtc.poll_output() {
                 Ok(Output::Timeout(t)) => return Some(t),
-                Ok(Output::Transmit(t)) => {
-                    if let Err(e) = socket.send_to(&t.contents, t.destination) {
-                        debug!(error = %e, to = %t.destination, "send_to failed");
-                    }
-                }
+                Ok(Output::Transmit(t)) => wire.send(t.source, t.destination, &t.contents),
                 Ok(Output::Event(e)) => self.handle_event(e, now),
                 Err(e) => {
                     warn!(error = ?e, "poll_output failed, disconnecting");
@@ -556,6 +575,44 @@ impl Guest {
         };
         if let Err(e) = w.write(pt, data.network_time, data.time, data.data.clone()) {
             warn!(error = ?e, "forwarding write failed, disconnecting");
+            self.mark_gone(GoneReason::Failed(format!("{e}")));
+            return;
+        }
+        self.stats.frames_out += 1;
+    }
+
+    /// Send one Opus frame of the host's own local track, if it is open toward
+    /// this guest.
+    pub(crate) fn write_local_audio(
+        &mut self,
+        track: &Arc<TrackIn>,
+        now: Instant,
+        time: MediaTime,
+        data: &[u8],
+    ) {
+        let Some(mid) = self
+            .tracks_out
+            .iter()
+            .find(|o| {
+                matches!(o.state, TrackOutState::Open(_))
+                    && o.track_in.upgrade().is_some_and(|i| Arc::ptr_eq(&i, track))
+            })
+            .and_then(|o| o.mid())
+        else {
+            return;
+        };
+        let Some(w) = self.rtc.writer(mid) else {
+            return;
+        };
+        let Some(pt) = w
+            .payload_params()
+            .find(|p| p.spec().codec == Codec::Opus)
+            .map(|p| p.pt())
+        else {
+            return;
+        };
+        if let Err(e) = w.write(pt, now, time, data.to_vec()) {
+            warn!(error = ?e, "local audio write failed, disconnecting");
             self.mark_gone(GoneReason::Failed(format!("{e}")));
             return;
         }

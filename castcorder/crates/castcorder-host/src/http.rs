@@ -195,25 +195,32 @@ fn ask<T>(app: &App, make: impl FnOnce(mpsc::Sender<T>) -> Command) -> Option<T>
     rx.recv_timeout(Duration::from_secs(10)).ok()
 }
 
+/// A guest's name as logs and stream ids use it: ASCII letters and digits,
+/// at most 16, `guest` if none are left.
+pub fn clean_name(raw: &str) -> String {
+    let name: String = raw
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(16)
+        .collect();
+    if name.is_empty() {
+        "guest".into()
+    } else {
+        name
+    }
+}
+
 fn handle(app: &App, req: &Request, producer: bool) -> Response {
     let gone = || text(500, "host thread not answering");
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/role") => json(200, format!("{{\"producer\":{producer}}}")),
         ("POST", "/offer") => {
-            let name: String = req
-                .query
-                .split('&')
-                .find_map(|kv| kv.strip_prefix("name="))
-                .unwrap_or("guest")
-                .chars()
-                .filter(char::is_ascii_alphanumeric)
-                .take(16)
-                .collect();
-            let name = if name.is_empty() {
-                "guest".into()
-            } else {
-                name
-            };
+            let name = clean_name(
+                req.query
+                    .split('&')
+                    .find_map(|kv| kv.strip_prefix("name="))
+                    .unwrap_or("guest"),
+            );
             let offer = match serde_json::from_slice::<Sdp>(&req.body) {
                 Ok(o) => o,
                 Err(e) => return text(400, format!("bad offer json: {e}")),
