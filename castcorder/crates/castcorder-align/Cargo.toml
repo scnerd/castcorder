@@ -1,0 +1,31 @@
+[package]
+name = "castcorder-align"
+description = "Aligned tracks: renders a take's audio tracks onto the host timeline from their timing metadata (offset and drift corrected), with marker exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+castcorder-core.workspace = true
+castcorder-port-capture.workspace = true
+castcorder-port-disk.workspace = true
+castcorder-protocol.workspace = true
+castcorder-recorder.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# The command-line tool's log output.
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "fmt",
+  "std",
+] }
+
+[dev-dependencies]
+claxon.workspace = true
+blake3.workspace = true

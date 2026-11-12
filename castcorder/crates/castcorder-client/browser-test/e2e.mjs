@@ -445,6 +445,20 @@ try {
       + ', leading zeros ' + c.leadingZeroFrames + ', unlocked ' + c.unlocked + ', mismatched ' + c.mismatched
       + ', dropped ' + c.droppedFrames + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames + ')');
   }
+  // Aligned tracks (cast-pzb): once both tracks and their timing metadata are
+  // verified the host renders take01/aligned/, one file per guest, equal
+  // lengths; the summary is written last.
+  const ALIGNED = join(TAKE_DIR, 'aligned');
+  await waitFor(async () => existsSync(join(ALIGNED, 'take01_alignment.json')), 'aligned take01', 60000);
+  const alignedFiles = readdirSync(ALIGNED).filter((f) => f.endsWith('.wav') || f.endsWith('.flac')).sort();
+  const summary = JSON.parse(readFileSync(join(ALIGNED, 'take01_alignment.json'), 'utf8'));
+  const alignedLens = alignedFiles.filter((f) => f.endsWith('.wav')).map((f) => parseWav(readFileSync(join(ALIGNED, f))).frames);
+  console.log('info aligned take01: ' + alignedFiles.join(' ') + '; frames ' + alignedLens.join(' ') + '; offsets '
+    + summary.tracks.map((t) => t.who + ' ' + (t.offset_s * 1000).toFixed(1) + ' ms, drift ' + t.drift_ppm.toFixed(1) + ' ppm').join(', '));
+  check(alignedFiles.length === 2 && alignedFiles.every((f, i) => f === ['take01_A_mic.wav', 'take01_B_mic.wav'][i])
+    && alignedLens.length === 2 && alignedLens.every((n) => n === summary.frames && n > 0)
+    && existsSync(join(ALIGNED, 'take01_markers.txt')) && existsSync(join(ALIGNED, 'take01_markers.csv')),
+    'host aligned take01: one track per guest, equal lengths (' + summary.frames + ' frames), with marker exports');
   }
   // Take 2: B's connection is cut mid-take, then its microphone is lost.
   await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer ready for take 2', 10000);

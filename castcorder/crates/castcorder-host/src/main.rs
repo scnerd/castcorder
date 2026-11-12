@@ -54,7 +54,7 @@ use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] \
-[--participate [DEVICE]] [--name NAME]";
+[--participate [DEVICE]] [--name NAME] [--align resample|offset-only|off] [--aligned-format flac|wav]";
 
 struct Args {
     dist: PathBuf,
@@ -70,6 +70,8 @@ struct Args {
     /// `--participate`: `Some(None)` is the default input.
     participate: Option<Option<String>>,
     name: String,
+    /// Aligned tracks (`None`: `--align off`).
+    align: Option<castcorder_align::AlignConfig>,
 }
 
 fn fail(msg: &str) -> ! {
@@ -103,6 +105,7 @@ fn parse_args() -> Args {
         relay_only: false,
         participate: None,
         name: "host".into(),
+        align: Some(castcorder_align::AlignConfig::default()),
     };
     let mut args = std::env::args().skip(1).peekable();
     while let Some(flag) = args.next() {
@@ -146,6 +149,28 @@ fn parse_args() -> Args {
                     fail("--name needs letters, digits or '-'");
                 }
                 a.name = n;
+            }
+            "--align" => {
+                let mode = match value().as_str() {
+                    "resample" => Some(castcorder_align::Mode::Resample),
+                    "offset-only" => Some(castcorder_align::Mode::OffsetOnly),
+                    "off" => None,
+                    _ => fail("--align is resample, offset-only or off"),
+                };
+                a.align = mode.map(|mode| castcorder_align::AlignConfig {
+                    mode,
+                    ..a.align.unwrap_or_default()
+                });
+            }
+            "--aligned-format" => {
+                let format = match value().as_str() {
+                    "flac" => castcorder_align::OutputFormat::Flac,
+                    "wav" => castcorder_align::OutputFormat::Wav,
+                    _ => fail("--aligned-format is flac or wav"),
+                };
+                if let Some(c) = &mut a.align {
+                    c.format = format;
+                }
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -244,6 +269,9 @@ fn main() {
     let (tx, rx) = mpsc::channel();
     #[allow(unused_mut)]
     let mut call = call::Call::new(library, last_take(&call_dir), timeline.clone());
+    if let Some(cfg) = args.align {
+        call = call.with_alignment(cfg);
+    }
     #[cfg(feature = "native-capture")]
     if let Some(device) = args.participate.clone() {
         let cfg = native::Config {

@@ -1,7 +1,7 @@
 //! Timing metadata: the file beside every track that places its samples on the
 //! host's timeline (CONTEXT.md, Timing Metadata; design.md, Timing). Browser
-//! tracks and the host's own native tracks write the same format, and the
-//! aligned-track renderer reads it back with [`TimingMap`].
+//! tracks and the host's own native tracks write the same format;
+//! castcorder-align reads it back (with [`parse`]) to render aligned tracks.
 //!
 //! # File
 //!

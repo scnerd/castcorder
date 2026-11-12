@@ -150,6 +150,35 @@ impl ClockEstimator {
         }
     }
 
+    /// An estimator over `samples` (sorted by `t0_us` here), fitted once:
+    /// the offline refit of a whole take. Samples [`push`](Self::push) would
+    /// reject, and repeats, are left out.
+    pub fn from_samples(cfg: EstimatorConfig, samples: &[ClockSample]) -> Self {
+        let mut sorted = samples.to_vec();
+        sorted.sort_by_key(|s| (s.t0_us, s.t3_us, s.t1_us, s.t2_us));
+        sorted.dedup();
+        let mut e = Self::new(cfg);
+        for s in sorted {
+            let rtt = s.rtt_us();
+            if rtt < 0 || rtt > cfg.max_rtt_us || s.t3_us < s.t0_us || s.t2_us < s.t1_us {
+                continue;
+            }
+            e.samples.push_back(s);
+        }
+        if let Some(newest) = e.samples.back().copied() {
+            let horizon = newest.device_mid_us().saturating_sub(cfg.window_us);
+            while e
+                .samples
+                .front()
+                .is_some_and(|f| f.device_mid_us() < horizon)
+            {
+                e.samples.pop_front();
+            }
+        }
+        e.estimate = e.fit();
+        e
+    }
+
     /// Add a sample and refit. Returns false (and ignores it) when it is
     /// malformed or its round trip is above [`EstimatorConfig::max_rtt_us`].
     pub fn push(&mut self, s: ClockSample) -> bool {

@@ -8,6 +8,8 @@
 //! <library>/<call>/takeNN/manifest.jsonl          the take's manifest
 //! <library>/<call>/takeNN/takeNN_<who>_<src>.wav  a track, received in place
 //!                         ... .wav.obao, .wav.journal   while it is incomplete
+//! <library>/<call>/takeNN/aligned/                aligned tracks and marker exports
+//!                                                 (castcorder-align; never in the manifest)
 //! ```
 //!
 //! The manifest is an append-only log of JSON lines (the disk port has no
@@ -99,6 +101,49 @@ impl<S: Storage> Take<S> {
     }
 }
 
+/// Parse a take's manifest (the bytes of [`MANIFEST`]) without touching the
+/// disk: the entries keyed by (device, name), and how many leading bytes were
+/// whole, parsable lines (parsing stops at a torn or unparsable line). For
+/// readers such as the aligned-track renderer, which must not repair or hold
+/// open a manifest the host is appending to.
+pub fn parse_manifest(buf: &[u8]) -> (BTreeMap<(String, String), ManifestEntry>, usize) {
+    let mut entries = BTreeMap::new();
+    let mut valid = 0usize;
+    while let Some(nl) = buf[valid..].iter().position(|b| *b == b'\n') {
+        let Ok(rec) = serde_json::from_slice::<Record>(&buf[valid..valid + nl]) else {
+            break;
+        };
+        match rec {
+            Record::Offered {
+                offer,
+                participant,
+                file,
+            } => {
+                entries.insert(
+                    (offer.device.clone(), offer.name.clone()),
+                    ManifestEntry {
+                        offer,
+                        participant,
+                        file,
+                        verified: false,
+                    },
+                );
+            }
+            Record::Verified { root, device, name } => {
+                for e in entries.values_mut().filter(|e| {
+                    hex(&e.offer.root) == root
+                        && device.as_ref().is_none_or(|d| *d == e.offer.device)
+                        && name.as_ref().is_none_or(|n| *n == e.offer.name)
+                }) {
+                    e.verified = true;
+                }
+            }
+        }
+        valid += nl + 1;
+    }
+    (entries, valid)
+}
+
 /// The directory of a take; take 0 (logs) is `logs`.
 fn take_dir_name(take: TakeId) -> String {
     if take.0 == 0 {
@@ -187,40 +232,7 @@ impl<S: Storage> Library<S> {
         let len = log.len()?;
         let mut buf = vec![0u8; len as usize];
         castcorder_transfer::io::read_exact_at(&mut log, 0, &mut buf)?;
-        let mut entries = BTreeMap::new();
-        let mut valid = 0usize;
-        while let Some(nl) = buf[valid..].iter().position(|b| *b == b'\n') {
-            let Ok(rec) = serde_json::from_slice::<Record>(&buf[valid..valid + nl]) else {
-                break;
-            };
-            match rec {
-                Record::Offered {
-                    offer,
-                    participant,
-                    file,
-                } => {
-                    entries.insert(
-                        (offer.device.clone(), offer.name.clone()),
-                        ManifestEntry {
-                            offer,
-                            participant,
-                            file,
-                            verified: false,
-                        },
-                    );
-                }
-                Record::Verified { root, device, name } => {
-                    for e in entries.values_mut().filter(|e| {
-                        hex(&e.offer.root) == root
-                            && device.as_ref().is_none_or(|d| *d == e.offer.device)
-                            && name.as_ref().is_none_or(|n| *n == e.offer.name)
-                    }) {
-                        e.verified = true;
-                    }
-                }
-            }
-            valid += nl + 1;
-        }
+        let (entries, valid) = parse_manifest(&buf);
         if valid as u64 != len {
             warn!(call = %self.call, take = take.0, kept = valid, len, "manifest had a torn tail; truncated");
             log.set_len(valid as u64)?;

@@ -115,6 +115,51 @@ pub struct Call {
     participant: Option<Participant>,
     local: Option<LocalAudio>,
     timeline: HostTimeline<SystemClock>,
+    /// Takes to align go to the align thread (`None`: alignment is off).
+    align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
+}
+
+/// Render aligned tracks on their own thread, one take at a time (never on
+/// the host thread: it answers clock pings, and their delay is error).
+/// Requests for a take already queued are merged; a take whose tracks keep
+/// arriving is aligned again after each.
+fn spawn_aligner(cfg: castcorder_align::AlignConfig) -> mpsc::Sender<(TakeId, FsStorage)> {
+    let (tx, rx) = mpsc::channel::<(TakeId, FsStorage)>();
+    let spawned = thread::Builder::new().name("align".into()).spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut jobs: BTreeMap<u32, FsStorage> = BTreeMap::new();
+            jobs.insert(first.0.0, first.1);
+            while let Ok((t, d)) = rx.try_recv() {
+                jobs.insert(t.0, d);
+            }
+            for (take, dir) in jobs {
+                // The host's own recorder finalises its timing file just
+                // after the take stops; give it a moment.
+                for _ in 0..50 {
+                    if castcorder_align::local_tracks_finalised(&dir).unwrap_or(true) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+                info!(take, dir = %dir.root().display(), "aligning take");
+                match castcorder_align::align_take(&dir, &cfg) {
+                    Ok(s) => info!(
+                        take,
+                        tracks = s.tracks.len(),
+                        skipped = s.skipped.len(),
+                        frames = s.frames,
+                        rate = s.sample_rate,
+                        "aligned tracks written"
+                    ),
+                    Err(e) => warn!(take, error = %e, "take not aligned"),
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        warn!(error = %e, "align thread not started; takes will not be aligned");
+    }
+    tx
 }
 
 impl Call {
@@ -137,6 +182,47 @@ impl Call {
             participant: None,
             local: None,
             timeline,
+            align: None,
+        }
+    }
+
+    /// Align each take once its guests' audio tracks and timing metadata
+    /// are all verified, and again when a late track arrives.
+    pub fn with_alignment(mut self, cfg: castcorder_align::AlignConfig) -> Self {
+        self.align = Some(spawn_aligner(cfg));
+        self
+    }
+
+    /// Queue alignment of the takes that just completed a track, if all
+    /// their tracks are in.
+    fn align_completed(&mut self, takes: Vec<TakeId>) {
+        let Some(tx) = &self.align else {
+            return;
+        };
+        for take in takes {
+            if take.0 == 0 || self.status == (TakeStatus::Recording { take }) {
+                continue;
+            }
+            let ready = self
+                .library
+                .entries(take)
+                .map(|e| castcorder_align::ready(&e));
+            match (ready, self.library.take_dir(take)) {
+                (Ok(true), Ok(dir)) => {
+                    if tx.send((take, dir.clone())).is_err() {
+                        warn!(take = take.0, "align thread gone; take not aligned");
+                    }
+                }
+                (Ok(false), _) => {
+                    info!(
+                        take = take.0,
+                        "track received; take still waiting for tracks before alignment"
+                    )
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    warn!(take = take.0, error = %e, "take not aligned: library unreadable")
+                }
+            }
         }
     }
 
@@ -164,6 +250,7 @@ impl Call {
     fn sync(&mut self) {
         let recording = matches!(self.status, TakeStatus::Recording { .. });
         let mut gone = Vec::new();
+        let mut completed: Vec<TakeId> = Vec::new();
         for (id, p) in &mut self.pullers {
             if let Err(e) = p.poll(&mut self.library, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
@@ -171,9 +258,17 @@ impl Call {
             } else if p.is_closed() {
                 gone.push(*id);
             }
+            for e in p.take_completed() {
+                if !completed.contains(&e.offer.take) {
+                    completed.push(e.offer.take);
+                }
+            }
         }
         for id in gone {
             self.drop_puller(id);
+        }
+        if !completed.is_empty() {
+            self.align_completed(completed);
         }
     }
 

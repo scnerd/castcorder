@@ -17,7 +17,7 @@ mod flac;
 mod wav;
 
 pub use driver::{pump, record};
-pub use flac::{FlacError, FlacReport, wav_to_flac};
+pub use flac::{FlacError, FlacReport, encode_flac, wav_to_flac};
 pub use wav::{
     DATA_OFFSET, RecoverReport, WavInfo, WavWriter, WriterOptions, read_data, read_info, recover,
     recover_with,
