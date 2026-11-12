@@ -118,6 +118,21 @@ fn clean(s: &str, max: usize, fallback: &str) -> String {
     if c.is_empty() { fallback.into() } else { c }
 }
 
+/// A file extension from an offer's format: `[A-Za-z0-9-]` parts joined by
+/// single dots (`timing.jsonl`), at most 16 characters, lower case; `bin` if
+/// nothing is left.
+fn clean_ext(format: &str) -> String {
+    let parts: Vec<String> = format
+        .split('.')
+        .map(|p| clean(p, 16, ""))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut ext = parts.join(".");
+    ext.truncate(16);
+    let ext = ext.trim_end_matches('.').to_ascii_lowercase();
+    if ext.is_empty() { "bin".into() } else { ext }
+}
+
 fn sidecars(file: &str) -> [String; 2] {
     [format!("{file}.obao"), format!("{file}.journal")]
 }
@@ -260,7 +275,7 @@ impl<S: Storage> Library<S> {
         }
         let who = clean(participant, 32, "guest");
         let src = clean(&offer.source.0, 32, "src");
-        let ext = clean(&offer.format, 8, "bin").to_ascii_lowercase();
+        let ext = clean_ext(&offer.format);
         let mut n = 1;
         let file = loop {
             let who = if n == 1 {
@@ -670,5 +685,19 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             progress = true;
         }
         Ok(progress)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_ext;
+
+    #[test]
+    fn extensions_keep_single_dots_only() {
+        assert_eq!(clean_ext("wav"), "wav");
+        assert_eq!(clean_ext("timing.jsonl"), "timing.jsonl");
+        assert_eq!(clean_ext("../x..JSON"), "x.json");
+        assert_eq!(clean_ext("."), "bin");
+        assert_eq!(clean_ext("abcdefgh.ijklmnop"), "abcdefgh.ijklmno");
     }
 }

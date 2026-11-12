@@ -430,7 +430,9 @@ dependencies = [
 name = "castcorder-core"
 version = "0.0.0"
 dependencies = [
+ "castcorder-port-clock",
  "castcorder-port-disk",
+ "castcorder-port-net",
  "castcorder-protocol",
  "castcorder-transfer",
  "serde",

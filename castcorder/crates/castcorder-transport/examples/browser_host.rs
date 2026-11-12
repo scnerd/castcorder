@@ -193,6 +193,18 @@ impl Call {
                     }
                     Request::OfferTrack(offer) => self.offer_track(id, &offer),
                     Request::ListSources => Response::Sources(vec![]),
+                    Request::ClockPing { t0_us } => {
+                        // The example has no host timeline: the wall clock will do.
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_micros() as i64);
+                        Response::ClockPong {
+                            t0_us,
+                            t1_us: now,
+                            t2_us: now,
+                            timeline: 0,
+                        }
+                    }
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => match self.start_take() {
                         Ok(take) => Response::TakeStarted { take },

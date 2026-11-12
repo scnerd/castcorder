@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
@@ -32,13 +33,13 @@ pub enum Command {
     },
     /// Start a take.
     StartTake {
-        /// The take started, or why not.
-        reply: mpsc::Sender<Result<TakeId, String>>,
+        /// The take started and when (host timeline, us), or why not.
+        reply: mpsc::Sender<Result<(TakeId, i64), String>>,
     },
     /// Stop the recording take.
     StopTake {
-        /// The take stopped, or why not.
-        reply: mpsc::Sender<Result<TakeId, String>>,
+        /// The take stopped and when (host timeline, us), or why not.
+        reply: mpsc::Sender<Result<(TakeId, i64), String>>,
     },
     /// The take status and the connected guests, as JSON text.
     Status {
@@ -113,12 +114,18 @@ pub struct Call {
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
     participant: Option<Participant>,
     local: Option<LocalAudio>,
+    timeline: HostTimeline<SystemClock>,
 }
 
 impl Call {
     /// A call collecting into `library`; take numbers continue after
-    /// `last_take` (the highest take already in the call's directory).
-    pub fn new(library: Library<FsStorage>, last_take: u32) -> Self {
+    /// `last_take` (the highest take already in the call's directory). Clock
+    /// pongs and take times are on `timeline`.
+    pub fn new(
+        library: Library<FsStorage>,
+        last_take: u32,
+        timeline: HostTimeline<SystemClock>,
+    ) -> Self {
         Self {
             status: TakeStatus::Idle,
             last_take,
@@ -129,6 +136,7 @@ impl Call {
             pullers: BTreeMap::new(),
             participant: None,
             local: None,
+            timeline,
         }
     }
 
@@ -196,14 +204,15 @@ impl Call {
         }
     }
 
-    fn start_take(&mut self) -> Result<TakeId, String> {
+    fn start_take(&mut self) -> Result<(TakeId, i64), String> {
         if let TakeStatus::Recording { take } = self.status {
             return Err(format!("take {} is already recording", take.0));
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
         self.status = TakeStatus::Recording { take };
-        info!(call = %self.library.call(), take = take.0, "take started");
+        let host_us = self.timeline.now_us();
+        info!(call = %self.library.call(), take = take.0, host_us, "take started");
         if let Some(p) = &self.participant {
             match self.library.take_dir(take) {
                 Ok(dir) => {
@@ -218,20 +227,21 @@ impl Call {
             }
         }
         self.broadcast();
-        Ok(take)
+        Ok((take, host_us))
     }
 
-    fn stop_take(&mut self) -> Result<TakeId, String> {
+    fn stop_take(&mut self) -> Result<(TakeId, i64), String> {
         let TakeStatus::Recording { take } = self.status else {
             return Err("no take is recording".into());
         };
         self.status = TakeStatus::Idle;
-        info!(call = %self.library.call(), take = take.0, "take stopped");
+        let host_us = self.timeline.now_us();
+        info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
         if let Some(p) = &self.participant {
             let _ = p.takes.send(TakeCtl::Stop { done: None });
         }
         self.broadcast();
-        Ok(take)
+        Ok((take, host_us))
     }
 
     fn status_json(&self) -> String {
@@ -260,8 +270,10 @@ impl Call {
         }
     }
 
-    /// Answer every request that has arrived from every guest.
-    fn serve(&mut self) {
+    /// Answer every request that has arrived from every guest. Returns whether
+    /// a clock pong was sent (worth flushing at once: its delay is error).
+    fn serve(&mut self) -> bool {
+        let mut pongs = false;
         let ids: Vec<GuestId> = self.rpc.keys().copied().collect();
         for id in ids {
             while let Some(rpc) = self.rpc.get_mut(&id) {
@@ -273,6 +285,20 @@ impl Call {
                         break;
                     }
                 };
+                let t1_us = self.timeline.now_us();
+                if let Request::ClockPing { t0_us } = request {
+                    // Not logged: one a second per guest (ten at first).
+                    let pong = Response::ClockPong {
+                        t0_us,
+                        t1_us,
+                        t2_us: self.timeline.now_us(),
+                        timeline: self.timeline.id(),
+                    };
+                    if let Some(rpc) = self.rpc.get_mut(&id) {
+                        pongs |= rpc.respond(rid, pong).is_ok();
+                    }
+                    continue;
+                }
                 info!(guest = id.0, request = ?request, "request");
                 let response = match request {
                     Request::Join {
@@ -293,17 +319,18 @@ impl Call {
                         }
                     }
                     Request::OfferTrack(offer) => self.offer_track(id, &offer),
+                    Request::ClockPing { .. } => unreachable!("answered above"),
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => match self.start_take() {
-                        Ok(take) => Response::TakeStarted { take },
+                        Ok((take, _)) => Response::TakeStarted { take },
                         Err(message) => Response::Error {
                             kind: ErrorKind::InvalidState,
                             message,
                         },
                     },
                     Request::StopTake => match self.stop_take() {
-                        Ok(take) => Response::TakeStopped { take },
+                        Ok((take, _)) => Response::TakeStopped { take },
                         Err(message) => Response::Error {
                             kind: ErrorKind::InvalidState,
                             message,
@@ -315,6 +342,7 @@ impl Call {
                 }
             }
         }
+        pongs
     }
 
     /// Drive `host` and this call forever on a new thread, taking commands
@@ -356,7 +384,9 @@ impl Call {
                     while let Some(a) = host.next_guest_audio() {
                         self.hear(Heard::Audio(a));
                     }
-                    self.serve();
+                    if self.serve() {
+                        host.poll();
+                    }
                     self.sync();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.

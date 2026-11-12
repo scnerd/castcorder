@@ -7,7 +7,8 @@
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...}` (any content type)
 //!   and returns the answer in the same shape.
 //! - Producer only (403 elsewhere): `POST /take/start` and `POST /take/stop`
-//!   answer `{"take":N}` or 409; `GET /status` answers
+//!   answer `{"take":N,"hostUs":T}` (T: when, on the host timeline, in us)
+//!   or 409; `GET /status` answers
 //!   `{"take":"...","guests":["name (guest N)",...]}`.
 //! - Any other `GET` serves a file from the client build (flat directory;
 //!   `/` is `index.html`).
@@ -252,7 +253,9 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 }
             });
             match r {
-                Some(Ok(take)) => json(200, format!("{{\"take\":{}}}", take.0)),
+                Some(Ok((take, host_us))) => {
+                    json(200, format!("{{\"take\":{},\"hostUs\":{host_us}}}", take.0))
+                }
                 Some(Err(e)) => text(409, e),
                 None => gone(),
             }

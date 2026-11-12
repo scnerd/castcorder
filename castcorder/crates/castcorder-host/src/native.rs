@@ -19,6 +19,11 @@
 //! - `playback` decodes the guests' audio to the default output through a
 //!   `webrtcechoprobe`, the echo canceller's reference.
 //!
+//! Each take also gets `takeNN_<name>_mic.timing.jsonl` (castcorder-core
+//! timing): a segment line per WAV file and a reference point a second from
+//! each GStreamer buffer's capture time (PTS and the pipeline clock), on the
+//! host timeline itself.
+//!
 //! The WAV is kept after conversion (the safety copy); nothing is added to the
 //! take's manifest.
 
@@ -29,10 +34,14 @@ use std::thread;
 use std::time::Duration;
 
 use castcorder_capture_gst::{
-    GstCapture, LiveOptions, LiveOpus, Playback, Watchdog, raise_current_thread_priority,
+    CaptureTiming, GstCapture, LiveOptions, LiveOpus, Playback, Watchdog,
+    raise_current_thread_priority,
 };
+use castcorder_core::clocksync::HostTimeline;
+use castcorder_core::timing::{self, Header, RefPoint, RefPoints, TimingLine};
 use castcorder_port_capture::CaptureSource;
-use castcorder_port_disk::{FsFile, FsStorage, Storage};
+use castcorder_port_clock::SystemClock;
+use castcorder_port_disk::{FsFile, FsStorage, Storage, StorageFile};
 use castcorder_protocol::TakeId;
 use castcorder_recorder::{FlacError, WavWriter, WriterOptions, wav_to_flac};
 use tracing::{error, info, warn};
@@ -51,6 +60,10 @@ pub struct Config {
     pub device: Option<String>,
     /// Display name, `[A-Za-z0-9-]`.
     pub name: String,
+    /// The call (timing metadata header).
+    pub call: String,
+    /// The host timeline: this machine's tracks are on it by definition.
+    pub timeline: HostTimeline<SystemClock>,
 }
 
 /// Start playback and the recorder; returns the participant for the call.
@@ -94,14 +107,52 @@ pub fn start(cfg: Config, commands: mpsc::Sender<Command>) -> Participant {
     }
 }
 
+/// The take's timing metadata file (castcorder-core timing), one per take.
+struct Timing {
+    file: String,
+    handle: FsFile,
+    len: u64,
+    /// Reference points of the current segment.
+    refs: RefPoints,
+    /// Frames written to the current segment's file.
+    frames: u64,
+    /// Running times (us) of recent reference frames, where known.
+    audio_ts: std::collections::VecDeque<(u64, i64)>,
+    rate: u64,
+}
+
+impl Timing {
+    fn append(&mut self, line: &TimingLine) -> std::io::Result<()> {
+        let text = line.to_line();
+        self.handle.write_at(self.len, text.as_bytes())?;
+        self.len += text.len() as u64;
+        Ok(())
+    }
+
+    /// Write a finished reference point.
+    fn reference(&mut self, (frame, at): (u64, i64)) -> std::io::Result<()> {
+        let mut r = RefPoint::on_host(frame, at);
+        r.audio_ts_us = self
+            .audio_ts
+            .iter()
+            .find(|(f, _)| *f == frame)
+            .map(|(_, ts)| *ts);
+        self.append(&TimingLine::Ref(r))?;
+        self.handle.sync()
+    }
+}
+
 /// The recorder's take state.
 struct Rec {
     name: String,
+    call: String,
+    timeline: HostTimeline<SystemClock>,
     take: Option<(TakeId, FsStorage)>,
     segment: u32,
     writer: Option<(String, WavWriter<FsFile>)>,
     /// Finalised WAV files of the current take.
     files: Vec<String>,
+    timing: Option<Timing>,
 }
 
 impl Rec {
@@ -128,11 +179,24 @@ impl Rec {
             return;
         };
         let files = std::mem::take(&mut self.files);
-        info!(take = take.0, files = ?files, "host microphone: take stopped");
+        let timing = self.timing.take().and_then(|mut t| {
+            let r = t
+                .append(&TimingLine::End { frames: t.frames })
+                .and_then(|()| t.handle.sync());
+            match r {
+                Ok(()) => Some(t.file),
+                Err(e) => {
+                    error!(file = %t.file, error = %e, "timing metadata not finalised");
+                    None
+                }
+            }
+        });
+        info!(take = take.0, files = ?files, timing = ?timing, "host microphone: take stopped");
         let spawned = thread::Builder::new()
             .name("participant-flac".into())
             .spawn(move || {
                 let mut out = files.clone();
+                out.extend(timing);
                 for wav in &files {
                     let flac = format!("{}.flac", wav.trim_end_matches(".wav"));
                     match wav_to_flac(&dir, wav, &flac) {
@@ -166,11 +230,24 @@ impl Rec {
             }
             self.files.push(file);
         }
+        if let Some(t) = &mut self.timing
+            && let Some(p) = t.refs.finish()
+            && let Err(e) = t.reference(p)
+        {
+            error!(file = %t.file, error = %e, "timing metadata write failed");
+        }
     }
 
     /// Write a buffer, opening a segment first if a take is recording.
-    fn write(&mut self, format: castcorder_port_capture::AudioFormat, data: &[u8]) {
-        let Some((take, dir)) = &self.take else {
+    /// `captured`: its first frame's capture time on the host timeline and its
+    /// running time (us), from GStreamer; else it is placed by its arrival.
+    fn write(
+        &mut self,
+        format: castcorder_port_capture::AudioFormat,
+        data: &[u8],
+        captured: Option<(i64, i64)>,
+    ) {
+        let Some((take, dir)) = self.take.clone() else {
             return;
         };
         if self.writer.is_none() {
@@ -201,6 +278,7 @@ impl Rec {
             match created.and_then(|w| dir.sync_dir().map(|()| w)) {
                 Ok(w) => {
                     info!(file = %file, segment = self.segment, ?format, "host microphone segment started");
+                    self.start_timing(take, dir.clone(), &file, format);
                     self.writer = Some((file, w));
                 }
                 Err(e) => {
@@ -215,6 +293,84 @@ impl Rec {
         {
             error!(file = %file, error = %e, "track write failed; segment ended");
             self.end_segment();
+            return;
+        }
+        if let Some(t) = &mut self.timing {
+            let n = (data.len() / format.frame_bytes()) as u64;
+            let obs = match captured {
+                Some((at, ts)) => {
+                    let k = t.frames.div_ceil(t.rate) * t.rate;
+                    if k < t.frames + n {
+                        let ts = ts + ((k - t.frames) * 1_000_000 / t.rate) as i64;
+                        t.audio_ts.push_back((k, ts));
+                        if t.audio_ts.len() > 4 {
+                            t.audio_ts.pop_front();
+                        }
+                    }
+                    t.refs.observe(t.frames, at as f64)
+                }
+                None => t.refs.observe(t.frames + n, self.timeline.now_us() as f64),
+            };
+            t.frames += n;
+            if let Some(p) = obs
+                && let Err(e) = t.reference(p)
+            {
+                error!(file = %t.file, error = %e, "timing metadata write failed");
+            }
+        }
+    }
+
+    /// Begin the segment `wav` in the take's timing file, creating it (named
+    /// after the first segment) on the first segment.
+    fn start_timing(
+        &mut self,
+        take: TakeId,
+        dir: FsStorage,
+        wav: &str,
+        format: castcorder_port_capture::AudioFormat,
+    ) {
+        let rate = format.sample_rate;
+        let r = (|| -> std::io::Result<()> {
+            if self.timing.is_none() {
+                let file = format!("{}{}", wav.trim_end_matches(".wav"), timing::SUFFIX);
+                let mut handle = dir.open(&file)?;
+                handle.set_len(0)?;
+                let mut t = Timing {
+                    file,
+                    handle,
+                    len: 0,
+                    refs: RefPoints::new(rate, u64::from(rate)),
+                    frames: 0,
+                    audio_ts: Default::default(),
+                    rate: u64::from(rate.max(1)),
+                };
+                t.append(&TimingLine::Header(Header {
+                    version: timing::VERSION,
+                    call: self.call.clone(),
+                    device: self.name.clone(),
+                    take: take.0,
+                    track: wav.to_string(),
+                    source: "mic".into(),
+                    sample_rate: rate,
+                    channels: format.channels,
+                    device_clock: "the host timeline (this is the host)".into(),
+                    host_clock: "host timeline: wall clock at host start + monotonic, us since the Unix epoch".into(),
+                    host_timeline: self.timeline.id(),
+                }))?;
+                dir.sync_dir()?;
+                self.timing = Some(t);
+            }
+            let t = self.timing.as_mut().expect("set above");
+            t.refs = RefPoints::new(rate, u64::from(rate));
+            t.frames = 0;
+            t.audio_ts.clear();
+            t.append(&TimingLine::Segment {
+                segment: self.segment,
+                file: wav.to_string(),
+            })
+        })();
+        if let Err(e) = r {
+            error!(wav = %wav, error = %e, "timing metadata not written for this take");
         }
     }
 }
@@ -243,6 +399,9 @@ fn run(
     let rtp_next = Arc::new(AtomicU64::new(0));
     let mut rec = Rec {
         name: cfg.name.clone(),
+        call: cfg.call.clone(),
+        timeline: cfg.timeline.clone(),
+        timing: None,
         take: None,
         segment: 0,
         writer: None,
@@ -287,7 +446,17 @@ fn run(
                 }
             }
             match cap.next_buffer() {
-                Ok(Some(b)) => rec.write(format, &b.data),
+                Ok(Some(b)) => {
+                    let captured = cap.last_timing().filter(|t| t.frame == b.first_frame).map(
+                        |t: CaptureTiming| {
+                            (
+                                cfg.timeline.now_us() - t.age.as_micros() as i64,
+                                t.running_time.as_micros() as i64,
+                            )
+                        },
+                    );
+                    rec.write(format, &b.data, captured);
+                }
                 Ok(None) => {
                     warn!(reason = ?cap.end_reason(), "host microphone lost; segment ended");
                     break false;
@@ -366,9 +535,12 @@ mod tests {
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (take_tx, take_rx) = mpsc::channel();
+        let timeline = HostTimeline::new(SystemClock::new());
         let cfg = Config {
             device: None,
             name: "host".into(),
+            call: "call".into(),
+            timeline: timeline.clone(),
         };
         let rec = thread::spawn(move || run(cfg, take_rx, cmd_tx, None));
         // The first Opus frame means the capture is open.
@@ -386,6 +558,7 @@ mod tests {
             let _ = rec.join();
             return;
         }
+        let take_start_us = timeline.now_us();
         take_tx
             .send(TakeCtl::Start {
                 take: TakeId(1),
@@ -430,6 +603,35 @@ mod tests {
         );
         assert!(frames > 0, "no frames recorded");
         assert!(packets > 25, "too few live packets: {packets}");
+        // The timing metadata: header, segment, a reference point placing frame
+        // 0 just after the take started, and the end line.
+        let timing_file = "take01_host_mic.timing.jsonl";
+        assert!(files.contains(&timing_file.to_string()), "{files:?}");
+        let text =
+            std::fs::read_to_string(root.join("call").join("take01").join(timing_file)).unwrap();
+        println!(
+            "timing metadata:
+{text}"
+        );
+        let map = timing::TimingMap::from_lines(&timing::parse(&text).unwrap());
+        let header = map.header.as_ref().expect("header");
+        assert_eq!(
+            (header.take, header.sample_rate),
+            (1, info.format.sample_rate)
+        );
+        assert_eq!(map.segments.len(), 1);
+        assert_eq!(map.segments[0].file, "take01_host_mic.wav");
+        assert!(!map.segments[0].refs.is_empty(), "no reference points");
+        assert_eq!(map.end_frames, Some(frames));
+        let start = map.host_us(1, 0).unwrap() as i64;
+        println!(
+            "frame 0 at {} ms after the take started",
+            (start - take_start_us) as f64 / 1000.0
+        );
+        assert!(
+            (start - take_start_us).abs() < 200_000,
+            "frame 0 at {start}, take at {take_start_us}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

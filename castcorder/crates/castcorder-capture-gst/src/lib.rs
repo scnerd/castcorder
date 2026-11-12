@@ -152,6 +152,21 @@ pub struct GstCapture {
     next_frame: u64,
     ended: Option<EndReason>,
     live: Option<LiveState>,
+    timing: Option<CaptureTiming>,
+}
+
+/// When a buffer's first frame was captured, by the pipeline's clock (the
+/// audio device's clock where its source provides one), measured as the
+/// buffer was pulled. Timing metadata turns `age` into a capture time on the
+/// caller's clock: `now - age`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureTiming {
+    /// The frame (numbered as `AudioBuffer::first_frame`) this is for.
+    pub frame: u64,
+    /// Its running time (buffer PTS in the segment).
+    pub running_time: Duration,
+    /// Pipeline clock at the pull minus (base time + running time).
+    pub age: Duration,
 }
 
 struct LiveState {
@@ -361,6 +376,7 @@ impl GstCapture {
             next_frame: 0,
             ended: None,
             live,
+            timing: None,
         };
         // The first sample carries the negotiated caps.
         let deadline = Instant::now() + first_wait;
@@ -391,6 +407,12 @@ impl GstCapture {
             live.got_data = true;
         }
         Ok(cap)
+    }
+
+    /// The capture timing of the last buffer pulled from GStreamer (none for
+    /// the buffer pulled while negotiating, or without a clock or PTS).
+    pub fn last_timing(&self) -> Option<CaptureTiming> {
+        self.timing
     }
 
     /// Why the source ended, once `next_buffer` has returned `None`.
@@ -477,6 +499,19 @@ impl GstCapture {
     }
 }
 
+/// How long ago the first byte of `sample` was captured, by `pipeline`'s clock.
+fn sample_age(pipeline: &gst::Pipeline, sample: &gst::Sample) -> Option<(Duration, Duration)> {
+    let pts = sample.buffer()?.pts()?;
+    let segment = sample.segment()?.downcast_ref::<gst::ClockTime>()?;
+    let running = segment.to_running_time(pts)?;
+    let now = pipeline.clock()?.time();
+    let captured = pipeline.base_time()? + running;
+    Some((
+        Duration::from_nanos(now.saturating_sub(captured).nseconds()),
+        Duration::from_nanos(running.nseconds()),
+    ))
+}
+
 fn sample_bytes(sample: &gst::Sample) -> io::Result<Vec<u8>> {
     let buffer = sample
         .buffer()
@@ -507,6 +542,15 @@ impl CaptureSource for GstCapture {
                             live.last_data = Instant::now();
                             live.got_data = true;
                         }
+                        let frame = self.next_frame;
+                        self.timing =
+                            sample_age(&self.pipeline, &sample).map(|(age, running_time)| {
+                                CaptureTiming {
+                                    frame,
+                                    running_time,
+                                    age,
+                                }
+                            });
                         sample_bytes(&sample)?
                     }
                     None => {

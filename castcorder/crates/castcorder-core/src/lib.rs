@@ -14,8 +14,16 @@
 //!   pulls one guest's offered tracks, one at a time, in [`sync::sync_order`],
 //!   and only while no take records.
 //! - [`sync`]: what both sides share (geometry, ordering).
+//!
+//! And timing (design.md, Timing):
+//!
+//! - [`clocksync`]: NTP-style clock exchanges, the offset and drift
+//!   estimator, and the host timeline.
+//! - [`timing`]: the timing metadata file written beside every track.
 
+pub mod clocksync;
 pub mod library;
 pub mod logging;
 pub mod outbox;
 pub mod sync;
+pub mod timing;

@@ -225,6 +225,9 @@ fn main() {
         .unwrap_or_else(|e| fail(&format!("cannot bind UDP port {}: {e}", args.udp_port)));
     let udp = castcorder_port_net::DatagramSocket::local_addr(&socket);
     let clock = SystemClock::new();
+    // The call's shared timeline: clock pongs, take times, timing metadata.
+    let timeline = castcorder_core::clocksync::HostTimeline::new(clock.clone());
+    tracing::info!(timeline = timeline.id(), "host timeline anchored");
     let host = Host::new(
         socket,
         clock.clone(),
@@ -240,12 +243,14 @@ fn main() {
     );
     let (tx, rx) = mpsc::channel();
     #[allow(unused_mut)]
-    let mut call = call::Call::new(library, last_take(&call_dir));
+    let mut call = call::Call::new(library, last_take(&call_dir), timeline.clone());
     #[cfg(feature = "native-capture")]
     if let Some(device) = args.participate.clone() {
         let cfg = native::Config {
             device,
             name: args.name.clone(),
+            call: call_name.clone(),
+            timeline: timeline.clone(),
         };
         call = call.with_participant(native::start(cfg, tx.clone()));
     }

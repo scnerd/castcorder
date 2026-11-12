@@ -290,6 +290,8 @@ try {
   check(true, 'idle: Start take enabled, Stop take disabled');
   await A.click('#take-start');
   await waitFor(async () => (await text(A, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
+  const take1StartUs = JSON.parse(await text(A, '#take-result')).hostUs;
+  check(typeof take1StartUs === 'number', 'host reports take 1 start on its timeline (' + take1StartUs + ' us)');
   await waitFor(async () => buttons(A).then((b) => !b.start && b.stop), 'producer offers Stop take only', 10000);
   check(true, 'recording: Start take disabled, Stop take enabled');
   check(true, 'producer started take 1');
@@ -314,7 +316,7 @@ try {
     if (!existsSync(m)) return 0;
     return readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length;
   };
-  await waitFor(async () => verifiedCount() >= 4, 'host verified both guests\' tracks and sidecars', 60000, 250);
+  await waitFor(async () => verifiedCount() >= 6, 'host verified both guests\' tracks, sidecars and timing metadata', 60000, 250);
   const opfsNames = (p) => p.evaluate(async () => {
     const root = await navigator.storage.getDirectory();
     const d = await root.getDirectoryHandle('tracks', { create: true });
@@ -376,9 +378,23 @@ try {
 
   const hostFiles = readdirSync(TAKE_DIR).sort();
   console.log('host take01: ' + hostFiles.join(' '));
-  check(['take01_A_mic.json', 'take01_A_mic.wav', 'take01_B_mic.json', 'take01_B_mic.wav'].every((f) => hostFiles.includes(f))
+  check(['take01_A_mic.json', 'take01_A_mic.wav', 'take01_A_mic.timing.jsonl', 'take01_B_mic.json', 'take01_B_mic.wav',
+    'take01_B_mic.timing.jsonl'].every((f) => hostFiles.includes(f))
     && !hostFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
-    'host library holds both tracks and sidecars, with no transfer state left');
+    'host library holds both tracks, sidecars and timing metadata, with no transfer state left');
+  // Timing metadata (cast-whr): each guest's file parses, and its mapping
+  // places the track's first frame just after the host's take start (loopback:
+  // clocks are shared, so this checks the plumbing, not the estimator).
+  for (const n of ['A', 'B']) {
+    const t = parseTiming(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.timing.jsonl'), 'utf8'));
+    const start = t.hostUsAt(0);
+    const delta = (start - take1StartUs) / 1000;
+    console.log('info ' + n + ' timing: ' + t.refs.length + ' refs, ' + t.sync.length + ' clock samples, last estimate '
+      + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start');
+    check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
+      && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < 50,
+      n + '\x27s timing metadata places frame 0 within 50 ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
+  }
   const SUFFIX = FULL ? '' : '-' + MODE;
   const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
   writeFileSync(join(RESULTS, 'A-track' + SUFFIX + '.wav'), wavBytes);
@@ -467,7 +483,7 @@ try {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
   };
-  await waitFor(async () => verified2() >= 6, 'host verified take 2: A\'s track and both of B\'s segments, with sidecars', 60000, 250);
+  await waitFor(async () => verified2() >= 9, 'host verified take 2: A\'s track and both of B\'s segments, with sidecars', 60000, 250);
   await waitFor(async () => ((await opfsNames(B)).length === 0 ? true : null), 'guest B OPFS emptied after take 2 sync', 20000);
   const files2 = readdirSync(TAKE2).sort();
   console.log('host take02: ' + files2.join(' '));
@@ -542,3 +558,24 @@ console.log(!passed ? 'FAIL (' + MODE + ')'
   : FULL ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS, syncs it to the host and deletes it locally'
     : 'PASS (' + MODE + ') guests join, hear each other, record a take without MediaStreamTrackProcessor on the page, and the tracks reach the host');
 process.exit(passed ? 0 : 1);
+
+// A timing metadata file (castcorder-core timing): JSON lines.
+function parseTiming(text) {
+  const t = { header: null, segments: 0, refs: [], sync: [], end: null, lastEstimate: null };
+  for (const l of text.split('\n').filter((x) => x.length > 0)) {
+    const v = JSON.parse(l);
+    if (v.type === 'header') t.header = v;
+    else if (v.type === 'segment') t.segments++;
+    else if (v.type === 'ref') {
+      t.refs.push(v);
+      if (v.offset_us !== undefined) t.lastEstimate = { offset_us: v.offset_us, drift_ppm: v.drift_ppm, rtt_us: v.rtt_us };
+    } else if (v.type === 'sync') t.sync.push(v);
+    else if (v.type === 'end') t.end = v.frames;
+  }
+  t.hostUsAt = (frame) => {
+    const r = t.refs.filter((x) => typeof x.host_us === 'number');
+    if (r.length === 0) return NaN;
+    return r[0].host_us + (frame - r[0].frame) / t.header.sample_rate * 1e6;
+  };
+  return t;
+}

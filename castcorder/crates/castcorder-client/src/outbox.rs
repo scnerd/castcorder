@@ -2,7 +2,8 @@
 //! [`GuestOutbox`] over OPFS sync access handles.
 //!
 //! - `outbox {call}`: after any crash repair (`list`), every finished track of
-//!   this call (`<track>.wav` and its `<track>.json` sidecar, two outbox items)
+//!   this call (`<track>.wav`, its `<track>.json` sidecar and its
+//!   `<track>.timing.jsonl` timing metadata, three outbox items)
 //!   is opened, hashed once (one OPFS read per MiB) and held open; the worker
 //!   answers `outbox {offers: [Uint8Array]}`, each a postcard `TrackOffer`. The
 //!   main thread offers them to the host on "control".
@@ -205,13 +206,27 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             format: "json".into(),
             ..base.clone()
         };
+        // The timing metadata (absent for tracks from before it existed).
+        let timing_name = format!("{track}{}", castcorder_core::timing::SUFFIX);
+        let timing = open_sync(&dir, &timing_name, false).await.ok().map(|t| {
+            let offer = TrackOffer {
+                name: format!("{track}-timing"),
+                format: "timing.jsonl".into(),
+                ..base.clone()
+            };
+            (offer, OpfsFile::register(timing_name, t))
+        });
         let wav_file = OpfsFile::register(n.clone(), wav);
         let json_file = OpfsFile::register(json, h);
         let r = OUTBOX.with(|o| {
             let mut o = o.borrow_mut();
             let o = o.as_mut().expect("created above");
             o.add(base, wav_file)?;
-            o.add(sidecar, json_file)
+            o.add(sidecar, json_file)?;
+            match timing {
+                Some((offer, file)) => o.add(offer, file).map(|_| ()),
+                None => Ok(()),
+            }
         });
         if let Err(e) = r {
             warn!(track = %track, error = %e, "track not added to outbox");
@@ -284,6 +299,8 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
             format!("{}.jsonl", c.name)
         } else if c.format == "json" {
             format!("{}.json", c.name.trim_end_matches("-sidecar"))
+        } else if let Some(track) = c.name.strip_suffix("-timing") {
+            format!("{track}{}", castcorder_core::timing::SUFFIX)
         } else {
             format!("{}.{}", c.name, c.format)
         };

@@ -135,6 +135,13 @@ struct Engine {
     /// The microphone is being reopened (its track ended under us).
     restarting: bool,
     last_restart: f64,
+    /// Clock pings awaiting their pong, pings sent on this connection, and
+    /// when (performance ms) the next is due.
+    pings: Vec<RequestId>,
+    pings_sent: u32,
+    next_ping: f64,
+    /// Device time (us) the latest "control" message arrived: t3 of a pong.
+    rx_us: f64,
 }
 
 thread_local! {
@@ -830,6 +837,7 @@ async fn answer_one(pc: &RtcPeerConnection, sdp: &str) -> Result<(), JsValue> {
 
 /// Drain the protocol client: responses we wait for and events.
 fn pump_rpc(ui: Ui) {
+    let mut samples = Vec::new();
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -849,6 +857,8 @@ fn pump_rpc(ui: Ui) {
                     e.attempts = 0;
                     info!(call = %ctx.call, device = %ctx.device, participant = participant.0, rejoined, recording = ?e.recording, "joined");
                     e.participant = Some(participant);
+                    e.pings_sent = 0;
+                    e.next_ping = 0.0;
                     ui.participant.set(participant.0.to_string());
                     match rpc.send(Request::GetTakeStatus) {
                         Ok(id) => e.status_request = Some(id),
@@ -881,6 +891,26 @@ fn pump_rpc(ui: Ui) {
                 None => e.offer_requests.push(id),
             }
         }
+        for id in std::mem::take(&mut e.pings) {
+            match rpc.take_response(id) {
+                Some(Response::ClockPong {
+                    t0_us,
+                    t1_us,
+                    t2_us,
+                    timeline,
+                }) => {
+                    let o = worker_cmd("clock-sample");
+                    set(&o, "t0", t0_us as f64);
+                    set(&o, "t1", t1_us as f64);
+                    set(&o, "t2", t2_us as f64);
+                    set(&o, "t3", e.rx_us);
+                    set(&o, "timeline", timeline as f64);
+                    samples.push(o);
+                }
+                Some(other) => warn!(response = ?other, "clock ping refused"),
+                None => e.pings.push(id),
+            }
+        }
         while let Some(ev) = rpc.next_event() {
             if let Event::TakeStatusChanged(s) = ev {
                 statuses.push(s);
@@ -888,6 +918,9 @@ fn pump_rpc(ui: Ui) {
         }
         (statuses, ctx)
     });
+    for o in samples {
+        post_worker(&o, None);
+    }
     for s in statuses {
         info!(call = %ctx.call, device = %ctx.device, status = ?s, "take status");
         let current = apply_status(ui, s);
@@ -975,7 +1008,11 @@ fn stop_track(take: TakeId) {
 }
 
 fn on_control_message(ui: Ui, ev: MessageEvent) {
-    with_engine(|e| e.last_rx = js_sys::Date::now());
+    let rx_us = device_now_us();
+    with_engine(|e| {
+        e.last_rx = js_sys::Date::now();
+        e.rx_us = rx_us;
+    });
     let data = ev.data();
     if let Some(text) = data.as_string() {
         match Signal::from_json(&text) {
@@ -1079,6 +1116,40 @@ async fn refresh_inbound(ui: Ui) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Device time in microseconds: `performance.timeOrigin + performance.now()`,
+/// the clock the storage worker stamps audio with too (castcorder-core timing).
+pub(crate) fn device_now_us() -> f64 {
+    window()
+        .performance()
+        .map(|p| (p.time_origin() + p.now()) * 1000.0)
+        .unwrap_or(0.0)
+}
+
+/// Send a clock ping when one is due (castcorder-core clocksync): ten a
+/// second for the first minute after joining, then one a second.
+fn ping_host() {
+    let now = window().performance().map(|p| p.now()).unwrap_or(0.0);
+    with_engine(|e| {
+        if e.participant.is_none() || now < e.next_ping {
+            return;
+        }
+        let Some(rpc) = e.rpc.as_mut() else {
+            return;
+        };
+        match rpc.send(Request::ClockPing {
+            t0_us: device_now_us() as i64,
+        }) {
+            Ok(id) => {
+                e.pings.push(id);
+                e.next_ping =
+                    now + f64::from(castcorder_core::clocksync::ping_interval_ms(e.pings_sent));
+                e.pings_sent += 1;
+            }
+            Err(err) => warn!(error = ?err, "clock ping not sent"),
+        }
+    });
+}
+
 fn every(ms: i32, f: impl FnMut() + 'static) -> Option<i32> {
     let cb = Closure::<dyn FnMut()>::new(f);
     let id = window()
@@ -1162,7 +1233,8 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     spawn_local(start_capture(ui, raw, epoch));
     acquire_wake_lock(epoch);
     let tick = every(1000, move || on_tick(ui, epoch));
-    with_engine(|e| e.timers.extend(tick));
+    let ping = every(50, ping_host);
+    with_engine(|e| e.timers.extend(tick.into_iter().chain(ping)));
     connect(ui, epoch);
     Ok(())
 }
@@ -1330,6 +1402,7 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
                 Err(err) => warn!(error = ?err, "Join not sent"),
             }
             e.rpc = Some(rpc);
+            e.pings.clear();
         });
         send_signal(&Signal::Hb);
     });
