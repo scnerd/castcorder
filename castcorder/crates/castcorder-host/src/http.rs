@@ -5,7 +5,9 @@
 //! - `GET /role` answers `{"producer":bool}`: true only on the localhost
 //!   listener, i.e. for a page opened on the host machine itself.
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
-//!   "password":P?}` (any content type) and returns the answer in the same
+//!   "password":P?,"proof":PROOF}` (any content type; PROOF is castcorder-link
+//!   `identity::DeviceProof` with audience `identity::LAN`; required) and
+//!   returns the answer in the same
 //!   shape. The room decides first (castcorder-host `room`): an offer on the
 //!   localhost listener is at the host machine; a refusal is 403 (`kicked:`,
 //!   `locked:`, `wrong_password:`, `bad_device:`) or 503 (`waiting:` a
@@ -201,6 +203,9 @@ struct Sdp {
     /// The call password, if the guest typed one.
     #[serde(default)]
     password: Option<String>,
+    /// The device key proof (audience `identity::LAN`).
+    #[serde(default)]
+    proof: Option<castcorder_link::DeviceProof>,
 }
 
 /// The HTTP status of an offer refusal: 503 while waiting for a producer,
@@ -256,6 +261,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 offer_sdp: offer.sdp,
                 device: offer.device,
                 password: offer.password,
+                proof: offer.proof,
+                audience: castcorder_link::identity::LAN.into(),
                 at_host: producer,
                 reply,
             }) {

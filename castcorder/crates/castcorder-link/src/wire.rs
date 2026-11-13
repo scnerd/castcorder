@@ -145,6 +145,11 @@ pub struct OfferPlain {
     /// The call's password, if the guest typed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Proof that the guest holds the key `device` is derived from
+    /// ([`crate::identity`]); its audience is the host id. The host refuses
+    /// offers without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<crate::identity::DeviceProof>,
 }
 
 /// What the host seals back: an answer SDP, or why the guest was refused.
@@ -208,5 +213,6 @@ mod tests {
         // An offer from an older page (no device, no password) still parses.
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));
+        assert_eq!(old.proof, None);
     }
 }

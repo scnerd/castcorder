@@ -37,6 +37,12 @@ pub enum Command {
         device: String,
         /// The call password the guest typed, if any.
         password: Option<String>,
+        /// The device key proof (castcorder-link `identity`); checked before
+        /// any room decision.
+        proof: Option<castcorder_link::DeviceProof>,
+        /// What the proof must be signed for: the host id through a
+        /// rendezvous, `identity::LAN` on the host's own listener.
+        audience: String,
         /// The offer came from the host machine itself (the localhost page).
         at_host: bool,
         /// Where the answer goes; a refusal starts with its code
@@ -67,6 +73,28 @@ pub enum Command {
     Turn {
         /// The server and the credentials the rendezvous minted.
         server: castcorder_transport::TurnServer,
+    },
+    /// The host's own recorder finalised a take's microphone files: record them
+    /// in the take manifest (answered on `ack` once durable).
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    LocalTracks {
+        /// The take.
+        take: TakeId,
+        /// The host's own device id (the items' device).
+        device: String,
+        /// The participant's display name.
+        participant: String,
+        /// The verified files.
+        items: Vec<castcorder_core::library::LocalItem>,
+        /// Told when the items are in the manifest.
+        ack: mpsc::Sender<()>,
+    },
+    /// The host's own recorder is done with a take's files (converted,
+    /// WAV policy applied): alignment may read them.
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    LocalTracksDone {
+        /// The take.
+        take: TakeId,
     },
     /// One Opus frame of the host's own participant (`--participate`).
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
@@ -142,6 +170,9 @@ pub struct Call {
     link: Option<LinkBase>,
     /// Connections to drop on the next turn of the host loop (kicked).
     remove: Vec<GuestId>,
+    /// Takes whose host microphone files are still being finalised: not
+    /// aligned until the recorder says done.
+    local_busy: std::collections::BTreeSet<u32>,
 }
 
 /// Render aligned tracks on their own thread, one take at a time (never on
@@ -215,6 +246,7 @@ impl Call {
             secret: None,
             link: None,
             remove: Vec::new(),
+            local_busy: Default::default(),
         }
     }
 
@@ -345,6 +377,12 @@ impl Call {
         self
     }
 
+    /// Queue alignment of takes whose host microphone tracks startup recovery
+    /// just adopted, if all their tracks are in.
+    pub fn align_recovered(&mut self, takes: Vec<TakeId>) {
+        self.align_completed(takes);
+    }
+
     /// Queue alignment of the takes that just completed a track, if all
     /// their tracks are in.
     fn align_completed(&mut self, takes: Vec<TakeId>) {
@@ -352,7 +390,10 @@ impl Call {
             return;
         };
         for take in takes {
-            if take.0 == 0 || self.status == (TakeStatus::Recording { take }) {
+            if take.0 == 0
+                || self.local_busy.contains(&take.0)
+                || self.status == (TakeStatus::Recording { take })
+            {
                 continue;
             }
             let ready = self
@@ -441,6 +482,13 @@ impl Call {
                 message: "Join first".into(),
             };
         };
+        // A track is recorded under the connection's verified device (or an
+        // old id bound to it), never under whatever id the offer names.
+        let device = self.room.offer_device(id.0, &offer.device);
+        let offer = &TrackOffer {
+            device,
+            ..offer.clone()
+        };
         match p.offer(&mut self.library, offer) {
             Ok(e) => Response::TrackAccepted {
                 file: e.file,
@@ -490,8 +538,11 @@ impl Call {
         let host_us = self.timeline.now_us();
         info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
         self.safety.stop_take();
-        if let Some(p) = &self.participant {
-            let _ = p.takes.send(TakeCtl::Stop { done: None });
+        if let Some(p) = &self.participant
+            && p.takes.send(TakeCtl::Stop { done: None }).is_ok()
+        {
+            // Aligned once the recorder has finalised and recorded its files.
+            self.local_busy.insert(take.0);
         }
         self.broadcast();
         Ok((take, host_us))
@@ -718,10 +769,24 @@ impl Call {
                 offer_sdp,
                 device,
                 password,
+                proof,
+                audience,
                 at_host,
                 reply,
             } => {
-                let r = match self.room.admit(&device, at_host, password.as_deref()) {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default();
+                let verified =
+                    self.room
+                        .verify(&device, proof.as_ref(), &audience, &offer_sdp, now_ms);
+                // Binding an alias changes room.json.
+                self.save_room();
+                let device = verified.clone().unwrap_or(device);
+                let r = match verified
+                    .and_then(|d| self.room.admit(&d, at_host, password.as_deref()))
+                {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     Ok(Admission::Enter) => {
@@ -767,6 +832,30 @@ impl Call {
             }
             Command::Stun { server } => host.set_stun_server(Some(server)),
             Command::Turn { server } => host.set_turn_server(Some(server)),
+            Command::LocalTracks {
+                take,
+                device,
+                participant,
+                items,
+                ack,
+            } => {
+                for item in &items {
+                    if let Err(e) = self.library.record_local(
+                        &device,
+                        &participant,
+                        take,
+                        crate::local::SOURCE,
+                        item,
+                    ) {
+                        warn!(take = take.0, file = %item.file, error = %e, "host track not recorded in the manifest");
+                    }
+                }
+                let _ = ack.send(());
+            }
+            Command::LocalTracksDone { take } => {
+                self.local_busy.remove(&take.0);
+                self.align_completed(vec![take]);
+            }
             Command::LocalAudio { rtp_time, data } => {
                 if let Some(local) = &self.local {
                     host.send_local_audio(local, rtp_time, &data);

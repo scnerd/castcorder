@@ -31,10 +31,14 @@
 //! named input (default: the default microphone) is heard by every guest and
 //! recorded into each take as `takeNN_<name>_mic.wav` (then FLAC), and the
 //! guests are played on the default output. `--name NAME` is their display
-//! name (default `host`). See `native`.
+//! name (default `host`). The track is an item of the take manifest under the
+//! host's own device id. `--keep-wav false` deletes each WAV once its FLAC is
+//! verified (both are kept by default). At startup, host-mic WAVs a previous
+//! run left unfinalised are recovered (see `local`). See `native`.
 
 mod call;
 mod http;
+mod local;
 #[cfg(feature = "native-capture")]
 mod native;
 mod rendezvous;
@@ -55,7 +59,7 @@ use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] \
-[--participate [DEVICE]] [--name NAME] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open]";
+[--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open]";
 
 struct Args {
     dist: PathBuf,
@@ -71,6 +75,8 @@ struct Args {
     /// `--participate`: `Some(None)` is the default input.
     participate: Option<Option<String>>,
     name: String,
+    /// `--keep-wav`: keep each host-mic WAV after its FLAC is verified (default).
+    keep_wav: bool,
     /// Aligned tracks (`None`: `--align off`).
     align: Option<castcorder_align::AlignConfig>,
     /// `--open`: make the call always open (saved with the call).
@@ -108,6 +114,7 @@ fn parse_args() -> Args {
         relay_only: false,
         participate: None,
         name: "host".into(),
+        keep_wav: true,
         align: Some(castcorder_align::AlignConfig::default()),
         open: false,
     };
@@ -167,6 +174,13 @@ fn parse_args() -> Args {
                     ..a.align.unwrap_or_default()
                 });
             }
+            "--keep-wav" => {
+                a.keep_wav = match value().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => fail("--keep-wav is true or false"),
+                };
+            }
             "--aligned-format" => {
                 let format = match value().as_str() {
                     "flac" => castcorder_align::OutputFormat::Flac,
@@ -209,16 +223,18 @@ fn primary_ipv4() -> Option<IpAddr> {
     }
 }
 
-/// The highest take number already in the call's directory, so a restarted
-/// host never reuses one.
-fn last_take(call_dir: &Path) -> u32 {
-    std::fs::read_dir(call_dir)
+/// The take numbers already in the call's directory, ascending: the last one
+/// is where a restarted host continues (it never reuses one), and each is
+/// scanned for host microphone tracks to recover.
+fn take_numbers(call_dir: &Path) -> Vec<u32> {
+    let mut v: Vec<u32> = std::fs::read_dir(call_dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.strip_prefix("take")?.parse().ok())
-        .max()
-        .unwrap_or(0)
+        .collect();
+    v.sort_unstable();
+    v
 }
 
 fn main() {
@@ -230,10 +246,19 @@ fn main() {
         ))
     });
     let root = FsStorage::new(&args.library).expect("library directory");
-    let library = Library::open(&root, &args.call, SyncConfig::default()).expect("open library");
+    let mut library =
+        Library::open(&root, &args.call, SyncConfig::default()).expect("open library");
     let call_name = library.call().to_string();
     let call_dir = args.library.join(&call_name);
     init_logging(&args.library, &call_name);
+    // The host's own device id: its microphone tracks are items of its own
+    // device in the take manifests, like a guest's.
+    let host_device = rendezvous::host_key(&args.library)
+        .map(|k| format!("host-{}", k.id()))
+        .unwrap_or_else(|e| fail(&format!("host key: {e}")));
+    // A take the host never finalised (Ctrl+C, a crash) is recovered first.
+    let takes = take_numbers(&call_dir);
+    let recovered = local::recover_takes(&mut library, &takes, &host_device, args.keep_wav);
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
@@ -258,7 +283,7 @@ fn main() {
     // The call's shared timeline: clock pongs, take times, timing metadata.
     let timeline = castcorder_core::clocksync::HostTimeline::new(clock.clone());
     tracing::info!(timeline = timeline.id(), "host timeline anchored");
-    let host = Host::new(
+    let mut host = Host::new(
         socket,
         clock.clone(),
         HostConfig {
@@ -271,10 +296,23 @@ fn main() {
             ..HostConfig::default()
         },
     );
+    // A second socket lets relay credentials renew without dropping relayed calls
+    // (the renewed TURN allocation needs its own 5-tuple).
+    match UdpDatagramSocket::bind(SocketAddr::new(args.bind, 0)) {
+        Ok(spare) => host.set_spare_socket(spare),
+        Err(e) => {
+            tracing::warn!(error = %e, "no spare UDP socket: renewing relay credentials will drop relayed calls")
+        }
+    }
     let (tx, rx) = mpsc::channel();
-    let mut call = call::Call::new(library, last_take(&call_dir), timeline.clone());
+    let mut call = call::Call::new(
+        library,
+        takes.last().copied().unwrap_or(0),
+        timeline.clone(),
+    );
     if let Some(cfg) = args.align {
         call = call.with_alignment(cfg);
+        call.align_recovered(recovered.iter().map(|r| r.take).collect());
     }
     #[cfg(feature = "native-capture")]
     if let Some(device) = args.participate.clone() {
@@ -283,8 +321,32 @@ fn main() {
             name: args.name.clone(),
             call: call_name.clone(),
             timeline: timeline.clone(),
+            device_id: host_device.clone(),
+            keep_wav: args.keep_wav,
         };
-        call = call.with_participant(native::start(cfg, tx.clone()));
+        let participant = native::start(cfg, tx.clone());
+        // Ctrl+C: finalise an in-progress take (WAV, timing, manifest, FLAC)
+        // before exiting; what is not finished is recovered at the next start.
+        let takes = participant.takes.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            let (done, finished) = mpsc::channel();
+            if takes.send(call::TakeCtl::Stop { done: Some(done) }).is_ok() {
+                match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+                    Ok(files) => {
+                        tracing::info!(files = ?files, "Ctrl+C: host microphone take finalised")
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "Ctrl+C: finalising took too long; recovery runs at the next start"
+                        )
+                    }
+                }
+            }
+            std::process::exit(0);
+        }) {
+            tracing::warn!(error = %e, "Ctrl+C handler not installed; an interrupted take is recovered at the next start");
+        }
+        call = call.with_participant(participant);
     }
     let secret: rendezvous::SharedSecret = Arc::new(Mutex::new(
         rendezvous::call_secret(&call_dir).unwrap_or_else(|e| fail(&format!("call secret: {e}"))),

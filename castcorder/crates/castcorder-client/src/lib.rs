@@ -22,6 +22,8 @@
 //!   (`/v/<version>/#<host-id>.<call-secret>`), signaling through the
 //!   rendezvous with the offer sealed to the host key (castcorder-link);
 //!   otherwise the offer is POSTed to the host's `/offer` (LAN mode).
+//! - `identity`: this profile's device key (WebCrypto Ed25519, non-extractable,
+//!   in IndexedDB); the device id is its fingerprint and every offer is signed.
 //! - [`wav`], [`signal`], [`session`]: the pure parts, unit-tested natively.
 //!
 //! Natively only the pure modules compile; the browser modules are wasm32-only.
@@ -33,6 +35,8 @@ pub mod wav;
 
 #[cfg(target_arch = "wasm32")]
 pub mod app;
+#[cfg(target_arch = "wasm32")]
+mod identity;
 #[cfg(target_arch = "wasm32")]
 mod js;
 #[cfg(target_arch = "wasm32")]

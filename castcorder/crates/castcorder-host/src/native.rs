@@ -24,8 +24,13 @@
 //! each GStreamer buffer's capture time (PTS and the pipeline clock), on the
 //! host timeline itself.
 //!
-//! The WAV is kept after conversion (the safety copy); nothing is added to the
-//! take's manifest.
+//! The WAV is kept after conversion by default (`--keep-wav false` deletes it
+//! after a verified FLAC). After the take the files are recorded in the take
+//! manifest under the host's own device id (`local`), through the host thread
+//! (`Command::LocalTracks`), which also holds alignment of the take until the
+//! files are final (`Command::LocalTracksDone`). A take left unfinalised by a
+//! crash is recovered at the next start (`local::recover_takes`); Ctrl+C
+//! finalises the take in progress first.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,10 +48,11 @@ use castcorder_port_capture::CaptureSource;
 use castcorder_port_clock::SystemClock;
 use castcorder_port_disk::{FsFile, FsStorage, Storage, StorageFile};
 use castcorder_protocol::TakeId;
-use castcorder_recorder::{FlacError, WavWriter, WriterOptions, wav_to_flac};
+use castcorder_recorder::{WavWriter, WriterOptions};
 use tracing::{error, info, warn};
 
 use crate::call::{Command, Heard, Participant, TakeCtl};
+use crate::local;
 
 /// The echo probe's name in the playback pipeline.
 const ECHO_PROBE: &str = "castcorder_far_end";
@@ -64,6 +70,10 @@ pub struct Config {
     pub call: String,
     /// The host timeline: this machine's tracks are on it by definition.
     pub timeline: HostTimeline<SystemClock>,
+    /// The host's own device id: the device of its manifest items.
+    pub device_id: String,
+    /// Keep each WAV after its FLAC is verified (`--keep-wav`, default on).
+    pub keep_wav: bool,
 }
 
 /// Start playback and the recorder; returns the participant for the call.
@@ -146,6 +156,9 @@ impl Timing {
 struct Rec {
     name: String,
     call: String,
+    device_id: String,
+    keep_wav: bool,
+    commands: mpsc::Sender<Command>,
     timeline: HostTimeline<SystemClock>,
     take: Option<(TakeId, FsStorage)>,
     segment: u32,
@@ -192,23 +205,55 @@ impl Rec {
             }
         });
         info!(take = take.0, files = ?files, timing = ?timing, "host microphone: take stopped");
+        let (device_id, keep_wav, commands, participant) = (
+            self.device_id.clone(),
+            self.keep_wav,
+            self.commands.clone(),
+            self.name.clone(),
+        );
         let spawned = thread::Builder::new()
             .name("participant-flac".into())
             .spawn(move || {
-                let mut out = files.clone();
-                out.extend(timing);
-                for wav in &files {
-                    let flac = format!("{}.flac", wav.trim_end_matches(".wav"));
-                    match wav_to_flac(&dir, wav, &flac) {
-                        Ok(r) => {
-                            info!(wav = %wav, flac = %flac, frames = r.frames, bytes = r.flac_bytes, "host microphone track converted to FLAC");
-                            out.push(flac);
+                // 1. Convert and read each FLAC back (the WAV stays meanwhile).
+                let verified = local::convert_verified(&dir, &files);
+                // 2. Record the finished files in the take manifest (the
+                // host thread owns it); they are verified by being read whole.
+                let mut recorded = false;
+                match local::items(&dir, &files, timing.as_deref()) {
+                    Ok(items) => {
+                        let (ack, acked) = mpsc::channel();
+                        let sent = commands.send(Command::LocalTracks {
+                            take,
+                            device: device_id,
+                            participant,
+                            items,
+                            ack,
+                        });
+                        recorded =
+                            sent.is_ok() && acked.recv_timeout(Duration::from_secs(10)).is_ok();
+                        if !recorded {
+                            warn!(take = take.0, "host microphone files not recorded in the manifest");
                         }
-                        Err(FlacError::NotApplicable(m)) => info!(wav = %wav, reason = %m, "kept as WAV"),
-                        Err(e) => error!(wav = %wav, error = %e, "FLAC conversion failed; the WAV is kept"),
+                    }
+                    Err(e) => {
+                        error!(take = take.0, error = %e, "host microphone files not verified; not recorded in the manifest")
                     }
                 }
+                // 3. The WAV policy: only a verified FLAC, only once the
+                // manifest item exists.
+                if !keep_wav && recorded {
+                    local::delete_wavs(&dir, &verified);
+                } else if !keep_wav {
+                    warn!(take = take.0, "--keep-wav false: WAVs kept, the manifest item was not recorded");
+                }
+                let _ = commands.send(Command::LocalTracksDone { take });
                 if let Some(d) = done {
+                    let mut out: Vec<String> = Vec::new();
+                    for f in files.iter().map(|w| castcorder_recorder::flac_name(w)).chain(files.clone()).chain(timing) {
+                        if dir.exists(&f).unwrap_or(false) && !out.contains(&f) {
+                            out.push(f);
+                        }
+                    }
                     let _ = d.send(out);
                 }
             });
@@ -400,6 +445,9 @@ fn run(
     let mut rec = Rec {
         name: cfg.name.clone(),
         call: cfg.call.clone(),
+        device_id: cfg.device_id.clone(),
+        keep_wav: cfg.keep_wav,
+        commands: commands.clone(),
         timeline: cfg.timeline.clone(),
         timing: None,
         take: None,
@@ -428,7 +476,12 @@ fn run(
             }
         };
         let format = cap.format();
-        info!(?format, "host microphone open");
+        info!(
+            ?format,
+            integer = format.sample_format != castcorder_port_capture::SampleFormat::F32,
+            flac = format.sample_format != castcorder_port_capture::SampleFormat::F32,
+            "host microphone open: negotiated format (S24LE, then S16LE, preferred; a float device stays WAV)"
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let live_thread = {
             let (stop, commands, rtp_next) = (stop.clone(), commands.clone(), rtp_next.clone());
@@ -541,6 +594,8 @@ mod tests {
             name: "host".into(),
             call: "call".into(),
             timeline: timeline.clone(),
+            device_id: "host-test".into(),
+            keep_wav: true,
         };
         let rec = thread::spawn(move || run(cfg, take_rx, cmd_tx, None));
         // The first Opus frame means the capture is open.
@@ -580,9 +635,24 @@ mod tests {
                 done: Some(done_tx),
             })
             .unwrap();
-        let files = done_rx
-            .recv_timeout(Duration::from_secs(30))
-            .expect("take finished");
+        // The recorder asks the host thread (here: this test) to record the
+        // finished files in the manifest.
+        let mut items = vec![];
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let files = loop {
+            match done_rx.try_recv() {
+                Ok(f) => break f,
+                Err(mpsc::TryRecvError::Disconnected) => panic!("take not finished"),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "take not finished");
+            if let Ok(Command::LocalTracks { items: i, ack, .. }) =
+                cmd_rx.recv_timeout(Duration::from_millis(50))
+            {
+                items = i;
+                let _ = ack.send(());
+            }
+        };
         println!("files: {files:?}; live packets: {packets}");
         drop(take_tx);
         drop(cmd_rx);
@@ -603,6 +673,24 @@ mod tests {
         );
         assert!(frames > 0, "no frames recorded");
         assert!(packets > 25, "too few live packets: {packets}");
+        // The manifest items: the WAV and the timing file, hashed whole.
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["take01_host_mic", "take01_host_mic-timing"],
+            "{items:?}"
+        );
+        // Integer formats become FLAC; a float device stays WAV.
+        println!(
+            "flac made: {}",
+            files.contains(&"take01_host_mic.flac".to_string())
+        );
+        if info.format.sample_format != castcorder_port_capture::SampleFormat::F32 {
+            assert!(
+                files.contains(&"take01_host_mic.flac".to_string()),
+                "{files:?}"
+            );
+        }
         // The timing metadata: header, segment, a reference point placing frame
         // 0 just after the take started, and the end line.
         let timing_file = "take01_host_mic.timing.jsonl";

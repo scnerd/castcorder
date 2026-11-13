@@ -49,7 +49,7 @@ use castcorder_core::library::{MANIFEST, ManifestEntry, parse_manifest};
 use castcorder_core::timing::{self, SUFFIX};
 use castcorder_port_capture::SampleFormat;
 use castcorder_port_disk::{Storage, StorageFile};
-use castcorder_recorder::{read_data, read_info};
+use castcorder_recorder::{read_track, track_info};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -110,16 +110,31 @@ pub fn is_audio_track(e: &ManifestEntry) -> bool {
     e.offer.kind == castcorder_protocol::SourceKind::Audio && e.offer.format == "wav"
 }
 
-/// Whether a take's guest tracks are all in: every audio track verified,
+/// The timing item of an audio track: the entry of the same device named
+/// `<name>-timing`; a later segment file of the host's own capture
+/// (`<name>-segN`) shares the timing item of its first segment.
+fn timing_for<'a>(entries: &'a [ManifestEntry], e: &ManifestEntry) -> Option<&'a ManifestEntry> {
+    let find = |name: String| {
+        entries
+            .iter()
+            .find(|t| t.offer.device == e.offer.device && t.offer.name == name)
+    };
+    find(format!("{}-timing", e.offer.name)).or_else(|| {
+        let (base, n) = e.offer.name.rsplit_once("-seg")?;
+        (!base.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+            .then(|| find(format!("{base}-timing")))
+            .flatten()
+    })
+}
+
+/// Whether a take's tracks (guests', and the host's own microphone, which is
+/// in the manifest like a guest's) are all in: every audio track verified,
 /// each with a verified timing file, and at least one of them.
 pub fn ready(entries: &[ManifestEntry]) -> bool {
     let mut any = false;
     for e in entries.iter().filter(|e| is_audio_track(e)) {
         any = true;
-        let timing = format!("{}-timing", e.offer.name);
-        let has_timing = entries
-            .iter()
-            .any(|t| t.offer.device == e.offer.device && t.offer.name == timing && t.verified);
+        let has_timing = timing_for(entries, e).is_some_and(|t| t.verified);
         if !e.verified || !has_timing {
             return false;
         }
@@ -176,11 +191,58 @@ fn find_tracks<S: Storage>(dir: &S) -> io::Result<(Vec<Found>, Vec<String>)> {
     let entries = manifest_entries(dir)?;
     let mut found = Vec::new();
     let mut skipped = Vec::new();
-    for e in entries.iter().filter(|e| is_audio_track(e)) {
-        let timing = format!("{}-timing", e.offer.name);
-        let t = entries
-            .iter()
-            .find(|t| t.offer.device == e.offer.device && t.offer.name == timing);
+    // The host's own capture, in the manifest like a guest's item: a verified
+    // timing item whose segment lines name the files of audio items of the
+    // same device (a guest's name files on its own device instead). One track
+    // per timing file, its segments the named files.
+    let mut handled: Vec<String> = Vec::new();
+    for t in entries
+        .iter()
+        .filter(|t| t.verified && t.offer.name.ends_with("-timing"))
+    {
+        let Ok(text) = read_all(dir, &t.file) else {
+            continue;
+        };
+        let Ok(lines) = timing::parse(&String::from_utf8_lossy(&text)) else {
+            continue;
+        };
+        let p = parse_lines(&lines);
+        let mut files = BTreeMap::new();
+        let mut first: Option<&ManifestEntry> = None;
+        for s in &p.segments {
+            let own = entries.iter().find(|e| {
+                is_audio_track(e) && e.offer.device == t.offer.device && e.file == s.file
+            });
+            match own {
+                Some(e) if e.verified => {
+                    files.insert(s.segment, e.file.clone());
+                    handled.push(e.file.clone());
+                    first.get_or_insert(e);
+                }
+                Some(e) => {
+                    warn!(track = %e.file, "segment not verified; left out");
+                    handled.push(e.file.clone());
+                }
+                None => {}
+            }
+        }
+        let Some(first) = first else { continue };
+        handled.push(t.file.clone());
+        found.push(Found {
+            base: t.file.trim_end_matches(SUFFIX).to_string(),
+            who: first.participant.clone(),
+            device: t.offer.device.clone(),
+            source: first.offer.source.0.clone(),
+            timing_file: t.file.clone(),
+            files,
+            only_file: None,
+        });
+    }
+    for e in entries
+        .iter()
+        .filter(|e| is_audio_track(e) && !handled.contains(&e.file))
+    {
+        let t = timing_for(&entries, e);
         match t {
             Some(t) if e.verified && t.verified => {
                 // A guest's segment lines name its file on the device:
@@ -422,16 +484,13 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
                 warn!(track = %f.base, segment = s.segment, file = %s.file, "segment has no raw file here; left out");
                 continue;
             };
-            if !dir.exists(&file)? {
+            if !dir.exists(&file)? && !dir.exists(&castcorder_recorder::flac_name(&file))? {
                 warn!(track = %f.base, file = %file, "raw file missing; segment left out");
                 continue;
             }
             // Header facts only: the samples are read when the track is
             // rendered, one track at a time.
-            let wi = read_info(&mut dir.open(&file)?)?;
-            let format = wi.format;
-            let frames =
-                wi.data_len_header.min(wi.data_len_on_disk()) / format.frame_bytes() as u64;
+            let (format, frames) = track_info(dir, &file)?;
             let Some(m) = model_segment(
                 s,
                 frames,
@@ -520,7 +579,7 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
         let mut nominal_us = 0.0;
         let mut weighted = 0.0;
         for m in &t.segs {
-            let (_, data) = read_data(&mut dir.open(&m.file)?)?;
+            let (_, data) = read_track(dir, &m.file)?;
             let src = planar(&data, usize::from(t.channels), t.format);
             drop(data);
             render(m, &src, &mut planes, t0, r, t.rate, cfg.mode);

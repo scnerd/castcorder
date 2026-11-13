@@ -6,12 +6,12 @@
 use std::fmt;
 use std::io;
 
-use castcorder_port_capture::SampleFormat;
+use castcorder_port_capture::{AudioFormat, SampleFormat};
 use castcorder_port_disk::{Storage, StorageFile};
 use flacenc::component::BitRepr;
 use flacenc::error::Verify;
 
-use crate::wav::read_data;
+use crate::wav::{read_data, read_exact_at};
 
 /// Why a conversion did not produce a FLAC file.
 #[derive(Debug)]
@@ -72,6 +72,116 @@ fn decode_samples(data: &[u8], format: SampleFormat) -> Vec<i32> {
             .collect(),
         SampleFormat::F32 => unreachable!("F32 is rejected before decoding"),
     }
+}
+
+/// The FLAC file name derived from a WAV track's name (`x.wav` -> `x.flac`).
+pub fn flac_name(wav_name: &str) -> String {
+    format!("{}.flac", wav_name.trim_end_matches(".wav"))
+}
+
+fn read_file<S: Storage>(storage: &S, name: &str) -> io::Result<Vec<u8>> {
+    let mut f = storage.open(name)?;
+    let mut buf = vec![0u8; f.len()? as usize];
+    read_exact_at(&mut f, 0, &mut buf)?;
+    Ok(buf)
+}
+
+fn invalid(msg: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, msg)
+}
+
+/// A FLAC file's format and frame count, from its STREAMINFO.
+fn flac_info(bytes: &[u8]) -> io::Result<(AudioFormat, u64)> {
+    let reader = claxon::FlacReader::new(io::Cursor::new(bytes))
+        .map_err(|e| invalid(format!("flac: {e}")))?;
+    let si = reader.streaminfo();
+    let sample_format = match si.bits_per_sample {
+        16 => SampleFormat::I16,
+        24 => SampleFormat::I24,
+        b => return Err(invalid(format!("flac with {b} bits per sample"))),
+    };
+    Ok((
+        AudioFormat {
+            sample_rate: si.sample_rate,
+            channels: si.channels as u16,
+            sample_format,
+        },
+        si.samples.unwrap_or(0),
+    ))
+}
+
+/// The format and frame count of the track `wav_name`: from the WAV header,
+/// or, when the WAV was deleted after a verified conversion (host flag
+/// `--keep-wav false`), from the FLAC beside it.
+pub fn track_info<S: Storage>(storage: &S, wav_name: &str) -> io::Result<(AudioFormat, u64)> {
+    if storage.exists(wav_name)? {
+        let info = crate::wav::read_info(&mut storage.open(wav_name)?)?;
+        let frames =
+            info.data_len_header.min(info.data_len_on_disk()) / info.format.frame_bytes() as u64;
+        return Ok((info.format, frames));
+    }
+    flac_info(&read_file(storage, &flac_name(wav_name))?)
+}
+
+/// The format and little-endian sample bytes of the track `wav_name` (the WAV,
+/// or the FLAC beside it when the WAV is gone).
+pub fn read_track<S: Storage>(storage: &S, wav_name: &str) -> io::Result<(AudioFormat, Vec<u8>)> {
+    if storage.exists(wav_name)? {
+        let (info, data) = read_data(&mut storage.open(wav_name)?)?;
+        return Ok((info.format, data));
+    }
+    let bytes = read_file(storage, &flac_name(wav_name))?;
+    let (format, _) = flac_info(&bytes)?;
+    let mut reader = claxon::FlacReader::new(io::Cursor::new(&bytes[..]))
+        .map_err(|e| invalid(format!("flac: {e}")))?;
+    let mut out = Vec::new();
+    for s in reader.samples() {
+        let s = s.map_err(|e| invalid(format!("flac decode: {e}")))?;
+        match format.sample_format {
+            SampleFormat::I16 => out.extend_from_slice(&(s as i16).to_le_bytes()),
+            _ => out.extend_from_slice(&s.to_le_bytes()[..3]),
+        }
+    }
+    Ok((format, out))
+}
+
+/// Read the FLAC file back from `storage` and check it holds exactly the WAV
+/// track's format and samples (the check before a WAV may be deleted).
+pub fn verify_flac_of_wav<S: Storage>(
+    storage: &S,
+    wav_name: &str,
+    flac_name: &str,
+) -> Result<(), FlacError> {
+    let (info, data) = read_data(&mut storage.open(wav_name)?)?;
+    if info.format.sample_format == SampleFormat::F32 {
+        return Err(FlacError::NotApplicable("float track".into()));
+    }
+    let want = decode_samples(&data, info.format.sample_format);
+    let bytes = read_file(storage, flac_name)?;
+    let (fmt, _) = flac_info(&bytes)?;
+    if fmt != info.format {
+        return Err(FlacError::Verify(format!(
+            "format {fmt:?}, WAV is {:?}",
+            info.format
+        )));
+    }
+    let mut reader = claxon::FlacReader::new(io::Cursor::new(&bytes[..]))
+        .map_err(|e| FlacError::Verify(format!("decode: {e}")))?;
+    let mut n = 0usize;
+    for (i, s) in reader.samples().enumerate() {
+        let s = s.map_err(|e| FlacError::Verify(format!("decode: {e}")))?;
+        if want.get(i) != Some(&s) {
+            return Err(FlacError::Verify(format!("sample {i} differs")));
+        }
+        n += 1;
+    }
+    if n != want.len() {
+        return Err(FlacError::Verify(format!(
+            "FLAC has {n} samples, WAV {}",
+            want.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Convert the WAV track `wav_name` to a FLAC file `flac_name` in `storage`, then
