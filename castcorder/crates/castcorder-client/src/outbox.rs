@@ -32,7 +32,8 @@ use web_sys::FileSystemSyncAccessHandle;
 
 use crate::js::{describe, get, num, object, set, string};
 use crate::worker::{
-    at, entry_names, is_busy, list, named_dir, open_sync, post, read_all, tracks_dir,
+    Opened, at, entry_names, is_busy, list, named_dir, open_existing, open_sync, post, read_all,
+    tracks_dir,
 };
 
 /// An OPFS sync access handle as a [`StorageFile`]. JS handles are not `Send`,
@@ -184,11 +185,14 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             h.close();
             continue;
         }
-        let wav = match open_sync(&dir, n, false).await {
-            Ok(w) => w,
-            Err(e) => {
+        // A file another tab holds (OPFS: one sync handle per file) is
+        // skipped this pass, never an error for the whole outbox.
+        let wav = match open_existing(&dir, n).await {
+            Opened::Open(w) => w,
+            Opened::Missing | Opened::Busy(_) => {
                 h.close();
-                return Err(e);
+                info!(track = %track, "track in use elsewhere; not offered this pass");
+                continue;
             }
         };
         let base = TrackOffer {
@@ -208,7 +212,17 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
         };
         // The timing metadata (absent for tracks from before it existed).
         let timing_name = format!("{track}{}", castcorder_core::timing::SUFFIX);
-        let timing = open_sync(&dir, &timing_name, false).await.ok().map(|t| {
+        let timing = match open_existing(&dir, &timing_name).await {
+            Opened::Open(t) => Some(t),
+            Opened::Missing => None,
+            Opened::Busy(_) => {
+                h.close();
+                wav.close();
+                info!(track = %track, "track in use elsewhere; not offered this pass");
+                continue;
+            }
+        };
+        let timing = timing.map(|t| {
             let offer = TrackOffer {
                 name: format!("{track}-timing"),
                 format: "timing.jsonl".into(),
