@@ -82,14 +82,18 @@ pub(crate) enum Propagated {
 /// client when sourced from the relayed candidate.
 pub(crate) struct Wire<'a, S> {
     pub(crate) socket: &'a S,
-    pub(crate) relay: &'a mut Relay,
+    /// The second socket, for the second relay while credentials rotate.
+    pub(crate) spare: Option<&'a S>,
+    pub(crate) relays: &'a mut [Relay; 2],
     pub(crate) now: Duration,
 }
 
 impl<S: DatagramSocket> Wire<'_, S> {
     pub(crate) fn send(&mut self, source: SocketAddr, to: SocketAddr, contents: &[u8]) {
-        if self.relay.relayed() == Some(source) {
-            self.relay.send(self.socket, to, contents, self.now);
+        if self.relays[0].relayed() == Some(source) {
+            self.relays[0].send(self.socket, to, contents, self.now);
+        } else if let (Some(spare), true) = (self.spare, self.relays[1].relayed() == Some(source)) {
+            self.relays[1].send(spare, to, contents, self.now);
         } else if let Err(e) = self.socket.send_to(contents, to) {
             debug!(error = %e, to = %to, "send_to failed");
         }
@@ -127,6 +131,8 @@ pub(crate) struct Guest {
     last_seen: Option<Duration>,
     next_heartbeat: Duration,
     last_pair: Option<String>,
+    /// The next renegotiation restarts ICE (the host's relayed address changed).
+    ice_restart: bool,
     pub(crate) stats: GuestStats,
 }
 
@@ -159,6 +165,7 @@ impl Guest {
             last_seen: None,
             next_heartbeat: now,
             last_pair: None,
+            ice_restart: false,
             stats: GuestStats::default(),
         }
     }
@@ -526,12 +533,16 @@ impl Guest {
                 _ => {}
             }
         }
+        if self.ice_restart {
+            change.ice_restart(true);
+        }
         if !change.has_changes() {
             return;
         }
         let Some((offer, pending)) = change.apply() else {
             return;
         };
+        self.ice_restart = false;
         for (i, s) in touched {
             self.tracks_out[i].state = s;
         }
@@ -544,6 +555,11 @@ impl Guest {
         self.stats.renegotiations += 1;
         info!(renegotiation = self.stats.renegotiations, "sent offer");
         self.pending = Some(pending);
+    }
+
+    /// Offer the guest a fresh ICE negotiation (new host candidates).
+    pub(crate) fn restart_ice(&mut self) {
+        self.ice_restart = true;
     }
 
     pub(crate) fn handle_track_open(&mut self, track_in: Weak<TrackIn>) {

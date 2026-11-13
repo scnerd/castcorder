@@ -283,7 +283,7 @@ fn main() {
     // The call's shared timeline: clock pongs, take times, timing metadata.
     let timeline = castcorder_core::clocksync::HostTimeline::new(clock.clone());
     tracing::info!(timeline = timeline.id(), "host timeline anchored");
-    let host = Host::new(
+    let mut host = Host::new(
         socket,
         clock.clone(),
         HostConfig {
@@ -296,6 +296,14 @@ fn main() {
             ..HostConfig::default()
         },
     );
+    // A second socket lets relay credentials renew without dropping relayed calls
+    // (the renewed TURN allocation needs its own 5-tuple).
+    match UdpDatagramSocket::bind(SocketAddr::new(args.bind, 0)) {
+        Ok(spare) => host.set_spare_socket(spare),
+        Err(e) => {
+            tracing::warn!(error = %e, "no spare UDP socket: renewing relay credentials will drop relayed calls")
+        }
+    }
     let (tx, rx) = mpsc::channel();
     let mut call = call::Call::new(
         library,

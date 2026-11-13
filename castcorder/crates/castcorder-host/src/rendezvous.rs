@@ -24,7 +24,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use castcorder_link::wire::{
     AnswerPlain, ClientMsg, IceServer, OfferPlain, ServerMsg, b64, from_json, to_json, unb64,
@@ -39,6 +39,30 @@ use crate::call::Command;
 /// Silence longer than this means the connection is dead (the server pings
 /// every 20 s).
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How often a blocked read wakes to check the credential renewal deadline.
+const POLL: Duration = Duration::from_secs(1);
+
+/// Ask for new relay credentials when this fraction (of 100) of the time left
+/// on the current ones has passed, but never sooner than [`RENEW_MIN`] from now.
+const RENEW_AT_PERCENT: u64 = 80;
+const RENEW_MIN: Duration = Duration::from_secs(5);
+
+/// How long until fresh relay credentials are due, for a TURN `username` of
+/// the rendezvous's shape (`<expiry unix seconds>:<host id>`) at `now_unix`.
+/// `None` if the username does not start with an expiry.
+fn renew_in(username: &str, now_unix: u64) -> Option<Duration> {
+    let expiry: u64 = username.split(':').next()?.parse().ok()?;
+    let left = expiry.saturating_sub(now_unix);
+    Some(Duration::from_secs(left * RENEW_AT_PERCENT / 100).max(RENEW_MIN))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 fn random<const N: usize>() -> io::Result<[u8; N]> {
     let mut b = [0u8; N];
@@ -198,7 +222,7 @@ impl<T: Read + Write + Send> Stream for T {}
 
 fn connect(t: &Target) -> io::Result<Box<dyn Stream>> {
     let tcp = TcpStream::connect((t.host.as_str(), t.port))?;
-    tcp.set_read_timeout(Some(READ_TIMEOUT))?;
+    tcp.set_read_timeout(Some(POLL))?;
     tcp.set_write_timeout(Some(Duration::from_secs(30)))?;
     tcp.set_nodelay(true)?;
     if !t.tls {
@@ -219,13 +243,39 @@ fn connect(t: &Target) -> io::Result<Box<dyn Stream>> {
 }
 
 fn read_msg(ws: &mut WebSocket<Box<dyn Stream>>) -> Result<ServerMsg, String> {
+    read_msg_until(ws, None)?.ok_or_else(|| "no message".into())
+}
+
+/// The next text frame, or `None` once `until` has passed with nothing to
+/// read. Silence for [`READ_TIMEOUT`] is a dead connection (the server pings).
+fn read_msg_until(
+    ws: &mut WebSocket<Box<dyn Stream>>,
+    until: Option<Instant>,
+) -> Result<Option<ServerMsg>, String> {
+    let mut quiet = Instant::now();
     loop {
-        match ws.read().map_err(|e| e.to_string())? {
-            Message::Text(t) => {
-                return from_json(t.as_str()).ok_or_else(|| format!("unrecognised frame {t}"));
+        match ws.read() {
+            Ok(Message::Text(t)) => {
+                return from_json(t.as_str())
+                    .map(Some)
+                    .ok_or_else(|| format!("unrecognised frame {t}"));
             }
-            Message::Close(_) => return Err("closed by the rendezvous".into()),
-            _ => {}
+            Ok(Message::Close(_)) => return Err("closed by the rendezvous".into()),
+            Ok(_) => quiet = Instant::now(),
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                if until.is_some_and(|u| Instant::now() >= u) {
+                    return Ok(None);
+                }
+                if quiet.elapsed() >= READ_TIMEOUT {
+                    return Err("no traffic from the rendezvous".into());
+                }
+            }
+            Err(e) => return Err(e.to_string()),
         }
     }
 }
@@ -242,9 +292,10 @@ pub fn spawn(cfg: Config, tx: mpsc::Sender<Command>, on_link: impl FnOnce(&str) 
         .name("rendezvous".into())
         .spawn(move || {
             let mut on_link = Some(on_link);
+            let mut turn_user: Option<String> = None;
             let mut backoff = Duration::from_secs(1);
             loop {
-                match session(&cfg, &tx, &mut on_link) {
+                match session(&cfg, &tx, &mut on_link, &mut turn_user) {
                     Ok(()) => backoff = Duration::from_secs(1),
                     Err(e) => {
                         warn!(rendezvous = %cfg.base, error = %e, retry_s = backoff.as_secs(), "rendezvous connection lost; retrying");
@@ -261,6 +312,7 @@ fn session(
     cfg: &Config,
     tx: &mpsc::Sender<Command>,
     on_link: &mut Option<impl FnOnce(&str) + Send>,
+    turn_user: &mut Option<String>,
 ) -> Result<(), String> {
     let t = target(&cfg.base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
@@ -307,16 +359,39 @@ fn session(
     }
     match turn_server(&ice_servers) {
         Some(server) => {
-            info!(server = %server.addr, "relay (TURN) server from the rendezvous");
+            let renewed = turn_user.is_some();
+            info!(server = %server.addr, expires = %server.username.split(':').next().unwrap_or("?"), renewed, "relay (TURN) server from the rendezvous");
+            *turn_user = Some(server.username.clone());
             let _ = tx.send(Command::Turn { server });
         }
+        None if turn_user.is_some() => {
+            warn!(
+                "the rendezvous gave no fresh relay (TURN) credentials; keeping the old ones and asking again soon"
+            );
+        }
         None => info!("the rendezvous offers no relay (TURN) server"),
+    }
+    // Credentials expire (the username holds the expiry) and a TURN allocation
+    // cannot outlive them: reconnect for fresh ones before then.
+    let renew_at = turn_user
+        .as_deref()
+        .and_then(|u| renew_in(u, unix_now()))
+        .map(|d| Instant::now() + d);
+    if let Some(at) = renew_at {
+        info!(
+            renew_in_s = at.saturating_duration_since(Instant::now()).as_secs(),
+            "relay credentials will be renewed"
+        );
     }
     if let Some(f) = on_link.take() {
         f(&cfg.link());
     }
     loop {
-        match read_msg(&mut ws)? {
+        let Some(msg) = read_msg_until(&mut ws, renew_at)? else {
+            info!("renewing relay credentials: reconnecting to the rendezvous");
+            return Ok(());
+        };
+        match msg {
             ServerMsg::Offer { from, sealed } => {
                 if let Some(answer) = answer(cfg, tx, from, &sealed) {
                     send(
@@ -344,6 +419,10 @@ fn turn_server(servers: &[IceServer]) -> Option<TurnServer> {
     servers.iter().find_map(|s| {
         let (username, password) = (s.username.clone()?, s.credential.clone()?);
         s.urls.iter().find_map(|u| {
+            if is_stream_turn(u) {
+                info!(url = %u, "relay URL skipped: the host's TURN client is UDP only (no turn TCP or turns TLS yet)");
+                return None;
+            }
             let addr = turn_addr(u)?;
             Some(TurnServer {
                 addr,
@@ -352,6 +431,14 @@ fn turn_server(servers: &[IceServer]) -> Option<TurnServer> {
             })
         })
     })
+}
+
+/// Whether `url` asks for TURN over TCP or TLS, which the host does not speak.
+fn is_stream_turn(url: &str) -> bool {
+    url.starts_with("turns:")
+        || url
+            .split_once('?')
+            .is_some_and(|(_, q)| q.split('&').any(|kv| kv == "transport=tcp"))
 }
 
 /// `turn:HOST[:PORT][?transport=udp]` to a socket address (UDP only).
@@ -440,6 +527,26 @@ mod tests {
         assert_eq!(t.ws_url, "ws://127.0.0.1:48080/ws");
         assert!(target("ftp://x").is_err());
         assert!(target("http://").is_err());
+    }
+
+    #[test]
+    fn renewal_is_due_at_80_percent_of_the_remaining_life() {
+        let now = 1_000_000;
+        let due = |u: &str| renew_in(u, now).map(|d| d.as_secs());
+        assert_eq!(due("1000100:host"), Some(80));
+        assert_eq!(due("1086400:host"), Some(69_120));
+        // Nearly out of time, or already past: soon, never a busy loop.
+        assert_eq!(due("1000002:host"), Some(5));
+        assert_eq!(due("999000:host"), Some(5));
+        assert_eq!(due("nonsense"), None);
+    }
+
+    #[test]
+    fn stream_turn_urls_are_recognised() {
+        assert!(is_stream_turn("turns:h:5349"));
+        assert!(is_stream_turn("turn:h:3478?transport=tcp"));
+        assert!(!is_stream_turn("turn:h:3478?transport=udp"));
+        assert!(!is_stream_turn("turn:h:3478"));
     }
 
     #[test]

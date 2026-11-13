@@ -17,8 +17,13 @@ services:
       # Guests' browsers are told stun:<this name>:3479.
       - --public-host
       - localhost
+      # Relay (TURN) credentials for hosts and guests; the secret comes from the
+      # environment below. They expire after --turn-ttl seconds; hosts renew them.
+      - --turn
+      - "turn:${TURN_HOST:-localhost}:3478?transport=udp"
     environment:
       RUST_LOG: info
+      CASTCORDER_TURN_SECRET: ${CASTCORDER_TURN_SECRET:-castcorder-dev-secret}
     volumes:
       - type: bind
         source: ./castcorder/crates/castcorder-client/${CLIENT_DIST:-dist}
@@ -30,9 +35,19 @@ services:
 
   coturn:
     image: coturn/coturn:4.6
-    # Host networking is the practical way to run a TURN server locally (large UDP relay range).
-    # It only works on Linux Docker; on Docker Desktop publish the ports instead.
-    network_mode: host
+    # Ports are published, not host networking, so this works on Docker Desktop too.
+    # The relay range is the min-port/max-port in coturn/turnserver.conf; the
+    # published relayed addresses are reached at TURN_EXTERNAL_IP (this machine).
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "49160-49200:49160-49200/udp"
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-    command: ["-c", "/etc/coturn/turnserver.conf"]
+    command:
+      - -c
+      - /etc/coturn/turnserver.conf
+      # One secret for the rendezvous (CASTCORDER_TURN_SECRET) and coturn.
+      - --static-auth-secret=${CASTCORDER_TURN_SECRET:-castcorder-dev-secret}
+      # Relayed addresses are announced as this IP, not the container's.
+      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}

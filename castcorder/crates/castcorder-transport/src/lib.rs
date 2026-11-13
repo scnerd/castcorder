@@ -287,6 +287,9 @@ const GUEST_AUDIO_KEEP: usize = 400;
 const MAX_DATAGRAMS_PER_POLL: usize = 4096;
 /// The longest [`Host::poll`] ever asks to sleep.
 const MAX_WAIT: Duration = Duration::from_millis(100);
+/// How long the replaced TURN allocation keeps carrying calls after the switch
+/// to the renewed one (ICE restarts in well under this).
+const RELAY_DRAIN: Duration = Duration::from_secs(8);
 
 /// The host's forwarding unit: one socket, many guests.
 pub struct Host<S, C> {
@@ -302,7 +305,16 @@ pub struct Host<S, C> {
     events: VecDeque<HostEvent>,
     queue: VecDeque<Propagated>,
     stun: Stun,
-    relay: Relay,
+    /// A second socket, for the second relay while TURN credentials rotate.
+    spare: Option<S>,
+    /// Relay 0 allocates from `socket`, relay 1 from `spare`.
+    relays: [Relay; 2],
+    /// Which relay offers the relayed candidate to guests.
+    active: usize,
+    /// The relay allocating with new credentials, to switch to once granted.
+    rotating: Option<usize>,
+    /// The replaced relay and when to delete its allocation.
+    draining: Option<(usize, Duration)>,
     local_tracks: Vec<Arc<TrackIn>>,
     guest_audio: Option<VecDeque<GuestAudio>>,
 }
@@ -349,7 +361,11 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             events: VecDeque::new(),
             queue: VecDeque::new(),
             stun: Stun::default(),
-            relay: Relay::default(),
+            spare: None,
+            relays: [Relay::default(), Relay::default()],
+            active: 0,
+            rotating: None,
+            draining: None,
             local_tracks: Vec::new(),
             guest_audio: None,
         }
@@ -360,21 +376,149 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// lives), or drop the allocation with `None`. Setting the same server
     /// and credentials again changes nothing. Once allocated, every later
     /// [`Host::accept`] offers the relayed candidate.
+    ///
+    /// New credentials for the same server (the old ones are about to expire)
+    /// cannot continue the live allocation: its username is fixed (RFC 8656).
+    /// With a [`Host::set_spare_socket`] the host makes the new allocation on
+    /// the spare socket while the old one carries the calls, then offers every
+    /// guest the new relayed address and restarts ICE, and deletes the old
+    /// allocation a few seconds later. Without a spare socket the allocation
+    /// is replaced at once and relayed calls drop.
     pub fn set_turn_server(&mut self, server: Option<TurnServer>) {
         let now_d = self.clock.monotonic();
         let base = server.as_ref().map(|s| self.destination_for(s.addr));
         let local = base.unwrap_or(self.local);
-        self.relay.set_server(server, local, &self.socket, now_d);
+        let a = self.active;
+        let rotate = match (&server, self.relays[a].credentials()) {
+            (Some(new), Some(cur)) => {
+                new.addr == cur.addr
+                    && new != cur
+                    && self.relays[a].relayed().is_some()
+                    && self.spare.is_some()
+            }
+            _ => false,
+        };
+        if rotate {
+            let b = 1 - a;
+            info!("turn credentials renewed: allocating again beside the live allocation");
+            let sock = if b == 0 {
+                &self.socket
+            } else {
+                self.spare.as_ref().expect("checked")
+            };
+            self.relays[b].set_server(server, local, sock, now_d);
+            self.rotating = Some(b);
+            self.draining = None;
+            return;
+        }
+        if let (Some(new), Some(cur)) = (&server, self.relays[a].credentials())
+            && new != cur
+            && new.addr == cur.addr
+        {
+            warn!(
+                "turn credentials renewed without a spare socket: the relayed address is replaced"
+            );
+        }
+        self.rotating = None;
+        self.draining = None;
+        let b = 1 - a;
+        let other = if b == 0 {
+            Some(&self.socket)
+        } else {
+            self.spare.as_ref()
+        };
+        if let Some(sock) = other {
+            self.relays[b].set_server(None, local, sock, now_d);
+        }
+        let sock = if a == 0 {
+            &self.socket
+        } else {
+            self.spare.as_ref().expect("active relay 1 has a spare")
+        };
+        self.relays[a].set_server(server, local, sock, now_d);
+    }
+
+    /// A second socket (bound like the first, on its own port) for the
+    /// second TURN allocation while credentials rotate; see
+    /// [`Host::set_turn_server`]. Without it, rotating replaces the allocation
+    /// and drops relayed calls.
+    pub fn set_spare_socket(&mut self, socket: S) {
+        self.spare = Some(socket);
     }
 
     /// The relayed address on the TURN server, once allocated.
     pub fn relayed(&self) -> Option<SocketAddr> {
-        self.relay.relayed()
+        self.relays[self.active].relayed()
     }
 
-    /// Counters for the TURN relay.
+    /// Counters for the TURN relay (both allocations).
     pub fn relay_stats(&self) -> RelayStats {
-        self.relay.stats.clone()
+        let (a, b) = (&self.relays[0].stats, &self.relays[1].stats);
+        RelayStats {
+            allocations: a.allocations + b.allocations,
+            failures: a.failures + b.failures,
+            permissions: a.permissions + b.permissions,
+            sent: a.sent + b.sent,
+            received: a.received + b.received,
+        }
+    }
+
+    /// Tick both relays and the rotation; returns when to look again.
+    fn rotation(&mut self, now_d: Duration) -> Duration {
+        let mut next = self.relays[0].tick(&self.socket, now_d);
+        if let Some(sp) = &self.spare {
+            next = next.min(self.relays[1].tick(sp, now_d));
+        }
+        if let Some(b) = self.rotating
+            && self.relays[b].relayed().is_some()
+        {
+            let a = self.active;
+            let old = self.relays[a].relayed();
+            let sock = if b == 0 {
+                &self.socket
+            } else {
+                self.spare.as_ref().expect("rotating needs the spare")
+            };
+            for ip in self.relays[a].peers() {
+                self.relays[b].permit(sock, ip, now_d);
+            }
+            self.active = b;
+            self.rotating = None;
+            self.draining = Some((a, now_d + RELAY_DRAIN));
+            let new = self.relays[b].relayed().expect("checked");
+            let server = self.relays[b].server().expect("allocated");
+            let dest = self.destination_for(server);
+            info!(old = ?old.map(|o| o.to_string()), new = %new, guests = self.guests.len(), "relayed address switched to the renewed allocation; restarting ICE");
+            for g in &mut self.guests {
+                if let Some(o) = old
+                    && let Ok(c) = Candidate::relayed(o, dest, "udp")
+                {
+                    g.rtc.direct_api().invalidate_candidate(&c);
+                }
+                if let Ok(c) = Candidate::relayed(new, dest, "udp") {
+                    g.rtc.add_local_candidate(c);
+                }
+                g.restart_ice();
+            }
+            next = now_d;
+        }
+        if let Some((i, at)) = self.draining {
+            if now_d >= at {
+                let sock = if i == 0 {
+                    Some(&self.socket)
+                } else {
+                    self.spare.as_ref()
+                };
+                if let Some(sock) = sock {
+                    info!("old relay allocation deleted");
+                    self.relays[i].set_server(None, self.local, sock, now_d);
+                }
+                self.draining = None;
+            } else {
+                next = next.min(at);
+            }
+        }
+        next
     }
 
     /// Learn this host's server-reflexive address from a STUN server, asking
@@ -484,7 +628,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         }
         let mut rtc = b.build(now);
         let relay_only = self.config.relay_only;
-        if relay_only && self.relay.relayed().is_none() {
+        if relay_only && self.relays[self.active].relayed().is_none() {
             return Err(AcceptError::Rejected(
                 "relay only, and no TURN allocation yet".into(),
             ));
@@ -494,7 +638,10 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 .map_err(|e| AcceptError::Rejected(format!("host candidate: {e:?}")))?;
             rtc.add_local_candidate(cand);
         }
-        if let (Some(relayed), Some(server)) = (self.relay.relayed(), self.relay.server()) {
+        if let (Some(relayed), Some(server)) = (
+            self.relays[self.active].relayed(),
+            self.relays[self.active].server(),
+        ) {
             match Candidate::relayed(relayed, self.destination_for(server), "udp") {
                 Ok(c) => {
                     if rtc.add_local_candidate(c).is_none() {
@@ -554,7 +701,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 break;
             }
             match self.socket.try_recv_from() {
-                Ok(Some((payload, source))) => self.route(payload, source, now),
+                Ok(Some((payload, source))) => self.route(payload, source, now, 0),
                 Ok(None) => break,
                 Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
                     trace!("connection reset on host socket ignored");
@@ -565,11 +712,28 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 }
             }
         }
+        // The spare socket carries only the second TURN allocation.
+        for n in 0.. {
+            if n == MAX_DATAGRAMS_PER_POLL {
+                more_waiting = true;
+                break;
+            }
+            let Some(spare) = &self.spare else { break };
+            match spare.try_recv_from() {
+                Ok(Some((payload, source))) => self.route(payload, source, now, 1),
+                Ok(None) => break,
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
+                Err(e) => {
+                    warn!(error = %e, "spare socket receive failed");
+                    break;
+                }
+            }
+        }
 
         let timing = self.timing();
         let mut deadline = (now_d + MAX_WAIT)
             .min(self.stun_tick(now_d))
-            .min(self.relay.tick(&self.socket, now_d));
+            .min(self.rotation(now_d));
         for g in &mut self.guests {
             let _e = g.span.clone().entered();
             g.handle_input(Input::Timeout(now));
@@ -580,7 +744,8 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
 
         let mut wire = Wire {
             socket: &self.socket,
-            relay: &mut self.relay,
+            spare: self.spare.as_ref(),
+            relays: &mut self.relays,
             now: now_d,
         };
         // Poll every guest until only timeouts are left, propagating what each
@@ -627,21 +792,29 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         if more_waiting { now_d } else { deadline }
     }
 
-    fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant) {
+    fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant, via: usize) {
         let now_d = now.saturating_duration_since(self.base);
         // TURN first: the server's responses and relayed peer data share the
         // socket with everything else.
-        let (payload, source, destination) = if self.relay.server() == Some(source) {
-            match self.relay.recv(&self.socket, payload, source, now_d) {
+        let sock = if via == 0 {
+            &self.socket
+        } else {
+            let Some(s) = self.spare.as_ref() else { return };
+            s
+        };
+        let (payload, source, destination) = if self.relays[via].server() == Some(source) {
+            match self.relays[via].recv(sock, payload, source, now_d) {
                 FromServer::Handled => return,
                 FromServer::Peer(data, peer) => {
-                    let Some(relayed) = self.relay.relayed() else {
+                    let Some(relayed) = self.relays[via].relayed() else {
                         return;
                     };
                     (data, peer, relayed)
                 }
                 FromServer::NotTurn(p) => (p, source, self.destination_for(source)),
             }
+        } else if via == 1 {
+            return;
         } else {
             (payload, source, self.destination_for(source))
         };
@@ -671,7 +844,8 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         // records and fails the whole connection if fed more without polling.
         let mut wire = Wire {
             socket: &self.socket,
-            relay: &mut self.relay,
+            spare: self.spare.as_ref(),
+            relays: &mut self.relays,
             now: now_d,
         };
         g.poll_until_timeout(&mut wire, now);

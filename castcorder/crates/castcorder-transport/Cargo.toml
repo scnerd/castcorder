@@ -32,5 +32,6 @@ serde_json.workspace = true
 castcorder-core.workspace = true
 castcorder-port-disk.workspace = true
 tiny_http = "0.12"
+sha2 = "0.11"
 turn-server-proto.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

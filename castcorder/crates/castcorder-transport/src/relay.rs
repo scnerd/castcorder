@@ -113,15 +113,9 @@ impl Relay {
         if self.server == server {
             return;
         }
-        // Fresh credentials for the same server: keep the live allocation
-        // (relayed calls survive) and use them for the next one.
-        if let (Some(old), Some(new)) = (&self.server, &server)
-            && old.addr == new.addr
-        {
-            info!(server = %new.addr, "turn credentials updated");
-            self.server = server;
-            return;
-        }
+        // An allocation's username cannot change (RFC 8656), so new
+        // credentials mean a new allocation. The host makes it on its second
+        // relay before dropping the first; here the old one is deleted.
         if let Some(c) = self.client.as_mut()
             && c.delete(instant(now)).is_ok()
         {
@@ -136,6 +130,32 @@ impl Relay {
             stats: std::mem::take(&mut self.stats),
             ..Relay::default()
         };
+    }
+
+    /// The server and credentials in use.
+    pub(crate) fn credentials(&self) -> Option<&TurnServer> {
+        self.server.as_ref()
+    }
+
+    /// Peers (by IP) this allocation asked permissions for.
+    pub(crate) fn peers(&self) -> Vec<IpAddr> {
+        self.requested.clone()
+    }
+
+    /// Ask for a permission for `ip` unless asked already.
+    pub(crate) fn permit<S: DatagramSocket>(&mut self, socket: &S, ip: IpAddr, now: Duration) {
+        let Some(c) = self.client.as_mut() else {
+            return;
+        };
+        if self.requested.contains(&ip) {
+            return;
+        }
+        self.requested.push(ip);
+        info!(peer = %ip, "turn permission requested");
+        if let Err(e) = c.create_permission(TransportType::Udp, ip, instant(now)) {
+            debug!(peer = %ip, error = %e, "turn permission not requested");
+        }
+        self.flush(socket, now);
     }
 
     pub(crate) fn server(&self) -> Option<SocketAddr> {
