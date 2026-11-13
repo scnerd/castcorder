@@ -434,7 +434,7 @@ try {
       + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start');
     check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
       && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_TOL_MS,
-      n + '\x27s timing metadata places frame 0 within 50 ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
+      n + '\x27s timing metadata places frame 0 within ' + FRAME0_TOL_MS + ' ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
   }
   const SUFFIX = FULL ? '' : '-' + MODE;
   const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
