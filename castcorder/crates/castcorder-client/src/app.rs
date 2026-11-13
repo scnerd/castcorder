@@ -16,7 +16,8 @@
 //! 4. On "control", binary frames are castcorder-protocol messages: send
 //!    `Join`, then `GetTakeStatus`; every `TakeStatusChanged` starts or stops
 //!    the track ([`crate::session::on_take_status`]). The offer carries this
-//!    browser profile's device id and the call password, if typed; the host
+//!    browser profile's device id, a signature by its device key
+//!    (`crate::identity`) over the offer, and the call password, if typed; the host
 //!    may refuse it (kicked, locked, wrong password: the guest leaves with
 //!    that reason shown) or make it wait (a producer-gated call with no
 //!    producer yet: retried every few seconds, "waiting" shown).
@@ -95,6 +96,8 @@ struct Ctx {
     /// for a page opened from a call link.
     url: String,
     device: String,
+    /// This profile's device key (signs every offer).
+    key: Option<crate::identity::Device>,
     name: String,
     /// The call password typed at Join (kept for every reconnect).
     password: Option<String>,
@@ -294,27 +297,6 @@ fn query_param(key: &str) -> Option<String> {
     web_sys::UrlSearchParams::new_with_str(&search)
         .ok()?
         .get(key)
-}
-
-/// This browser profile's device id, generated once and kept in localStorage.
-fn device_id() -> String {
-    const KEY: &str = "castcorder.device";
-    let storage = window().local_storage().ok().flatten();
-    if let Some(id) = storage
-        .as_ref()
-        .and_then(|s| s.get_item(KEY).ok().flatten())
-    {
-        return id;
-    }
-    let crypto = get(&window(), "crypto");
-    let id = call(&crypto, "randomUUID", &[])
-        .ok()
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| format!("dev-{}", js_sys::Date::now() as u64));
-    if let Some(s) = storage {
-        let _ = s.set_item(KEY, &id);
-    }
-    id
 }
 
 fn post_worker(msg: &JsValue, transfer: Option<&Array>) {
@@ -1250,7 +1232,12 @@ fn stored_name() -> Option<String> {
 async fn join(ui: Ui) -> Result<(), JsValue> {
     let epoch = join_epoch().wrapping_add(1);
     JOIN_EPOCH.set(epoch);
-    let device = device_id();
+    let key = crate::identity::device().await?;
+    if stale(epoch) {
+        return Ok(());
+    }
+    let device = key.id.clone();
+    info!(device = %device, alias = ?key.alias, "device key loaded");
     let typed = clean_name(&ui.name.get_untracked());
     let name = if typed.is_empty() {
         default_name(&device)
@@ -1270,6 +1257,7 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
         call,
         url: url.clone(),
         device,
+        key: Some(key),
         name: name.clone(),
         password: Some(ui.password.get_untracked()).filter(|p| !p.is_empty()),
     };
@@ -1355,6 +1343,8 @@ fn refusal_state(why: &str) -> &'static str {
         "the call is locked"
     } else if why.contains("wrong_password:") {
         "wrong password"
+    } else if why.contains("bad_device:") {
+        "this device's identity was refused"
     } else {
         "rejected by the host"
     }
@@ -1554,9 +1544,17 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
                 .local_description()
                 .map(|d| d.sdp())
                 .unwrap_or_else(|| string(&offer, "sdp"));
+            let proof = sign_offer(&ctx, &link.host.encode(), &sdp).await?;
             info!(call = %ctx.call, device = %ctx.device, gathering = ?pc.ice_gathering_state(), "offer sealed to the host through the rendezvous");
-            mb.exchange(link, &ctx.name, &ctx.device, ctx.password.as_deref(), &sdp)
-                .await?
+            mb.exchange(
+                link,
+                &ctx.name,
+                &ctx.device,
+                ctx.password.as_deref(),
+                &sdp,
+                proof,
+            )
+            .await?
         }
         _ => direct_offer(&url, &ctx, &string(&offer, "sdp")).await?,
     };
@@ -1571,12 +1569,28 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Sign an offer of exactly `sdp` (as sent) to `audience` with the device key.
+async fn sign_offer(
+    ctx: &Ctx,
+    audience: &str,
+    sdp: &str,
+) -> Result<castcorder_link::DeviceProof, JsValue> {
+    let key = ctx
+        .key
+        .as_ref()
+        .ok_or_else(|| JsValue::from_str("no device key"))?;
+    crate::identity::prove(key, audience, sdp).await
+}
+
 /// LAN mode: POST the offer to the host's own `/offer` and return the answer SDP.
 async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue> {
+    let proof = sign_offer(ctx, castcorder_link::identity::LAN, sdp).await?;
+    let proof = js_sys::JSON::parse(&castcorder_link::wire::to_json(&proof))?;
     let body = object();
     set(&body, "type", "offer");
     set(&body, "sdp", sdp);
     set(&body, "device", ctx.device.as_str());
+    set(&body, "proof", proof);
     if let Some(p) = &ctx.password {
         set(&body, "password", p.as_str());
     }
@@ -2034,7 +2048,14 @@ fn App() -> impl IntoView {
     if let Err(e) = start_worker(ui) {
         ui.error("worker", &e);
     }
-    let placeholder = default_name(&device_id());
+    // The default name comes from the device id, known once the key loads.
+    let placeholder = RwSignal::new(String::from("Guest"));
+    spawn_local(async move {
+        match crate::identity::device().await {
+            Ok(d) => placeholder.set(default_name(&d.id)),
+            Err(e) => ui.error("device key", &e),
+        }
+    });
     // Page-wide listeners, installed once (never per join).
     let listen = |target: &web_sys::EventTarget, event: &str, f: Box<dyn FnMut()>| {
         let cb = Closure::<dyn FnMut()>::wrap(f);
@@ -2061,7 +2082,7 @@ fn App() -> impl IntoView {
     view! {
         <h1>"Castcorder"</h1>
         <p>
-            "Name " <input id="name" placeholder=placeholder prop:value=move || ui.name.get()
+            "Name " <input id="name" placeholder=move || placeholder.get() prop:value=move || ui.name.get()
                 on:input=move |ev| ui.name.set(event_target_value(&ev)) />
             " Password " <input id="password" type="password" placeholder="if the call has one" prop:value=move || ui.password.get()
                 on:input=move |ev| ui.password.set(event_target_value(&ev)) />

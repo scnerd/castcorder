@@ -37,6 +37,12 @@ pub enum Command {
         device: String,
         /// The call password the guest typed, if any.
         password: Option<String>,
+        /// The device key proof (castcorder-link `identity`); checked before
+        /// any room decision.
+        proof: Option<castcorder_link::DeviceProof>,
+        /// What the proof must be signed for: the host id through a
+        /// rendezvous, `identity::LAN` on the host's own listener.
+        audience: String,
         /// The offer came from the host machine itself (the localhost page).
         at_host: bool,
         /// Where the answer goes; a refusal starts with its code
@@ -476,6 +482,13 @@ impl Call {
                 message: "Join first".into(),
             };
         };
+        // A track is recorded under the connection's verified device (or an
+        // old id bound to it), never under whatever id the offer names.
+        let device = self.room.offer_device(id.0, &offer.device);
+        let offer = &TrackOffer {
+            device,
+            ..offer.clone()
+        };
         match p.offer(&mut self.library, offer) {
             Ok(e) => Response::TrackAccepted {
                 file: e.file,
@@ -756,10 +769,24 @@ impl Call {
                 offer_sdp,
                 device,
                 password,
+                proof,
+                audience,
                 at_host,
                 reply,
             } => {
-                let r = match self.room.admit(&device, at_host, password.as_deref()) {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or_default();
+                let verified =
+                    self.room
+                        .verify(&device, proof.as_ref(), &audience, &offer_sdp, now_ms);
+                // Binding an alias changes room.json.
+                self.save_room();
+                let device = verified.clone().unwrap_or(device);
+                let r = match verified
+                    .and_then(|d| self.room.admit(&d, at_host, password.as_deref()))
+                {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     Ok(Admission::Enter) => {

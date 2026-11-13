@@ -46,6 +46,10 @@
 //
 // 9. (chromium) Producers and room security on a second, producer-gated host:
 //    see securityChecks() at the end.
+// 10. (chromium, firefox) Device identity: every join above proves its device
+//    key; on a third host an upgraded pre-key profile keeps its trust and its
+//    pending track, and an impostor with another device's id is refused: see
+//    identityChecks() at the end.
 //
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
@@ -142,7 +146,7 @@ const FIREFOX_PREFS = {
   'media.volume_scale': '0.0',
 };
 
-async function openGuest(name, extraArgs, base) {
+async function openGuest(name, extraArgs, base, setup) {
   logs[name] = logs[name] || [];
   let browser, ctx;
   if (MODE === 'firefox') {
@@ -189,6 +193,7 @@ async function openGuest(name, extraArgs, base) {
     const PC = window.RTCPeerConnection;
     window.RTCPeerConnection = class extends PC { constructor(...a) { super(...a); pcs.push(this); } };
   });
+  if (setup) await setup(ctx);
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
@@ -243,6 +248,8 @@ function check(ok, what) {
 
 let host2 = null;
 let host2Log = '';
+let host3 = null;
+let host3Log = '';
 let passed = false;
 try {
   const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV], HTTP);
@@ -581,6 +588,7 @@ try {
   }
   for (const [n, p] of [['A', A], ['B', B]]) await noErrors(p, n);
   if (FULL) await securityChecks();
+  if (MODE !== 'fallback') await identityChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -589,9 +597,11 @@ try {
   for (const b of browsers) await b.close().catch(() => {});
   host.kill();
   if (host2) host2.kill();
+  if (host3) host3.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), hostLog);
 if (host2) writeFileSync(join(RESULTS, 'host-security.log'), host2Log);
+if (host3) writeFileSync(join(RESULTS, 'host-identity-' + MODE + '.log'), host3Log);
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 if (!passed) {
   console.log('host log tail:');
@@ -736,4 +746,138 @@ async function securityChecks() {
     && !JSON.stringify(room).includes('pw-1'),
     'room.json in the call folder remembers devices (C producer and trusted, E banned), password only hashed');
   check(/security decision/.test(host2Log) && /allowed=false/.test(host2Log), 'the host logs its security decisions');
+}
+
+// Device identity (cast-p2f), chromium and firefox modes: a third, always-open
+// host whose room.json already remembers a pre-key device (a UUID, trusted).
+// - M is that profile after the upgrade: its localStorage still holds the
+//   UUID and its OPFS a finished take-1 track recorded under the UUID (seeded
+//   in the layout the outbox reads). It joins with its new key: the host binds
+//   the UUID to the key once (the record, trust included, moves), and the
+//   pending track syncs under the UUID and leaves OPFS.
+// - N presents the same UUID with another key: the binding is refused and N
+//   enters as a new, untrusted device.
+// - An impostor that knows M's key-derived id is refused: unsigned, or signed
+//   by its own key; with M's id in its old-id slot it takes over nothing.
+async function identityChecks() {
+  const LIB3 = join(RESULTS, 'library-identity-' + MODE);
+  rmSync(LIB3, { recursive: true, force: true });
+  const UUID = '0b6a3c2e-5f1d-4e8a-9c7b-2d4e6f8a1c3e';
+  mkdirSync(join(LIB3, 'identity-test'), { recursive: true });
+  writeFileSync(join(LIB3, 'identity-test', 'room.json'),
+    JSON.stringify({ open: true, devices: { [UUID]: { name: 'M', trusted: true } } }));
+  host3 = spawn(exe, ['--dist', dist, '--library', LIB3, '--call', 'identity-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+    '--port', '0', '--http-port', '0', '--udp-port', '0', '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  host3.stderr.on('data', (d) => { host3Log += d.toString(); });
+  const HTTPS3 = await new Promise((resolve, reject) => {
+    let buf = '';
+    const t = setTimeout(() => reject(new Error('identity host did not print HOST_READY')), 20000);
+    host3.stdout.on('data', (d) => {
+      buf += d.toString();
+      const m = buf.match(/HOST_READY http=(\S+) https=(\S+)/);
+      if (m) { clearTimeout(t); resolve(m[2]); }
+    });
+  });
+  const joined = (p) => text(p, '#participant').then((s) => s.length > 0);
+  const room = () => JSON.parse(readFileSync(join(LIB3, 'identity-test', 'room.json'), 'utf8'));
+  const count = (re) => (host3Log.match(re) || []).length;
+  const withOldId = (id) => async (ctx) => {
+    await ctx.addInitScript((id) => {
+      if (!localStorage.getItem('castcorder.device')) localStorage.setItem('castcorder.device', id);
+    }, id);
+  };
+
+  // M: the upgraded profile, with a pending track from before the upgrade.
+  const M = await openGuest('M', [], HTTPS3, withOldId(UUID));
+  await M.evaluate(async ([uuid, call]) => {
+    const frames = 4800, ch = 1, rate = 48000;
+    const buf = new ArrayBuffer(58 + frames * ch * 4);
+    const v = new DataView(buf);
+    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 50 + frames * ch * 4, true); str(8, 'WAVE'); str(12, 'fmt ');
+    v.setUint32(16, 18, true); v.setUint16(20, 3, true); v.setUint16(22, ch, true); v.setUint32(24, rate, true);
+    v.setUint32(28, rate * ch * 4, true); v.setUint16(32, ch * 4, true); v.setUint16(34, 32, true); v.setUint16(36, 0, true);
+    str(38, 'fact'); v.setUint32(42, 4, true); v.setUint32(46, frames, true); str(50, 'data'); v.setUint32(54, frames * ch * 4, true);
+    for (let i = 0; i < frames; i++) v.setFloat32(58 + i * 4, 0.25 * Math.sin(i / 10), true);
+    const meta = { name: 'legacy-take0001', file: 'legacy-take0001.wav', take: 1, device: uuid, displayName: 'M', call,
+      source: 'mic', finalised: true, frames, sampleRate: rate, channels: ch };
+    const root = await navigator.storage.getDirectory();
+    const d = await root.getDirectoryHandle('tracks', { create: true });
+    for (const [name, data] of [['legacy-take0001.wav', buf], ['legacy-take0001.json', JSON.stringify(meta)]]) {
+      const w = await (await d.getFileHandle(name, { create: true })).createWritable();
+      await w.write(data);
+      await w.close();
+    }
+  }, [UUID, HTTPS3 + '/offer']);
+  await M.reload();
+  await M.waitForSelector('#join');
+  await M.click('#join');
+  await waitFor(() => joined(M), 'M joined with its key', 30000);
+  await waitFor(async () => /device alias bound/.test(host3Log), 'host bound M\x27s old id', 10000);
+  const r1 = room();
+  const mId = r1.aliases && r1.aliases[UUID];
+  check(/^k[0-9a-f]{40}$/.test(mId || '') && !r1.devices[UUID] && r1.devices[mId] && r1.devices[mId].trusted,
+    'M joined with its key (' + mId + '); the host bound its old UUID once and moved its trusted record to the key id');
+  const TAKE = join(LIB3, 'identity-test', 'take01');
+  await waitFor(() => {
+    const m = join(TAKE, 'manifest.jsonl');
+    return existsSync(m) && readFileSync(m, 'utf8').split('\n').some((l) => l.startsWith('{"Verified"') && l.includes(UUID));
+  }, 'M\x27s pre-upgrade track verified on the host', 60000, 250);
+  const opfsLeft = await waitFor(async () => {
+    const names = await M.evaluate(async () => {
+      const d = await (await navigator.storage.getDirectory()).getDirectoryHandle('tracks', { create: true });
+      const out = [];
+      for await (const k of d.keys()) out.push(k);
+      return out;
+    });
+    return names.some((n) => n.startsWith('legacy-')) ? null : names;
+  }, 'M\x27s OPFS emptied of the old track', 30000);
+  check(opfsLeft.every((n) => !n.startsWith('legacy-')),
+    'M\x27s pending track from before the upgrade synced (kept under its old UUID in the manifest) and left OPFS');
+
+  // N: another profile presenting the same old UUID: no takeover.
+  const refusedBefore = count(/device alias binding refused/g);
+  const N = await openGuest('N', [], HTTPS3, withOldId(UUID));
+  await N.click('#join');
+  await waitFor(() => joined(N), 'N joined', 30000);
+  const r2 = room();
+  const nId = Object.keys(r2.devices).find((k) => r2.devices[k].name === 'N');
+  check(count(/device alias binding refused/g) > refusedBefore && r2.aliases[UUID] === mId
+    && nId && nId !== mId && !r2.devices[nId].trusted,
+    'a second profile presenting the same old UUID is refused the binding and enters as a new, untrusted device');
+
+  // The impostor knows M's id but not M's key.
+  const I = await openGuest('I', [], HTTPS3, withOldId(mId));
+  const statuses = await I.evaluate(async (mId) => {
+    const post = async (body) => (await fetch('/offer?name=I', { method: 'POST', body: JSON.stringify(body) })).status;
+    const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n';
+    const unsigned = await post({ type: 'offer', sdp, device: mId });
+    // A correct signature (castcorder-link identity::offer_message, LAN
+    // audience, no alias) by the impostor's own key, claiming M's id.
+    const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
+    const key = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const ts = Date.now();
+    const enc = new TextEncoder();
+    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(sdp)));
+    const parts = [enc.encode('castcorder-link device offer v1\0lan\0'), key, enc.encode('\0' + ts + '\0'), hash];
+    const msg = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) { msg.set(p, o); o += p.length; }
+    const sig = new Uint8Array(await crypto.subtle.sign('Ed25519', pair.privateKey, msg));
+    const b64 = (b) => btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const ownKey = await post({ type: 'offer', sdp, device: mId, proof: { key: b64(key), ts, sig: b64(sig) } });
+    return { unsigned, ownKey };
+  }, mId);
+  check(statuses.unsigned === 403 && statuses.ownKey === 403,
+    'an offer claiming M\x27s id without M\x27s key is refused (unsigned ' + statuses.unsigned + ', signed by another key ' + statuses.ownKey + ')');
+  check(/offer not signed by a device key/.test(host3Log) && /claimed device id is not the fingerprint of the signing key/.test(host3Log),
+    'the host logs why it refused the impostor');
+  // Through the app, with M's id in its old-id slot: it joins only as itself.
+  await I.click('#join');
+  await waitFor(() => joined(I), 'I joined as itself', 30000);
+  const r3 = room();
+  const iId = Object.keys(r3.devices).find((k) => r3.devices[k].name === 'I');
+  check(iId && iId !== mId && !r3.devices[iId].trusted && r3.devices[mId].name === 'M' && r3.devices[mId].trusted,
+    'a page holding M\x27s id in its old-id slot takes over nothing: it enters as its own untrusted device');
+  for (const p of [M, N, I]) await p.click('#leave').catch(() => {});
 }

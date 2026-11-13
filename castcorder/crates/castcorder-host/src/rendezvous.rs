@@ -482,6 +482,8 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
             crate::room::decision(&o.device, "guest", "enter", false, "wrong call secret");
             AnswerPlain::Rejected("wrong call secret (ask the host for a fresh link)".into())
         }
+        // The device key proof is checked by the host thread (room), before
+        // any room decision, with this host's id as its audience.
         Ok(o) => {
             let name = crate::http::clean_name(&o.name);
             info!(guest_conn = from, name = %name, "offer through the rendezvous");
@@ -491,6 +493,8 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 offer_sdp: o.sdp,
                 device: o.device,
                 password: o.password,
+                proof: o.proof,
+                audience: cfg.key.id().encode(),
                 at_host: false,
                 reply: reply_tx,
             });
@@ -620,6 +624,13 @@ mod tests {
                 sdp: "v=0".into(),
                 device: "dev-b".into(),
                 password: Some("pw".into()),
+                proof: Some(castcorder_link::identity::sign_offer(
+                    &[9; 32],
+                    &key.id().encode(),
+                    None,
+                    1,
+                    "v=0",
+                )),
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -639,16 +650,24 @@ mod tests {
         );
 
         let (sealed, guest) = seal(&CallSecret([7; 16]), 2);
+        let key_id = key.id();
         let host = thread::spawn(move || match rx.recv().unwrap() {
             Command::Offer {
                 name,
                 offer_sdp,
                 device,
                 password,
+                proof,
+                audience,
                 at_host,
                 reply,
             } => {
                 assert_eq!((name.as_str(), offer_sdp.as_str()), ("B", "v=0"));
+                // The proof reaches the host thread, for this host id.
+                assert_eq!(audience, key_id.encode());
+                assert!(proof.is_some_and(|p| {
+                    castcorder_link::identity::verify_offer(&p, &audience, "v=0", 1).is_ok()
+                }));
                 assert_eq!(
                     (device.as_str(), password.as_deref()),
                     ("dev-b", Some("pw"))
@@ -695,6 +714,7 @@ mod tests {
             sdp: "v=0".into(),
             device: "dev-b".into(),
             password: None,
+            proof: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())
