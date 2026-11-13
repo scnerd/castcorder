@@ -2,11 +2,13 @@
 //! one request per connection (`Connection: close`), over plain TCP or rustls.
 //! It serves the client build and carries signaling and producer commands.
 //!
-//! - `GET /role` answers `{"producer":bool}`: true only on the localhost
-//!   listener, i.e. for a page opened on the host machine itself.
+//! - `GET /role` answers `{"producer":bool,"host":HOST}`: `producer` is true
+//!   only on the localhost listener, i.e. for a page opened on the host
+//!   machine itself; HOST is this host's id (castcorder-link `HostId`,
+//!   encoded), the audience LAN pages sign their offers for.
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
 //!   "password":P?,"proof":PROOF}` (any content type; PROOF is castcorder-link
-//!   `identity::DeviceProof` with audience `identity::LAN`; required) and
+//!   `identity::DeviceProof` with audience HOST; required) and
 //!   returns the answer in the same
 //!   shape. The room decides first (castcorder-host `room`): an offer on the
 //!   localhost listener is at the host machine; a refusal is 403 (`kicked:`,
@@ -41,6 +43,9 @@ pub struct App {
     pub tx: Mutex<mpsc::Sender<Command>>,
     /// The client build (trunk dist directory).
     pub dist: PathBuf,
+    /// This host's id (castcorder-link `HostId`, encoded): the audience
+    /// offers are signed for.
+    pub host_id: String,
 }
 
 struct Request {
@@ -203,7 +208,7 @@ struct Sdp {
     /// The call password, if the guest typed one.
     #[serde(default)]
     password: Option<String>,
-    /// The device key proof (audience `identity::LAN`).
+    /// The device key proof (audience: the host id).
     #[serde(default)]
     proof: Option<castcorder_link::DeviceProof>,
 }
@@ -244,7 +249,10 @@ pub fn clean_name(raw: &str) -> String {
 fn handle(app: &App, req: &Request, producer: bool) -> Response {
     let gone = || text(500, "host thread not answering");
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/role") => json(200, format!("{{\"producer\":{producer}}}")),
+        ("GET", "/role") => json(
+            200,
+            serde_json::json!({ "producer": producer, "host": app.host_id }).to_string(),
+        ),
         ("POST", "/offer") => {
             let name = clean_name(
                 req.query
@@ -262,7 +270,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 device: offer.device,
                 password: offer.password,
                 proof: offer.proof,
-                audience: castcorder_link::identity::LAN.into(),
+                audience: app.host_id.clone(),
                 at_host: producer,
                 reply,
             }) {
@@ -331,5 +339,105 @@ fn serve_file(dir: &Path, path: &str) -> Response {
             }
             text(404, "not found")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use castcorder_link::identity;
+
+    /// One request over real TCP; the status and body.
+    fn request(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "{method} {path} HTTP/1.1\r\nHost: test\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let status = out[9..12].parse().unwrap();
+        let body = out.split_once("\r\n\r\n").unwrap().1.to_string();
+        (status, body)
+    }
+
+    /// A LAN page learns the host id from `GET /role` and signs its offer
+    /// for it; the offer reaches the host thread with that audience, and a
+    /// proof signed for anything else (the old constant `lan`) is refused.
+    #[test]
+    fn lan_offers_are_signed_for_the_host_id_from_role() {
+        let host_id = castcorder_link::HostKey::from_secret([7; 32]).id().encode();
+        let (tx, rx) = mpsc::channel();
+        let app = Arc::new(App {
+            tx: Mutex::new(tx),
+            dist: std::env::temp_dir(),
+            host_id: host_id.clone(),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        serve(listener, app, None, false);
+        // The host thread: the real room checks each offer's proof.
+        thread::spawn(move || {
+            let mut room = crate::room::Room::new(true);
+            while let Ok(c) = rx.recv() {
+                if let Command::Offer {
+                    offer_sdp,
+                    device,
+                    proof,
+                    audience,
+                    reply,
+                    ..
+                } = c
+                {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64;
+                    let r = room
+                        .verify(&device, proof.as_ref(), &audience, &offer_sdp, now)
+                        .map(|id| format!("answer for {id} to {audience}"))
+                        .map_err(|e| e.message().to_string());
+                    let _ = reply.send(r);
+                }
+            }
+        });
+
+        let (status, role) = request(addr, "GET", "/role", "");
+        assert_eq!(status, 200);
+        let role: serde_json::Value = serde_json::from_str(&role).unwrap();
+        assert_eq!(role["producer"], false);
+        let host = role["host"].as_str().unwrap();
+        assert_eq!(host, host_id);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let offer = |audience: &str, sdp: &str| {
+            let proof = identity::sign_offer(&[3; 32], audience, None, now, sdp);
+            serde_json::json!({
+                "type": "offer",
+                "sdp": sdp,
+                "proof": serde_json::from_str::<serde_json::Value>(
+                    &castcorder_link::wire::to_json(&proof)
+                ).unwrap(),
+            })
+            .to_string()
+        };
+        let (status, body) = request(addr, "POST", "/offer?name=A", &offer(host, "v=0 a"));
+        assert_eq!(status, 200, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            answer["sdp"]
+                .as_str()
+                .unwrap()
+                .ends_with(&format!("to {host_id}")),
+            "{answer}"
+        );
+        let (status, body) = request(addr, "POST", "/offer?name=A", &offer("lan", "v=0 b"));
+        assert_eq!(status, 403, "{body}");
+        assert!(body.starts_with("bad_device:"), "{body}");
     }
 }

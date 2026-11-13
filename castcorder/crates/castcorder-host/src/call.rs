@@ -40,8 +40,8 @@ pub enum Command {
         /// The device key proof (castcorder-link `identity`); checked before
         /// any room decision.
         proof: Option<castcorder_link::DeviceProof>,
-        /// What the proof must be signed for: the host id through a
-        /// rendezvous, `identity::LAN` on the host's own listener.
+        /// What the proof must be signed for: this host's id (encoded),
+        /// through a rendezvous and on the host's own listener alike.
         audience: String,
         /// The offer came from the host machine itself (the localhost page).
         at_host: bool,
@@ -781,12 +781,13 @@ impl Call {
                 let verified =
                     self.room
                         .verify(&device, proof.as_ref(), &audience, &offer_sdp, now_ms);
-                // Binding an alias changes room.json.
-                self.save_room();
                 let device = verified.clone().unwrap_or(device);
-                let r = match verified
-                    .and_then(|d| self.room.admit(&d, at_host, password.as_deref()))
-                {
+                // The old id the signature covers (migration from pre-key ids).
+                let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
+                let r = match verified.and_then(|d| {
+                    self.room
+                        .admit_offer(&d, alias, at_host, password.as_deref())
+                }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     Ok(Admission::Enter) => {
@@ -794,7 +795,14 @@ impl Call {
                     }
                 };
                 let r = r.map(|(id, answer)| {
+                    // Admitted and accepted: only now may it take over an
+                    // old id's record (a refused or waiting offer binds
+                    // nothing). Binding changes room.json.
+                    if let Some(old) = alias {
+                        self.room.bind_alias(old, &device);
+                    }
                     self.room.accepted(id.0, &device, at_host);
+                    self.save_room();
                     if let Some(ch) = host.control(id) {
                         self.rpc.insert(id, RpcServer::new(ch));
                     }

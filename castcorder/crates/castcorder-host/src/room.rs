@@ -36,11 +36,14 @@
 //! key is refused the binding (it then enters as a new, untrusted device).
 //! Track offers ([`Room::offer_device`]) may name the connection's device or
 //! an alias bound to it, so old outbox items keep their manifest keys and
-//! resume; any other id is replaced by the connection's own. Limits:
-//! whoever presents an old id first wins it (the old id was a bearer secret
-//! anyway), and binding happens before the password and lock checks, so a
-//! refused offer can still have taken the binding; bindings are per call; clearing browser storage makes a new,
-//! untrusted device.
+//! resume; any other id is replaced by the connection's own. Binding happens
+//! only once the offer was admitted and accepted ([`Room::admit_offer`]
+//! judges it by the old id's record, so a banned old id stays out and a
+//! trusted one enters a locked call, but binds nothing): a refused or
+//! waiting offer (wrong password, locked, kicked, producer-gated) takes over
+//! nothing. Limits: whoever is first admitted presenting an old id wins it
+//! (the old id was a bearer secret anyway); bindings are per call; clearing
+//! browser storage makes a new, untrusted device.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -369,11 +372,12 @@ impl Room {
                 .any(|c| c.joined && self.conn_role(c).producer)
     }
 
-    /// Check an offer's device key proof (before any room decision) and bind
-    /// its alias, if any; the verified device id to [`admit`](Self::admit).
-    /// `device` is the id the offer claims (empty: take the key's);
-    /// `audience` is this host's id through a rendezvous, or
-    /// [`identity::LAN`]; `now_ms` is the host's Unix time in ms.
+    /// Check an offer's device key proof (before any room decision); the
+    /// verified device id to [`admit_offer`](Self::admit_offer) (with the
+    /// proof's alias, which the signature covers). `device` is the id the
+    /// offer claims (empty: take the key's); `audience` is this host's id
+    /// (the rendezvous and the LAN listener alike); `now_ms` is the host's
+    /// Unix time in ms.
     pub fn verify(
         &mut self,
         device: &str,
@@ -416,36 +420,56 @@ impl Room {
             return Err(Refusal::Replayed);
         }
         decision(&id, "guest", "prove device key", true, "signature verified");
-        if let Some(old) = proof.alias.as_deref() {
-            self.bind_alias(old, &id);
-        }
         Ok(id)
+    }
+
+    /// Whether the pre-key id `old` may be bound to the key-derived id `new`
+    /// now: `Ok(true)` if it would move a record, `Ok(false)` if it already
+    /// is bound to `new` (or is `new`), else why not. Changes nothing.
+    fn alias_check(&self, old: &str, new: &str) -> Result<bool, &'static str> {
+        if old == new {
+            return Ok(false);
+        }
+        match self.saved.aliases.get(old) {
+            Some(n) if n == new => return Ok(false),
+            Some(_) => return Err("old device id already bound to another key"),
+            None => {}
+        }
+        if !valid_device(old) || identity::is_key_id(old) {
+            return Err("not a pre-key device id");
+        }
+        if !self.saved.devices.contains_key(old) {
+            return Err("old device id unknown to this call");
+        }
+        if self.saved.devices.contains_key(new) {
+            return Err("this key already has a device record");
+        }
+        Ok(true)
+    }
+
+    /// The record admission judges an offer of `device` (with the signed
+    /// alias `alias`, if any) by: the old id's, if binding it would move it
+    /// to `device`, else the device's own.
+    fn record_for(&self, device: &str, alias: Option<&str>) -> Option<&DeviceRecord> {
+        match alias {
+            Some(old) if self.alias_check(old, device) == Ok(true) => self.saved.devices.get(old),
+            _ => self.saved.devices.get(device),
+        }
     }
 
     /// Bind a pre-key device id to the key-derived id `new`, once (see the
     /// module docs); logs the outcome. Whether `old` is bound to `new` now.
+    /// Called only once the offer that signed `old` has been admitted and
+    /// accepted.
     pub fn bind_alias(&mut self, old: &str, new: &str) -> bool {
-        let refuse = |why: &str| {
-            info!(old = %old, new = %new, reason = %why, "device alias binding refused");
-            decision(new, "guest", "bind alias", false, why);
-            false
-        };
-        if old == new {
-            return false;
-        }
-        match self.saved.aliases.get(old) {
-            Some(n) if n == new => return true,
-            Some(_) => return refuse("old device id already bound to another key"),
-            None => {}
-        }
-        if !valid_device(old) || identity::is_key_id(old) {
-            return refuse("not a pre-key device id");
-        }
-        if !self.saved.devices.contains_key(old) {
-            return refuse("old device id unknown to this call");
-        }
-        if self.saved.devices.contains_key(new) {
-            return refuse("this key already has a device record");
+        match self.alias_check(old, new) {
+            Ok(true) => {}
+            Ok(false) => return old != new,
+            Err(why) => {
+                info!(old = %old, new = %new, reason = %why, "device alias binding refused");
+                decision(new, "guest", "bind alias", false, why);
+                return false;
+            }
         }
         let rec = self.saved.devices.remove(old).unwrap_or_default();
         self.saved.devices.insert(new.to_string(), rec);
@@ -478,16 +502,33 @@ impl Room {
     }
 
     /// Decide on an offer before the transport accepts it.
+    #[cfg(test)]
     pub fn admit(
         &self,
         device: &str,
         at_host: bool,
         password: Option<&str>,
     ) -> Result<Admission, Refusal> {
-        let r = self.admit_inner(device, at_host, password);
+        self.admit_offer(device, None, at_host, password)
+    }
+
+    /// Decide on an offer of verified `device` before the transport accepts
+    /// it. `alias` is the pre-key id the offer signed, if any: when it would
+    /// bind, the offer is judged by the old id's record (its ban, trust and
+    /// producer grant), but nothing is bound here; the caller binds it with
+    /// [`bind_alias`](Self::bind_alias) only once the offer entered.
+    pub fn admit_offer(
+        &self,
+        device: &str,
+        alias: Option<&str>,
+        at_host: bool,
+        password: Option<&str>,
+    ) -> Result<Admission, Refusal> {
+        let rec = self.record_for(device, alias);
+        let r = self.admit_inner(device, rec, at_host, password);
         let role = if at_host {
             "host-machine"
-        } else if self.saved.devices.get(device).is_some_and(|d| d.producer) {
+        } else if rec.is_some_and(|d| d.producer) {
             "producer"
         } else {
             "guest"
@@ -509,6 +550,7 @@ impl Room {
     fn admit_inner(
         &self,
         device: &str,
+        rec: Option<&DeviceRecord>,
         at_host: bool,
         password: Option<&str>,
     ) -> Result<Admission, Refusal> {
@@ -519,7 +561,6 @@ impl Room {
             // Whoever is at the host is always a producer and always enters.
             return Ok(Admission::Enter);
         }
-        let rec = self.saved.devices.get(device);
         if rec.is_some_and(|d| d.banned) {
             return Err(Refusal::Kicked);
         }
@@ -1099,6 +1140,54 @@ mod tests {
         room.verify("", Some(&p), "host-x", sdp, NOW)
     }
 
+    /// A signed offer of device `secret` (signing `alias`) through the
+    /// host's whole sequence: verify, admit, then (entered) bind the alias,
+    /// accept as `conn` and join. The device id, or the refusal's message.
+    fn offer(
+        room: &mut Room,
+        conn: ConnId,
+        secret: u8,
+        alias: Option<&str>,
+        sdp: &str,
+        pw: Option<&str>,
+    ) -> Result<String, String> {
+        let id = prove(room, secret, alias, sdp).map_err(|e| e.message().to_string())?;
+        match room.admit_offer(&id, alias, false, pw) {
+            Ok(Admission::Enter) => {}
+            Ok(Admission::Wait) => return Err(WAITING.into()),
+            Err(e) => return Err(e.message().into()),
+        }
+        if let Some(old) = alias {
+            room.bind_alias(old, &id);
+        }
+        room.accepted(conn, &id, false);
+        room.join(conn, "guest")
+            .map_err(|e| e.message().to_string())?;
+        Ok(id)
+    }
+
+    /// A call that remembers a pre-key device `uuid` (trusted, and a
+    /// producer if `producer`), with the host page (conn 1) in it.
+    fn with_old_device(uuid: &str, producer: bool) -> Room {
+        let mut room = Room::new(true);
+        host_page(&mut room);
+        enter(&mut room, 2, uuid, false, None).unwrap();
+        if producer {
+            room.apply(
+                1,
+                &RoomAction::SetProducer {
+                    participant: ParticipantId(2),
+                    producer: true,
+                },
+                SALT,
+            )
+            .unwrap();
+        }
+        room.left(2);
+        room.take_dirty();
+        room
+    }
+
     #[test]
     fn offers_must_prove_their_device_key() {
         let mut room = Room::new(true);
@@ -1188,30 +1277,25 @@ mod tests {
     #[test]
     fn an_old_uuid_binds_once_and_only_for_known_devices() {
         let uuid = "3f2a9c1e-0b7d-4c55-9e1a-1b2c3d4e5f60";
-        let mut room = Room::new(true);
-        host_page(&mut room);
         // A pre-key device joined (and is trusted and a producer) before
         // the upgrade.
-        enter(&mut room, 2, uuid, false, None).unwrap();
-        room.apply(
-            1,
-            &RoomAction::SetProducer {
-                participant: ParticipantId(2),
-                producer: true,
-            },
-            SALT,
-        )
-        .unwrap();
-        room.left(2);
-        room.take_dirty();
+        let mut room = with_old_device(uuid, true);
 
         // Unknown old ids are not bound (the device still enters, as itself).
-        let other = prove(&mut room, 20, Some("never-seen-uuid"), "o").unwrap();
-        assert!(room.device(&other).is_none());
-        assert!(!room.take_dirty());
+        let other = offer(&mut room, 4, 20, Some("never-seen-uuid"), "o", None).unwrap();
+        assert!(!room.device(&other).unwrap().producer);
+        assert!(!room.to_json().contains("never-seen-uuid"));
+        room.left(4);
+        room.take_dirty();
 
-        // The upgraded profile signs the binding: its record moves to the key.
-        let new = prove(&mut room, 21, Some(uuid), "n-1").unwrap();
+        // Verifying a signed alias binds nothing by itself.
+        let new = prove(&mut room, 21, Some(uuid), "n-0").unwrap();
+        assert!(room.device(uuid).is_some() && !room.take_dirty());
+        // The upgraded profile enters: its record moves to the key.
+        assert_eq!(
+            offer(&mut room, 3, 21, Some(uuid), "n-1", None),
+            Ok(new.clone())
+        );
         assert!(room.take_dirty());
         assert!(room.device(uuid).is_none());
         let rec = room.device(&new).unwrap();
@@ -1219,14 +1303,14 @@ mod tests {
         assert!(room.to_json().contains(uuid), "the alias persists");
         // Presenting it again with the same key is a no-op.
         assert_eq!(prove(&mut room, 21, Some(uuid), "n-2").unwrap(), new);
+        assert!(room.bind_alias(uuid, &new));
         assert!(!room.take_dirty());
         // Another key cannot take the same old id (it enters as itself).
-        let thief = prove(&mut room, 22, Some(uuid), "t").unwrap();
-        assert!(room.device(&thief).is_none());
+        let thief = offer(&mut room, 5, 22, Some(uuid), "t", None).unwrap();
+        assert!(!room.device(&thief).unwrap().producer);
         assert!(!room.bind_alias(uuid, &thief));
         // A key-shaped id is never an alias: copying a key device's id into
         // the old-id slot takes over nothing.
-        enter(&mut room, 3, &new, false, None).unwrap();
         assert!(!room.bind_alias(&new, &thief));
         assert!(!room.bind_alias(&other, &thief));
         // Granted producer after migration, and its alias survives a restart.
@@ -1255,8 +1339,75 @@ mod tests {
             SALT,
         )
         .unwrap();
-        let new = prove(&mut room, 30, Some(uuid), "x").unwrap();
-        assert_eq!(room.admit(&new, false, None), Err(Refusal::Kicked));
+        // Judged by the old id's record: kicked, and nothing is bound.
+        assert_eq!(
+            offer(&mut room, 3, 30, Some(uuid), "x", None),
+            Err(Refusal::Kicked.message().into())
+        );
+        assert!(room.device(uuid).unwrap().banned);
+        assert!(!room.to_json().contains("aliases"));
+    }
+
+    #[test]
+    fn a_refused_offer_binds_no_alias() {
+        let uuid = "11111111-2222-3333-4444-555555555555";
+        let mut room = with_old_device(uuid, true);
+        room.apply(1, &RoomAction::SetPassword(Some("pw".into())), SALT)
+            .unwrap();
+        room.take_dirty();
+        // A thief knowing the old id but not the password: refused, and the
+        // old record stays where it was, unbound.
+        assert_eq!(
+            offer(&mut room, 3, 40, Some(uuid), "t", Some("wrong")),
+            Err(Refusal::WrongPassword.message().into())
+        );
+        assert!(room.device(uuid).unwrap().trusted);
+        assert!(!room.take_dirty() && !room.to_json().contains("aliases"));
+        // The owner, with the password, then binds it (first admitted wins).
+        let owner = offer(&mut room, 4, 41, Some(uuid), "o", Some("pw")).unwrap();
+        assert!(room.device(uuid).is_none());
+        assert!(room.device(&owner).unwrap().producer);
+        // The thief, now with the password, enters only as itself.
+        let thief = offer(&mut room, 5, 40, Some(uuid), "t-2", Some("pw")).unwrap();
+        assert_ne!(thief, owner);
+        assert!(!room.device(&thief).unwrap().producer);
+    }
+
+    #[test]
+    fn a_waiting_offer_binds_no_alias() {
+        let uuid = "66666666-2222-3333-4444-555555555555";
+        // Trusted but not a producer; the call is gated and nobody producing.
+        let mut room = with_old_device(uuid, false);
+        room.left(1);
+        room.set_open(false);
+        room.take_dirty();
+        assert_eq!(
+            offer(&mut room, 3, 50, Some(uuid), "w", None),
+            Err(WAITING.into())
+        );
+        assert!(room.device(uuid).is_some() && !room.to_json().contains("aliases"));
+    }
+
+    #[test]
+    fn the_old_record_admits_the_upgraded_device() {
+        // Locked: a trusted old device still enters after the upgrade, and
+        // binds; a new key without the old id is refused.
+        let uuid = "77777777-2222-3333-4444-555555555555";
+        let mut room = with_old_device(uuid, false);
+        room.apply(1, &RoomAction::Lock(true), SALT).unwrap();
+        assert_eq!(
+            offer(&mut room, 3, 60, None, "n", None),
+            Err(Refusal::Locked.message().into())
+        );
+        let id = offer(&mut room, 4, 61, Some(uuid), "u", None).unwrap();
+        assert!(room.device(&id).unwrap().trusted && room.device(uuid).is_none());
+        // Gated with no producer in it: a granted old producer enters as one.
+        let uuid = "88888888-2222-3333-4444-555555555555";
+        let mut room = with_old_device(uuid, true);
+        room.left(1);
+        room.set_open(false);
+        let id = offer(&mut room, 3, 62, Some(uuid), "p", None).unwrap();
+        assert!(room.role(3).producer && room.device(&id).unwrap().producer);
     }
 
     #[test]

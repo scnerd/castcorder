@@ -1582,9 +1582,37 @@ async fn sign_offer(
     crate::identity::prove(key, audience, sdp).await
 }
 
-/// LAN mode: POST the offer to the host's own `/offer` and return the answer SDP.
+/// LAN mode: the host id from the host's `GET /role`: what offers to it are
+/// signed for.
+async fn lan_host_id(url: &str) -> Result<String, JsValue> {
+    let role_url = crate::signal::role_url(url);
+    let resp = JsFuture::from(Promise::from(call(
+        &window(),
+        "fetch",
+        &[&JsValue::from_str(&role_url)],
+    )?))
+    .await?;
+    if !get(&resp, "ok").is_truthy() {
+        return Err(JsValue::from_str(&format!(
+            "host role not readable at {role_url} (status {})",
+            num(&resp, "status")
+        )));
+    }
+    let role = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
+    let host = string(&role, "host");
+    if host.is_empty() {
+        return Err(JsValue::from_str(
+            "the host did not say its id (GET /role); it may be older than this page",
+        ));
+    }
+    Ok(host)
+}
+
+/// LAN mode: POST the offer to the host's own `/offer`, signed for the host
+/// id `GET /role` names, and return the answer SDP.
 async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue> {
-    let proof = sign_offer(ctx, castcorder_link::identity::LAN, sdp).await?;
+    let host = lan_host_id(url).await?;
+    let proof = sign_offer(ctx, &host, sdp).await?;
     let proof = js_sys::JSON::parse(&castcorder_link::wire::to_json(&proof))?;
     let body = object();
     set(&body, "type", "offer");

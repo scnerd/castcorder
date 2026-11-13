@@ -8,8 +8,9 @@
 //! - An offer carries a [`DeviceProof`]: the public key, a timestamp, an
 //!   optional legacy alias (the profile's old UUID, for migration) and an
 //!   Ed25519 signature over [`offer_message`]. The signed bytes bind the
-//!   audience (the host id through a rendezvous, [`LAN`] on the host's own
-//!   listener), the key, the alias, the timestamp and the SHA-256 of the
+//!   audience (the host id, [`crate::HostId`] encoded: from the call link
+//!   through a rendezvous, from `GET /role` on the host's own LAN listener),
+//!   the key, the alias, the timestamp and the SHA-256 of the
 //!   offer SDP (which carries the guest's DTLS fingerprint, so a replayed
 //!   offer cannot complete a connection anyway).
 //! - The host checks the signature and the timestamp window here
@@ -27,10 +28,6 @@ use sha2::{Digest, Sha256};
 use crate::wire::{b64, unb64};
 
 const OFFER: &[u8] = b"castcorder-link device offer v1\0";
-
-/// The audience of an offer made to the host's own LAN listener (`/offer`),
-/// where the page does not know the host id.
-pub const LAN: &str = "lan";
 
 /// How far an offer's timestamp may be from the host's clock, in ms.
 pub const MAX_SKEW_MS: u64 = 10 * 60 * 1000;
@@ -203,11 +200,11 @@ mod tests {
 
     #[test]
     fn stale_offers_are_refused() {
-        let p = sign_offer(&[1; 32], LAN, None, NOW, "sdp");
-        assert!(verify_offer(&p, LAN, "sdp", NOW + MAX_SKEW_MS).is_ok());
-        assert!(verify_offer(&p, LAN, "sdp", NOW - MAX_SKEW_MS).is_ok());
+        let p = sign_offer(&[1; 32], "host-a", None, NOW, "sdp");
+        assert!(verify_offer(&p, "host-a", "sdp", NOW + MAX_SKEW_MS).is_ok());
+        assert!(verify_offer(&p, "host-a", "sdp", NOW - MAX_SKEW_MS).is_ok());
         assert_eq!(
-            verify_offer(&p, LAN, "sdp", NOW + MAX_SKEW_MS + 1),
+            verify_offer(&p, "host-a", "sdp", NOW + MAX_SKEW_MS + 1),
             Err(ProofError::Stale)
         );
     }

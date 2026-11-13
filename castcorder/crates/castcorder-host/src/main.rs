@@ -253,9 +253,12 @@ fn main() {
     init_logging(&args.library, &call_name);
     // The host's own device id: its microphone tracks are items of its own
     // device in the take manifests, like a guest's.
-    let host_device = rendezvous::host_key(&args.library)
-        .map(|k| format!("host-{}", k.id()))
-        .unwrap_or_else(|e| fail(&format!("host key: {e}")));
+    let host_key =
+        rendezvous::host_key(&args.library).unwrap_or_else(|e| fail(&format!("host key: {e}")));
+    // What device key proofs are signed for, on the LAN listener as through
+    // a rendezvous (LAN pages read it from `GET /role`).
+    let host_id = host_key.id().encode();
+    let host_device = format!("host-{}", host_key.id());
     // A take the host never finalised (Ctrl+C, a crash) is recovered first.
     let takes = take_numbers(&call_dir);
     let recovered = local::recover_takes(&mut library, &takes, &host_device, args.keep_wav);
@@ -353,8 +356,7 @@ fn main() {
     ));
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
         base: base.clone(),
-        key: rendezvous::host_key(&args.library)
-            .unwrap_or_else(|e| fail(&format!("host key: {e}"))),
+        key: host_key,
         secret: secret.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     });
@@ -381,6 +383,7 @@ fn main() {
     let app = Arc::new(http::App {
         tx: Mutex::new(tx),
         dist: args.dist.clone(),
+        host_id,
     });
     let https = TcpListener::bind(SocketAddr::new(args.bind, args.https_port))
         .unwrap_or_else(|e| fail(&format!("cannot bind HTTPS port {}: {e}", args.https_port)));

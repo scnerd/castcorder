@@ -43,9 +43,34 @@ impl Signal {
     }
 }
 
+/// LAN mode: the host's `GET /role` URL beside its `/offer` URL `offer_url`
+/// (the page's Host field, which may carry a query or another path). The
+/// role names the host id, the audience a LAN offer is signed for.
+pub fn role_url(offer_url: &str) -> String {
+    let base = offer_url.split(['?', '#']).next().unwrap_or_default();
+    let base = base.trim_end_matches('/');
+    match base.strip_suffix("/offer") {
+        Some(root) => format!("{root}/role"),
+        None => format!("{base}/role"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_role_url_sits_beside_the_offer_url() {
+        assert_eq!(
+            role_url("https://192.168.1.5:47801/offer"),
+            "https://192.168.1.5:47801/role"
+        );
+        assert_eq!(
+            role_url("http://localhost:1/offer?x=1#f"),
+            "http://localhost:1/role"
+        );
+        assert_eq!(role_url("https://h:2/"), "https://h:2/role");
+    }
 
     #[test]
     fn wire_shapes_match_the_transport() {
