@@ -22,6 +22,8 @@ pub struct OutgoingBlob<F> {
     pub geometry: Geometry,
     /// Set when the receiver reported verified receipt (DONE).
     pub confirmed: bool,
+    /// Which item this blob is (empty when the caller does not name items).
+    pub item: Vec<u8>,
 }
 
 impl<F> OutgoingBlob<F> {
@@ -68,6 +70,19 @@ impl<F: StorageFile> Sender<F> {
     }
 
     pub fn add_blob(&mut self, data: F, outboard: PostOrderMemOutboard, unit_log: u8) {
+        self.add_item_blob(data, outboard, unit_log, Vec::new());
+    }
+
+    /// Like [`add_blob`](Self::add_blob), for a blob that is one named item:
+    /// a DONE naming this item confirms only it, not other items with the
+    /// same content.
+    pub fn add_item_blob(
+        &mut self,
+        data: F,
+        outboard: PostOrderMemOutboard,
+        unit_log: u8,
+        item: Vec<u8>,
+    ) {
         let geometry = Geometry::new(
             outboard.tree.size(),
             outboard.tree.block_size().chunk_log(),
@@ -78,11 +93,26 @@ impl<F: StorageFile> Sender<F> {
             outboard,
             geometry,
             confirmed: false,
+            item,
         });
     }
 
     fn find(&self, root: &[u8; 32]) -> Option<usize> {
-        self.blobs.iter().position(|b| &b.root() == root)
+        // Identical items share a root: serve an unconfirmed one first (a
+        // confirmed one's file may already be deleted).
+        let mut same = self
+            .blobs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| &b.root() == root);
+        let first = same.next()?;
+        Some(
+            std::iter::once(first)
+                .chain(same)
+                .find(|(_, b)| !b.confirmed)
+                .unwrap_or(first)
+                .0,
+        )
     }
 
     pub fn handle(&mut self, msg: &[u8]) -> Result<(), WireError> {
@@ -118,13 +148,16 @@ impl<F: StorageFile> Sender<F> {
                     }
                 }
             }
-            Msg::Done { root } => {
+            Msg::Done { root, item } => {
                 // In the app this is where the local copy may be deleted
                 // (or scheduled for deletion after the retention period).
-                // DONE names a root, so it covers every blob with that root:
-                // the receiver sends it only once all of them are held.
+                // DONE names the item, so identical items stay unconfirmed
+                // until the receiver confirms each. An empty item is the
+                // original root-only frame: it covers every blob with the root.
                 for b in self.blobs.iter_mut().filter(|b| b.root() == root) {
-                    b.confirmed = true;
+                    if item.is_empty() || b.item == item {
+                        b.confirmed = true;
+                    }
                 }
             }
             Msg::Data { .. } | Msg::Error { .. } => {

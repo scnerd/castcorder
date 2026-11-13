@@ -274,3 +274,83 @@ fn same_device_and_name_with_different_contents_is_rejected_and_keeps_the_verifi
     assert_eq!(again.file, first.file);
     assert_eq!(lib.entries(TakeId(1)).unwrap().len(), 1);
 }
+
+/// A byte-identical track added while connected, whose offer has not reached
+/// the host when the earlier track's DONE arrives: that DONE must not confirm
+/// the new track (the guest would delete it before the host has it).
+#[test]
+fn identical_track_added_mid_sync_is_not_confirmed_by_the_earlier_done() {
+    let mut audio = vec![0u8; 60 * 1024 + 11];
+    fill_pseudo_random(9, 0, &mut audio);
+    let guest = SimDisk::new(11);
+    for n in ["a.wav", "b.wav"] {
+        let mut f = guest.open(n).unwrap();
+        f.write_at(0, &audio).unwrap();
+        f.sync().unwrap();
+    }
+    guest.sync_dir().unwrap();
+    let offer = |name: &str| TrackOffer {
+        device: "dev-alice".into(),
+        take: TakeId(1),
+        source: SourceId(name.into()),
+        kind: SourceKind::Audio,
+        name: name.into(),
+        size: 0,
+        root: [0; 32],
+        format: "wav".into(),
+    };
+
+    let host_disk = SimDisk::new(12);
+    let host_root = host_disk.subdir("library").unwrap();
+    let mut lib = Library::open(&host_root, CALL, cfg()).unwrap();
+    let mut outbox = GuestOutbox::new(CALL, cfg());
+    let a = outbox
+        .add(offer("a"), guest.open("a.wav").unwrap())
+        .unwrap();
+    let (mut ge, he) = mem_link(None, None);
+    let mut puller = Puller::new(CALL, "Alice", he);
+    puller.offer(&mut lib, &a).unwrap();
+
+    // Run until the host has verified `a` and sent its DONE, which the guest
+    // has not read yet.
+    let mut done_a = false;
+    for step in 0..10_000 {
+        assert!(step < 9_999, "stuck");
+        assert!(outbox.pump(&mut ge, 64 * 1024).unwrap().is_empty());
+        puller.poll(&mut lib, false).unwrap();
+        if !puller.take_completed().is_empty() {
+            done_a = true;
+            break;
+        }
+    }
+    assert!(done_a);
+
+    // The guest adds the identical `b` now; its offer is still on its way.
+    let b = outbox
+        .add(offer("b"), guest.open("b.wav").unwrap())
+        .unwrap();
+    assert_eq!(a.root, b.root);
+    let confirmed = outbox.pump(&mut ge, 64 * 1024).unwrap();
+    let names: Vec<_> = confirmed.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, ["a"], "only a is confirmed by a's DONE");
+    assert_eq!(outbox.pending().len(), 1);
+    assert_eq!(outbox.pending()[0].name, "b");
+    assert!(lib.entry(TakeId(1), "dev-alice", "b").unwrap().is_none());
+
+    // The offer arrives; b transfers and is confirmed on its own DONE.
+    puller.offer(&mut lib, &b).unwrap();
+    let mut confirmed_b = false;
+    for step in 0..10_000 {
+        assert!(step < 9_999, "stuck");
+        let c = outbox.pump(&mut ge, 64 * 1024).unwrap();
+        if c.iter().any(|o| o.name == "b") {
+            let e = lib.entry(TakeId(1), "dev-alice", "b").unwrap().unwrap();
+            assert!(e.verified, "b confirmed but not verified");
+            confirmed_b = true;
+            break;
+        }
+        puller.poll(&mut lib, false).unwrap();
+    }
+    assert!(confirmed_b);
+    assert!(outbox.pending().is_empty());
+}

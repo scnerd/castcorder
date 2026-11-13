@@ -494,12 +494,15 @@ impl<S: Storage> Library<S> {
             journal: t.dir.open(&journal)?,
         };
         t.dir.sync_dir()?;
-        Receiver::open(
+        let mut receiver = Receiver::open(
             stores,
             blake3_hash(&e.offer.root),
             cfg.geometry(e.offer.size),
             ReceiverConfig::default(),
-        )
+        )?;
+        // The DONE names this item: identical items are confirmed one by one.
+        receiver.set_item(e.offer.name.clone().into_bytes());
+        Ok(receiver)
     }
 
     /// Durably record that a track is verified. Call before the DONE goes out.
@@ -554,9 +557,9 @@ pub struct Puller<S: Storage, C: MessageChannel> {
     participant: String,
     channel: C,
     queue: BTreeMap<(u8, u32, String), TrackOffer>,
-    /// Roots to confirm, one per item. The wire DONE names a root, but this
-    /// puller's channel belongs to one guest, so only that guest sees it.
-    done: VecDeque<[u8; 32]>,
+    /// Items to confirm: (root, name). The DONE names the item, so identical
+    /// items of this guest are confirmed one by one.
+    done: VecDeque<([u8; 32], String)>,
     current: Option<Pull<S::File>>,
     completed: Vec<ManifestEntry>,
     closed: bool,
@@ -587,7 +590,7 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         if e.verified {
             info!(call = %self.call, device = %offer.device, take = offer.take.0, track = %e.file,
                 "track offered again but already received; confirming");
-            self.done.push_back(offer.root);
+            self.done.push_back((offer.root, offer.name.clone()));
         } else if !self.current.as_ref().is_some_and(|c| {
             c.entry.offer.device == offer.device && c.entry.offer.name == offer.name
         }) {
@@ -627,33 +630,6 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         !self.closed
     }
 
-    /// Whether an item of this guest with `root` is still unverified: queued,
-    /// or (with `current`) being received.
-    fn root_unverified(
-        &self,
-        lib: &mut Library<S>,
-        root: &[u8; 32],
-        current: bool,
-    ) -> io::Result<bool> {
-        if current
-            && self
-                .current
-                .as_ref()
-                .is_some_and(|c| c.entry.offer.root == *root)
-        {
-            return Ok(true);
-        }
-        for o in self.queue.values().filter(|o| o.root == *root) {
-            if lib
-                .entry(o.take, &o.device, &o.name)?
-                .is_some_and(|e| !e.verified)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     fn start_next(&mut self, lib: &mut Library<S>) -> io::Result<()> {
         while let Some((_, offer)) = self.queue.pop_first() {
             let take = offer.take;
@@ -661,7 +637,8 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 continue;
             };
             if entry.verified {
-                self.done.push_back(entry.offer.root);
+                self.done
+                    .push_back((entry.offer.root, entry.offer.name.clone()));
                 continue;
             }
             let receiver = lib.open_receiver(take, &offer.device, &offer.name)?;
@@ -694,18 +671,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             return Ok(false);
         }
         let mut progress = false;
-        // A DONE names a root and the guest drops every local copy with it, so
-        // it waits until no item of this guest with that root is unverified.
-        let mut i = 0;
-        while let Some(root) = self.done.get(i).copied() {
-            if self.root_unverified(lib, &root, true)? {
-                i += 1;
-                continue;
-            }
-            if !self.send(Msg::Done { root }.encode()) {
+        while let Some((root, item)) = self.done.front().cloned() {
+            let msg = Msg::Done {
+                root,
+                item: item.into_bytes(),
+            };
+            if !self.send(msg.encode()) {
                 return Ok(progress);
             }
-            self.done.remove(i);
+            self.done.pop_front();
             progress = true;
         }
         if self.current.is_none() && !recording {
@@ -741,10 +715,6 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 }
             }
         }
-        let Some(root) = self.current.as_ref().map(|c| c.entry.offer.root) else {
-            return Ok(progress);
-        };
-        let hold_done = self.root_unverified(lib, &root, false)?;
         let Some(cur) = self.current.as_mut() else {
             return Ok(progress);
         };
@@ -788,11 +758,6 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                     cur.verified_recorded = true;
                 }
                 progress = true;
-                if hold_done && matches!(Msg::decode(&m), Ok(Msg::Done { .. })) {
-                    // Identical items of this guest are still to come: the
-                    // last one's DONE covers them all.
-                    continue;
-                }
                 if self.channel.send(m).is_err() {
                     self.closed = true;
                     return Ok(progress);

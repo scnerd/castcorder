@@ -575,6 +575,7 @@ fn offset_only_copies_samples_exactly() {
         mode: Mode::OffsetOnly,
         format: OutputFormat::Wav,
         min_drift_span_us: 10_000_000,
+        ..AlignConfig::default()
     };
     let s = align_take(&dir, &cfg).unwrap();
     assert_eq!(before, hashes(&fx.take), "raw files changed");
