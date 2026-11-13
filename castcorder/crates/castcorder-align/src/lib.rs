@@ -37,6 +37,20 @@
 //! resampling: each run of samples is copied as is, from the nearest output
 //! sample to its start (resampled at the nominal ratio only if its rate
 //! differs from the take's). Sample formats and channel layouts are kept.
+//!
+//! # Memory and size
+//!
+//! A podcast runs one to three hours, so rendering is streaming and bounded:
+//! output is produced in blocks of 65 536 frames and written as it goes, and
+//! each raw segment is read through a sliding window of about 131 072 frames
+//! ([`TrackReader`](castcorder_recorder::TrackReader); the WAV, or the FLAC
+//! beside it when the WAV was deleted). Memory is a few megabytes however
+//! long the take. FLAC output is encoded incrementally
+//! ([`FlacWriter`](castcorder_recorder::FlacWriter)); WAV output is RF64 when
+//! its data would pass [`AlignConfig::rf64_threshold`] (just under 4 GiB, about
+//! 3 hours of 48 kHz stereo float). The output file is written in place: if
+//! rendering fails midway the track file is partial, and
+//! `takeNN_alignment.json`, written last, is absent.
 
 mod model;
 mod output;
@@ -49,7 +63,7 @@ use castcorder_core::library::{MANIFEST, ManifestEntry, parse_manifest};
 use castcorder_core::timing::{self, SUFFIX};
 use castcorder_port_capture::SampleFormat;
 use castcorder_port_disk::{Storage, StorageFile};
-use castcorder_recorder::{read_track, track_info};
+use castcorder_recorder::{TrackReader, track_info};
 use serde::Serialize;
 use tracing::{info, warn};
 
@@ -57,11 +71,14 @@ pub use model::{ClockFit, Discontinuity};
 pub use output::Marker;
 
 use model::{SegmentModel, fit_clock, model_segment, parse_lines};
-use output::{Stamp, audacity_labels, audition_csv, flac_bytes, wav_bytes, write_file};
-use sinc::Sinc;
+use output::{Stamp, TrackSink, audacity_labels, audition_csv, write_file};
+use sinc::{HALF, Sinc};
 
 /// The directory of aligned tracks inside a take directory.
 pub const ALIGNED_DIR: &str = "aligned";
+
+/// WAV data longer than this is RF64: below 4 GiB less the headers.
+pub const DEFAULT_RF64_THRESHOLD: u64 = 0xFFFF_FFFF - 4096;
 
 /// How the tracks are placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -93,6 +110,10 @@ pub struct AlignConfig {
     /// Below this span (device time) of clock samples, or of a segment's
     /// reference points, drift is not fitted and taken as zero.
     pub min_drift_span_us: i64,
+    /// A WAV whose sample data is longer than this many bytes is written as
+    /// RF64 (64-bit sizes). The default leaves room for the header under
+    /// 4 GiB; lower it only to test.
+    pub rf64_threshold: u64,
 }
 
 impl Default for AlignConfig {
@@ -101,6 +122,7 @@ impl Default for AlignConfig {
             mode: Mode::Resample,
             format: OutputFormat::Flac,
             min_drift_span_us: 60_000_000,
+            rf64_threshold: DEFAULT_RF64_THRESHOLD,
         }
     }
 }
@@ -407,11 +429,16 @@ struct Loaded {
     segs: Vec<SegmentModel>,
 }
 
-fn planar(data: &[u8], channels: usize, f: SampleFormat) -> Vec<Vec<f32>> {
-    let fb = channels * f.bytes();
-    let frames = data.len() / fb.max(1);
-    let mut out = vec![Vec::with_capacity(frames); channels];
-    for fr in data.chunks_exact(fb) {
+/// Output frames rendered and written per step.
+const BLOCK: usize = 65_536;
+/// Source frames a window refill reads ahead (the window is at least this
+/// long after a refill, or as long as the step needs).
+const WINDOW_FRAMES: u64 = 131_072;
+
+/// Append the frames in `data` (little-endian interleaved) to `planes` as floats.
+fn append_planar(data: &[u8], f: SampleFormat, planes: &mut [Vec<f32>]) {
+    let fb = planes.len() * f.bytes();
+    for fr in data.chunks_exact(fb.max(1)) {
         for (c, s) in fr.chunks_exact(f.bytes()).enumerate() {
             let v = match f {
                 SampleFormat::I16 => f32::from(i16::from_le_bytes([s[0], s[1]])) / 32_768.0,
@@ -420,10 +447,161 @@ fn planar(data: &[u8], channels: usize, f: SampleFormat) -> Vec<Vec<f32>> {
                 }
                 SampleFormat::F32 => f32::from_le_bytes([s[0], s[1], s[2], s[3]]),
             };
-            out[c].push(v);
+            planes[c].push(v);
         }
     }
-    out
+}
+
+/// The take's output grid.
+#[derive(Clone, Copy)]
+struct Grid {
+    /// Host time (minus base, us) of output frame 0.
+    t0: f64,
+    /// Output rate.
+    rate: f64,
+    /// Output frames in the take.
+    n_out: i64,
+    mode: Mode,
+}
+
+/// One raw segment being rendered: a sliding window of its frames, as floats.
+struct SegSource<'a, S: Storage> {
+    m: &'a SegmentModel,
+    reader: TrackReader<'a, S>,
+    format: SampleFormat,
+    /// Window: source frames `[start, start + planes[0].len())`.
+    start: u64,
+    planes: Vec<Vec<f32>>,
+    bytes: Vec<u8>,
+    /// Interpolation kernel of each run, made when first used.
+    kernels: Vec<Option<Sinc>>,
+}
+
+impl<'a, S: Storage> SegSource<'a, S> {
+    fn open(dir: &'a S, m: &'a SegmentModel, channels: usize) -> io::Result<Self> {
+        let reader = TrackReader::open(dir, &m.file)?;
+        Ok(Self {
+            m,
+            format: reader.format().sample_format,
+            reader,
+            start: 0,
+            planes: vec![Vec::new(); channels],
+            bytes: Vec::new(),
+            kernels: (0..m.runs.len()).map(|_| None).collect(),
+        })
+    }
+
+    /// Make the window cover source frames `[lo, hi)` (clamped to the file).
+    /// Slides forward cheaply; a jump (or going back) refills from `lo`.
+    fn ensure(&mut self, lo: i64, hi: i64) -> io::Result<()> {
+        let frames = self.reader.frames() as i64;
+        let (lo, hi) = (lo.max(0), hi.min(frames));
+        if lo >= hi {
+            return Ok(());
+        }
+        let (lo, hi) = (lo as u64, hi as u64);
+        let len = self.planes.first().map_or(0, Vec::len) as u64;
+        let end = self.start + len;
+        if lo >= self.start && hi <= end {
+            return Ok(());
+        }
+        let from = if lo >= self.start && lo < end {
+            // Slide: drop what is behind `lo`, keep the rest.
+            let drop = (lo - self.start) as usize;
+            for p in &mut self.planes {
+                p.drain(..drop);
+            }
+            self.start = lo;
+            end
+        } else {
+            for p in &mut self.planes {
+                p.clear();
+            }
+            self.start = lo;
+            lo
+        };
+        let to = hi.max(lo + WINDOW_FRAMES).min(frames as u64);
+        let got = self.reader.read_frames(from, to - from, &mut self.bytes)?;
+        if got != to - from {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        append_planar(&self.bytes, self.format, &mut self.planes);
+        Ok(())
+    }
+
+    /// Render this segment's part of output frames `[b0, b0 + m)` into
+    /// `out` (positions relative to `b0`); `n_out` is the take's length.
+    fn render_block(
+        &mut self,
+        out: &mut [Vec<f32>],
+        b0: i64,
+        len: i64,
+        g: &Grid,
+    ) -> io::Result<()> {
+        let Grid {
+            t0,
+            rate,
+            n_out,
+            mode,
+        } = *g;
+        let frames = self.reader.frames();
+        let src_rate = f64::from(self.reader.format().sample_rate);
+        let m = self.m;
+        let mut v = vec![0f32; out.len()];
+        for (ri, run) in m.runs.iter().enumerate() {
+            let (a, b) = (run.start.min(frames), run.end.min(frames));
+            if a >= b {
+                continue;
+            }
+            let h_a = run.host0 + m.us_per_frame * a as f64;
+            if mode == Mode::OffsetOnly && src_rate == rate {
+                let n0 = ((h_a - t0) * rate / 1e6).round() as i64;
+                let lo = n0.max(b0).max(0);
+                let hi = (n0 + (b - a) as i64).min(b0 + len).min(n_out);
+                if lo >= hi {
+                    continue;
+                }
+                let f0 = a as i64 + (lo - n0);
+                self.ensure(f0, f0 + (hi - lo))?;
+                let w = (f0 as u64 - self.start) as usize;
+                for (o, s) in out.iter_mut().zip(&self.planes) {
+                    let dst = (lo - b0) as usize;
+                    o[dst..dst + (hi - lo) as usize].copy_from_slice(&s[w..w + (hi - lo) as usize]);
+                }
+                continue;
+            }
+            // Source position of host time t: (t - host0') / upf.
+            let (upf, host0) = if mode == Mode::OffsetOnly {
+                let upf = 1e6 / src_rate;
+                (upf, h_a - upf * a as f64)
+            } else {
+                (m.us_per_frame, run.host0)
+            };
+            let h_b = host0 + upf * b as f64;
+            let h_a = host0 + upf * a as f64;
+            let from = (((h_a - t0) * rate / 1e6) - 1e-6).ceil().max(0.0) as i64;
+            let to = ((((h_b - t0) * rate / 1e6) - 1e-6).ceil() as i64).min(n_out);
+            let (from, to) = (from.max(b0), to.min(b0 + len));
+            if from >= to {
+                continue;
+            }
+            let x_at = |n: i64| (t0 + n as f64 * 1e6 / rate - host0) / upf;
+            self.ensure(
+                x_at(from).floor() as i64 - HALF as i64 + 1,
+                x_at(to - 1).floor() as i64 + HALF as i64 + 1,
+            )?;
+            // Output rate over the source's rate in host time.
+            let kernel = self.kernels[ri].get_or_insert_with(|| Sinc::new(rate * upf / 1e6));
+            let w0 = self.start as f64;
+            for n in from..to {
+                kernel.eval(&self.planes, x_at(n) - w0, &mut v);
+                for (o, s) in out.iter_mut().zip(&v) {
+                    o[(n - b0) as usize] = *s;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn format_name(f: SampleFormat) -> &'static str {
@@ -572,18 +750,12 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
             .split_once('_')
             .map_or(t.found.base.as_str(), |(_, rest)| rest)
             .to_string();
-        let mut planes = vec![vec![0f32; n_out]; usize::from(t.channels)];
         let mut seg_sum = Vec::new();
         let mut gaps = Vec::new();
         let mut prev_end: Option<f64> = None;
         let mut nominal_us = 0.0;
         let mut weighted = 0.0;
         for m in &t.segs {
-            let (_, data) = read_track(dir, &m.file)?;
-            let src = planar(&data, usize::from(t.channels), t.format);
-            drop(data);
-            render(m, &src, &mut planes, t0, r, t.rate, cfg.mode);
-            drop(src);
             let (s, e) = (secs(m.start()), secs(m.end()));
             if let Some(pe) = prev_end
                 && s - pe > 1.0 / r
@@ -646,12 +818,44 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
             description: &description,
             reference: &t.found.base,
         };
-        let bytes = if flac {
-            flac_bytes(&planes, t.format, &stamp)?
+        let file = out_dir.open(&name)?;
+        let mut sink = if flac {
+            TrackSink::flac(file, t.channels, t.format, &stamp)?
         } else {
-            wav_bytes(&planes, t.format, &stamp)?
+            TrackSink::wav(
+                file,
+                t.channels,
+                t.format,
+                n_out as u64,
+                cfg.rf64_threshold,
+                &stamp,
+            )?
         };
-        write_file(&out_dir, &name, &bytes)?;
+        let grid = Grid {
+            t0,
+            rate: r,
+            n_out: n_out as i64,
+            mode: cfg.mode,
+        };
+        let mut sources = t
+            .segs
+            .iter()
+            .map(|m| SegSource::open(dir, m, usize::from(t.channels)))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut planes = vec![vec![0f32; BLOCK]; usize::from(t.channels)];
+        let mut b0 = 0usize;
+        while b0 < n_out {
+            let len = BLOCK.min(n_out - b0);
+            for p in &mut planes {
+                p[..len].fill(0.0);
+            }
+            for s in &mut sources {
+                s.render_block(&mut planes, b0 as i64, len as i64, &grid)?;
+            }
+            sink.write(&planes, len)?;
+            b0 += len;
+        }
+        sink.finish()?;
         let offset_s = seg_sum.first().map_or(0.0, |s| s.start_s);
         info!(take, track = %name, offset_s, drift_ppm, clock_offset_us = t.clock.offset_us,
             clock_drift_ppm = t.clock.drift_ppm, segments = seg_sum.len(), gaps = gaps.len(),
@@ -698,59 +902,4 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
     info!(take, tracks = summary.tracks.len(), skipped = summary.skipped.len(), frames = n_out,
         rate, mode = ?cfg.mode, "take aligned");
     Ok(summary)
-}
-
-/// Render one segment into the take's output planes.
-fn render(
-    m: &SegmentModel,
-    src: &[Vec<f32>],
-    out: &mut [Vec<f32>],
-    t0: f64,
-    rate: f64,
-    src_rate: u32,
-    mode: Mode,
-) {
-    let n_out = out.first().map_or(0, Vec::len) as i64;
-    let frames = src.first().map_or(0, Vec::len) as u64;
-    let mut v = vec![0f32; src.len()];
-    for run in &m.runs {
-        let (a, b) = (run.start.min(frames), run.end.min(frames));
-        if a >= b {
-            continue;
-        }
-        let h_a = run.host0 + m.us_per_frame * a as f64;
-        if mode == Mode::OffsetOnly && f64::from(src_rate) == rate {
-            let n0 = ((h_a - t0) * rate / 1e6).round() as i64;
-            for f in a..b {
-                let n = n0 + (f - a) as i64;
-                if (0..n_out).contains(&n) {
-                    for (o, s) in out.iter_mut().zip(src) {
-                        o[n as usize] = s[f as usize];
-                    }
-                }
-            }
-            continue;
-        }
-        // Source position of host time t: (t - host0') / upf.
-        let (upf, host0) = if mode == Mode::OffsetOnly {
-            let upf = 1e6 / f64::from(src_rate);
-            (upf, h_a - upf * a as f64)
-        } else {
-            (m.us_per_frame, run.host0)
-        };
-        let h_b = host0 + upf * b as f64;
-        let h_a = host0 + upf * a as f64;
-        // Output rate over the source's rate in host time.
-        let kernel = Sinc::new(rate * upf / 1e6);
-        let from = (((h_a - t0) * rate / 1e6) - 1e-6).ceil().max(0.0) as i64;
-        let to = ((((h_b - t0) * rate / 1e6) - 1e-6).ceil() as i64).min(n_out);
-        for n in from..to {
-            let t = t0 + n as f64 * 1e6 / rate;
-            let x = (t - host0) / upf;
-            kernel.eval(src, x, &mut v);
-            for (o, s) in out.iter_mut().zip(&v) {
-                o[n as usize] = *s;
-            }
-        }
-    }
 }

@@ -29,3 +29,4 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 [dev-dependencies]
 claxon.workspace = true
 blake3.workspace = true
+castcorder-testalloc = { path = "../castcorder-testalloc" }

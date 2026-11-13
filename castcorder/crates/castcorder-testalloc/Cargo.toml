@@ -1,0 +1,15 @@
+[package]
+name = "castcorder-testalloc"
+description = "Test support: a counting global allocator that reports peak heap use, for the bounded-memory tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# The one crate in the workspace that needs unsafe: a GlobalAlloc impl must be
+# `unsafe`. It only forwards to the system allocator and counts bytes.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"

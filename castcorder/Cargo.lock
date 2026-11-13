@@ -408,6 +408,7 @@ dependencies = [
  "castcorder-port-disk",
  "castcorder-protocol",
  "castcorder-recorder",
+ "castcorder-testalloc",
  "claxon",
  "serde",
  "serde_json",
@@ -542,6 +543,7 @@ version = "0.0.0"
 dependencies = [
  "castcorder-port-capture",
  "castcorder-port-disk",
+ "castcorder-testalloc",
  "claxon",
  "flacenc",
 ]
@@ -560,6 +562,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "castcorder-testalloc"
+version = "0.0.0"
 
 [[package]]
 name = "castcorder-transfer"

@@ -16,3 +16,6 @@ claxon = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+castcorder-testalloc = { path = "../castcorder-testalloc" }

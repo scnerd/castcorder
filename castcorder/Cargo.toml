@@ -81,3 +81,14 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 # makes the synthetic tests slow.
 [profile.dev.package.castcorder-align]
 opt-level = 3
+
+# FLAC encoding is per-sample arithmetic; unoptimised it makes the long-take
+# tests (tens of minutes of audio) crawl.
+[profile.dev.package.castcorder-recorder]
+opt-level = 3
+
+[profile.dev.package.flacenc]
+opt-level = 3
+
+[profile.dev.package.claxon]
+opt-level = 3

@@ -6,7 +6,7 @@ use std::io;
 
 use castcorder_port_capture::SampleFormat;
 use castcorder_port_disk::{Storage, StorageFile};
-use castcorder_recorder::encode_flac;
+use castcorder_recorder::FlacWriter;
 
 /// Facts written into an aligned file's metadata.
 pub(crate) struct Stamp<'a> {
@@ -67,16 +67,18 @@ fn quantise(v: f32, f: SampleFormat) -> i32 {
     (f64::from(v) * scale).round().clamp(-scale, scale - 1.0) as i32
 }
 
-/// A broadcast-wave file in memory: RIFF, fmt, bext (version 1), data.
-pub(crate) fn wav_bytes(
-    planes: &[Vec<f32>],
+/// The header of a broadcast-wave file: RIFF (or RF64 with a ds64 chunk when
+/// `rf64`), fmt, bext (version 1), and the data chunk header. The data length
+/// is known up front (the take's length is), so the header is written once.
+fn wav_header(
+    channels: u16,
     format: SampleFormat,
+    frames: u64,
+    rf64: bool,
     stamp: &Stamp<'_>,
-) -> io::Result<Vec<u8>> {
-    let channels = planes.len() as u16;
-    let frames = planes.first().map_or(0, Vec::len);
+) -> Vec<u8> {
     let bps = format.bytes();
-    let data_len = frames * usize::from(channels) * bps;
+    let data_len = frames * u64::from(channels) * bps as u64;
     let (date, time) = stamp.date_time();
     let mut bext = Vec::new();
     bext.extend(fixed(stamp.description, 256));
@@ -101,82 +103,178 @@ pub(crate) fn wav_bytes(
     if bext.len() % 2 == 1 {
         bext.push(0);
     }
-    let riff_len = 4 + (8 + 16) + (8 + bext.len()) + (8 + data_len);
-    if riff_len > u32::MAX as usize {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "aligned track over 4 GiB; use FLAC",
-        ));
+    let ds64 = if rf64 { 8 + 28 } else { 0 };
+    let head_len = 12 + ds64 + (8 + 16) + (8 + bext.len()) + 8;
+    let riff_len = head_len as u64 - 8 + data_len;
+    let frame_bytes = u32::from(channels) * bps as u32;
+    let mut b = Vec::with_capacity(head_len);
+    if rf64 {
+        b.extend_from_slice(b"RF64");
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+    } else {
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(riff_len as u32).to_le_bytes());
     }
-    let mut b = Vec::with_capacity(riff_len + 8);
-    b.extend_from_slice(b"RIFF");
-    b.extend_from_slice(&(riff_len as u32).to_le_bytes());
     b.extend_from_slice(b"WAVE");
+    if rf64 {
+        b.extend_from_slice(b"ds64");
+        b.extend_from_slice(&28u32.to_le_bytes());
+        b.extend_from_slice(&riff_len.to_le_bytes());
+        b.extend_from_slice(&data_len.to_le_bytes());
+        b.extend_from_slice(&frames.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+    }
     b.extend_from_slice(b"fmt ");
     b.extend_from_slice(&16u32.to_le_bytes());
     let tag: u16 = if format == SampleFormat::F32 { 3 } else { 1 };
     b.extend_from_slice(&tag.to_le_bytes());
     b.extend_from_slice(&channels.to_le_bytes());
     b.extend_from_slice(&stamp.rate.to_le_bytes());
-    let frame_bytes = u32::from(channels) * bps as u32;
-    b.extend_from_slice(&(stamp.rate * frame_bytes).to_le_bytes());
+    b.extend_from_slice(&stamp.rate.wrapping_mul(frame_bytes).to_le_bytes());
     b.extend_from_slice(&(frame_bytes as u16).to_le_bytes());
     b.extend_from_slice(&bits(format).to_le_bytes());
     b.extend_from_slice(b"bext");
     b.extend_from_slice(&(bext.len() as u32).to_le_bytes());
     b.extend_from_slice(&bext);
     b.extend_from_slice(b"data");
-    b.extend_from_slice(&(data_len as u32).to_le_bytes());
-    for i in 0..frames {
-        for p in planes {
-            let v = p[i];
-            match format {
-                SampleFormat::F32 => b.extend_from_slice(&v.to_le_bytes()),
-                SampleFormat::I16 => {
-                    b.extend_from_slice(&(quantise(v, format) as i16).to_le_bytes())
-                }
-                SampleFormat::I24 => b.extend_from_slice(&quantise(v, format).to_le_bytes()[..3]),
-            }
-        }
-    }
-    Ok(b)
+    let data_field = if rf64 { u32::MAX } else { data_len as u32 };
+    b.extend_from_slice(&data_field.to_le_bytes());
+    debug_assert_eq!(b.len(), head_len);
+    b
 }
 
-/// A FLAC file in memory (integer formats only), the time reference and the
-/// broadcast-wave facts as Vorbis comments.
-pub(crate) fn flac_bytes(
-    planes: &[Vec<f32>],
-    format: SampleFormat,
-    stamp: &Stamp<'_>,
-) -> io::Result<Vec<u8>> {
-    let frames = planes.first().map_or(0, Vec::len);
-    let mut samples = Vec::with_capacity(frames * planes.len());
-    for i in 0..frames {
-        for p in planes {
-            samples.push(quantise(p[i], format));
+/// An aligned track being written block by block: a broadcast-wave file
+/// (RF64 when the data is longer than the threshold) or a FLAC file. Memory is
+/// one block, whatever the take's length.
+pub(crate) enum TrackSink<F: StorageFile> {
+    Wav {
+        file: F,
+        format: SampleFormat,
+        pos: u64,
+        buf: Vec<u8>,
+    },
+    Flac {
+        writer: Box<FlacWriter<F>>,
+        format: SampleFormat,
+        buf: Vec<i32>,
+    },
+}
+
+impl<F: StorageFile> TrackSink<F> {
+    /// A WAV of `frames` frames. RF64 if its data would exceed `rf64_threshold`
+    /// bytes.
+    pub fn wav(
+        mut file: F,
+        channels: u16,
+        format: SampleFormat,
+        frames: u64,
+        rf64_threshold: u64,
+        stamp: &Stamp<'_>,
+    ) -> io::Result<Self> {
+        let data_len = frames * u64::from(channels) * format.bytes() as u64;
+        let head = wav_header(channels, format, frames, data_len > rf64_threshold, stamp);
+        file.set_len(0)?;
+        file.write_at(0, &head)?;
+        Ok(Self::Wav {
+            file,
+            format,
+            pos: head.len() as u64,
+            buf: Vec::new(),
+        })
+    }
+
+    /// A FLAC (integer formats only), the time reference and the
+    /// broadcast-wave facts as Vorbis comments.
+    pub fn flac(
+        file: F,
+        channels: u16,
+        format: SampleFormat,
+        stamp: &Stamp<'_>,
+    ) -> io::Result<Self> {
+        let (date, time) = stamp.date_time();
+        let tags = vec![
+            ("TIME_REFERENCE".into(), stamp.time_reference().to_string()),
+            ("DESCRIPTION".into(), stamp.description.to_string()),
+            ("ORIGINATOR".into(), "castcorder".into()),
+            ("ORIGINATOR_REFERENCE".into(), stamp.reference.to_string()),
+            ("ORIGINATION_DATE".into(), date),
+            ("ORIGINATION_TIME".into(), time),
+            (
+                "CASTCORDER_HOST_START_US".into(),
+                stamp.start_us.to_string(),
+            ),
+        ];
+        let writer = FlacWriter::create(
+            file,
+            usize::from(channels),
+            usize::from(bits(format)),
+            stamp.rate,
+            &tags,
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(Self::Flac {
+            writer: Box::new(writer),
+            format,
+            buf: Vec::new(),
+        })
+    }
+
+    /// Append the first `n` frames of `planes`.
+    pub fn write(&mut self, planes: &[Vec<f32>], n: usize) -> io::Result<()> {
+        match self {
+            Self::Wav {
+                file,
+                format,
+                pos,
+                buf,
+            } => {
+                buf.clear();
+                for i in 0..n {
+                    for p in planes {
+                        let v = p[i];
+                        match format {
+                            SampleFormat::F32 => buf.extend_from_slice(&v.to_le_bytes()),
+                            SampleFormat::I16 => {
+                                buf.extend_from_slice(&(quantise(v, *format) as i16).to_le_bytes());
+                            }
+                            SampleFormat::I24 => {
+                                buf.extend_from_slice(&quantise(v, *format).to_le_bytes()[..3]);
+                            }
+                        }
+                    }
+                }
+                file.write_at(*pos, buf)?;
+                *pos += buf.len() as u64;
+            }
+            Self::Flac {
+                writer,
+                format,
+                buf,
+            } => {
+                buf.clear();
+                for i in 0..n {
+                    for p in planes {
+                        buf.push(quantise(p[i], *format));
+                    }
+                }
+                writer
+                    .push(buf)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Finish the file and make it durable.
+    pub fn finish(self) -> io::Result<()> {
+        match self {
+            Self::Wav { mut file, .. } => file.sync(),
+            Self::Flac { writer, .. } => writer
+                .finish()
+                .map(|_| ())
+                .map_err(|e| io::Error::other(e.to_string())),
         }
     }
-    let (date, time) = stamp.date_time();
-    let tags = vec![
-        ("TIME_REFERENCE".into(), stamp.time_reference().to_string()),
-        ("DESCRIPTION".into(), stamp.description.to_string()),
-        ("ORIGINATOR".into(), "castcorder".into()),
-        ("ORIGINATOR_REFERENCE".into(), stamp.reference.to_string()),
-        ("ORIGINATION_DATE".into(), date),
-        ("ORIGINATION_TIME".into(), time),
-        (
-            "CASTCORDER_HOST_START_US".into(),
-            stamp.start_us.to_string(),
-        ),
-    ];
-    encode_flac(
-        &samples,
-        planes.len(),
-        usize::from(bits(format)),
-        stamp.rate,
-        &tags,
-    )
-    .map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Replace `name` in `dir` with `bytes`, durably.

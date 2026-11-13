@@ -12,7 +12,7 @@
 //! position returns the sample itself.
 
 /// Zero crossings on each side of the centre tap.
-const HALF: usize = 64;
+pub(crate) const HALF: usize = 64;
 /// Table entries per unit of distance.
 const PHASES: usize = 512;
 const BETA: f64 = 10.0;
