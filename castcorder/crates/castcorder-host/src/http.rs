@@ -4,9 +4,15 @@
 //!
 //! - `GET /role` answers `{"producer":bool}`: true only on the localhost
 //!   listener, i.e. for a page opened on the host machine itself.
-//! - `POST /offer?name=X` takes `{"type":"offer","sdp":...}` (any content type)
-//!   and returns the answer in the same shape.
-//! - Producer only (403 elsewhere): `POST /take/start` and `POST /take/stop`
+//! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
+//!   "password":P?}` (any content type) and returns the answer in the same
+//!   shape. The room decides first (castcorder-host `room`): an offer on the
+//!   localhost listener is at the host machine; a refusal is 403 (`kicked:`,
+//!   `locked:`, `wrong_password:`, `bad_device:`) or 503 (`waiting:` a
+//!   producer-gated call with no producer in it yet).
+//! - Producer controls go over the control channel (castcorder-protocol
+//!   `Request::StartTake`, `Request::Room`), authorized per device role. For
+//!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
 //!   answer `{"take":N,"hostUs":T}` (T: when, on the host timeline, in us)
 //!   or 409; `GET /status` answers
 //!   `{"take":"...","guests":["name (guest N)",...]}`.
@@ -125,6 +131,7 @@ fn exchange(mut stream: impl Read + Write, app: &App, producer: bool) -> io::Res
         403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let head = format!(
@@ -188,6 +195,24 @@ fn read_request(stream: impl Read) -> io::Result<Request> {
 #[derive(serde::Deserialize)]
 struct Sdp {
     sdp: String,
+    /// The browser profile's device id.
+    #[serde(default)]
+    device: String,
+    /// The call password, if the guest typed one.
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// The HTTP status of an offer refusal: 503 while waiting for a producer,
+/// 403 for a security refusal (kicked, locked, wrong password, bad device),
+/// 400 for anything else (a bad offer).
+fn refusal_status(message: &str) -> u16 {
+    let code = message.split_once(':').map(|(c, _)| c).unwrap_or_default();
+    match code {
+        "waiting" => 503,
+        "kicked" | "locked" | "wrong_password" | "bad_device" => 403,
+        _ => 400,
+    }
 }
 
 fn ask<T>(app: &App, make: impl FnOnce(mpsc::Sender<T>) -> Command) -> Option<T> {
@@ -229,13 +254,16 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             match ask(app, |reply| Command::Offer {
                 name,
                 offer_sdp: offer.sdp,
+                device: offer.device,
+                password: offer.password,
+                at_host: producer,
                 reply,
             }) {
                 Some(Ok(sdp)) => json(
                     200,
                     serde_json::json!({ "type": "answer", "sdp": sdp }).to_string(),
                 ),
-                Some(Err(e)) => text(400, e),
+                Some(Err(e)) => text(refusal_status(&e), e),
                 None => gone(),
             }
         }

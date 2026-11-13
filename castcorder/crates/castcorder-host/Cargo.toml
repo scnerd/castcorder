@@ -22,6 +22,8 @@ castcorder-protocol.workspace = true
 castcorder-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Salted password hashes in room.json (already in the tree via castcorder-link).
+sha2 = { version = "0.11", default-features = false }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # The rendezvous connection: a blocking WebSocket on its own thread; TLS for

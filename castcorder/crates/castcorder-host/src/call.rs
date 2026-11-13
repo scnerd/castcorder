@@ -9,14 +9,19 @@ use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
+use castcorder_core::safety::SafetyRecorder;
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
-    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, TakeId, TakeStatus,
-    TrackOffer,
+    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, RoomAction, TakeId,
+    TakeStatus, TrackOffer,
 };
+use std::path::PathBuf;
+
+use crate::rendezvous::{LinkBase, SharedSecret};
+use crate::room::{Admission, Effect, Need, Room};
 use castcorder_transport::{GuestAudio, GuestChannel, GuestId, Host, HostEvent, LocalAudio};
 use tracing::{info, warn};
 
@@ -28,7 +33,14 @@ pub enum Command {
         name: String,
         /// The offer SDP.
         offer_sdp: String,
-        /// Where the answer goes.
+        /// The device id the offer presented (bound to the connection).
+        device: String,
+        /// The call password the guest typed, if any.
+        password: Option<String>,
+        /// The offer came from the host machine itself (the localhost page).
+        at_host: bool,
+        /// Where the answer goes; a refusal starts with its code
+        /// (`waiting:`, `kicked:`, `locked:`, `wrong_password:`, ...).
         reply: mpsc::Sender<Result<String, String>>,
     },
     /// Start a take.
@@ -115,8 +127,21 @@ pub struct Call {
     participant: Option<Participant>,
     local: Option<LocalAudio>,
     timeline: HostTimeline<SystemClock>,
+    /// Each guest's live Opus stream, kept per take (safety tracks).
+    safety: SafetyRecorder<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
     align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
+    /// Room security: admission, roles, producer actions.
+    room: Room,
+    /// Where the room persists (`<call>/room.json`) and the call secret
+    /// lives; `None` in a call without a folder of its own.
+    call_dir: Option<PathBuf>,
+    /// The call secret the rendezvous thread checks offers against.
+    secret: Option<SharedSecret>,
+    /// The rest of the call link, when reachable through a rendezvous.
+    link: Option<LinkBase>,
+    /// Connections to drop on the next turn of the host loop (kicked).
+    remove: Vec<GuestId>,
 }
 
 /// Render aligned tracks on their own thread, one take at a time (never on
@@ -171,7 +196,9 @@ impl Call {
         last_take: u32,
         timeline: HostTimeline<SystemClock>,
     ) -> Self {
+        let safety = SafetyRecorder::new(library.call(), timeline.id());
         Self {
+            safety,
             status: TakeStatus::Idle,
             last_take,
             rpc: BTreeMap::new(),
@@ -183,7 +210,132 @@ impl Call {
             local: None,
             timeline,
             align: None,
+            room: Room::new(false),
+            call_dir: None,
+            secret: None,
+            link: None,
+            remove: Vec::new(),
         }
+    }
+
+    /// Room security for this call: `room` as loaded from `call_dir`, where
+    /// it is saved again on every change; `secret` is the call secret (rotated
+    /// on "regenerate link"); `link` the rest of the call link, if any.
+    pub fn with_room(
+        mut self,
+        room: Room,
+        call_dir: PathBuf,
+        secret: SharedSecret,
+        link: Option<LinkBase>,
+    ) -> Self {
+        let native = self.participant.is_some();
+        self.room = room;
+        self.room.set_native_producer(native);
+        self.call_dir = Some(call_dir);
+        self.secret = Some(secret);
+        self.link = link;
+        self.save_room();
+        self
+    }
+
+    /// Persist the room if it changed.
+    fn save_room(&mut self) {
+        if !self.room.take_dirty() {
+            return;
+        }
+        if let Some(dir) = &self.call_dir
+            && let Err(e) = std::fs::write(dir.join("room.json"), self.room.to_json())
+        {
+            warn!(error = %e, "room.json not saved; devices and settings will not survive a restart");
+        }
+    }
+
+    /// The current call link, if the host is reachable through a rendezvous.
+    fn current_link(&self) -> Option<String> {
+        let secret = self.secret.as_ref()?.lock().ok()?.clone();
+        Some(self.link.as_ref()?.link(&secret))
+    }
+
+    /// Tell every producer the room state.
+    fn broadcast_room(&mut self) {
+        let state = self.room.state(self.current_link());
+        for id in self.room.producers() {
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(id))
+                && rpc.emit(Event::Room(state.clone())).is_err()
+            {
+                warn!(guest = id, "room state not sent: channel closed");
+            }
+        }
+    }
+
+    /// Tell these connections their role.
+    fn send_roles(&mut self, conns: &[u64]) {
+        for id in conns {
+            let role = self.room.role(*id);
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(*id)) {
+                let _ = rpc.emit(Event::Role(role));
+            }
+        }
+    }
+
+    /// Carry out a producer's room action.
+    fn room_action(&mut self, id: GuestId, action: &RoomAction) -> Response {
+        let mut salt = [0u8; 16];
+        if let Err(e) = getrandom::fill(&mut salt) {
+            warn!(error = %e, "no randomness for a password salt");
+            return Response::Error {
+                kind: ErrorKind::Other,
+                message: "no randomness on the host".into(),
+            };
+        }
+        let not_allowed = |message| Response::Error {
+            kind: ErrorKind::NotAllowed,
+            message,
+        };
+        let response = match self.room.apply(id.0, action, salt) {
+            Err(message) => return not_allowed(message),
+            Ok(Effect::Changed) => Response::Done,
+            Ok(Effect::Remove(conns)) => {
+                self.remove.extend(conns.into_iter().map(GuestId));
+                Response::Done
+            }
+            Ok(Effect::Roles(conns)) => {
+                self.send_roles(&conns);
+                Response::Done
+            }
+            Ok(Effect::RegenerateLink) => {
+                let rotated = match (&self.call_dir, &self.secret) {
+                    (Some(dir), Some(secret)) => {
+                        crate::rendezvous::regenerate_secret(dir, secret).map_err(|e| e.to_string())
+                    }
+                    _ => Err("this call has no call secret".into()),
+                };
+                match rotated {
+                    Ok(_) => {
+                        let link = self.current_link();
+                        if let Some(l) = &link {
+                            println!();
+                            println!(
+                                "  The call link was regenerated; the old one no longer works:"
+                            );
+                            println!("    {l}");
+                            println!("CALL_LINK {l}");
+                        }
+                        Response::Link(link)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "call link not regenerated");
+                        Response::Error {
+                            kind: ErrorKind::Other,
+                            message: e,
+                        }
+                    }
+                }
+            }
+        };
+        self.save_room();
+        self.broadcast_room();
+        response
     }
 
     /// Align each take once its guests' audio tracks and timing metadata
@@ -231,6 +383,8 @@ impl Call {
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     pub fn with_participant(mut self, p: Participant) -> Self {
         self.participant = Some(p);
+        // Whoever is at the host is a producer, always in the call.
+        self.room.set_native_producer(true);
         self
     }
 
@@ -308,17 +462,20 @@ impl Call {
         self.status = TakeStatus::Recording { take };
         let host_us = self.timeline.now_us();
         info!(call = %self.library.call(), take = take.0, host_us, "take started");
-        if let Some(p) = &self.participant {
-            match self.library.take_dir(take) {
-                Ok(dir) => {
+        match self.library.take_dir(take) {
+            Ok(dir) => {
+                if let Err(e) = self.safety.start_take(take.0, dir) {
+                    warn!(take = take.0, error = %e, "no safety directory; safety tracks not kept");
+                }
+                if let Some(p) = &self.participant {
                     let _ = p.takes.send(TakeCtl::Start {
                         take,
                         dir: dir.clone(),
                     });
                 }
-                Err(e) => {
-                    warn!(take = take.0, error = %e, "no take directory; host microphone not recorded")
-                }
+            }
+            Err(e) => {
+                warn!(take = take.0, error = %e, "no take directory; safety tracks and host microphone not recorded")
             }
         }
         self.broadcast();
@@ -332,6 +489,7 @@ impl Call {
         self.status = TakeStatus::Idle;
         let host_us = self.timeline.now_us();
         info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
+        self.safety.stop_take();
         if let Some(p) = &self.participant {
             let _ = p.takes.send(TakeCtl::Stop { done: None });
         }
@@ -369,6 +527,7 @@ impl Call {
     /// a clock pong was sent (worth flushing at once: its delay is error).
     fn serve(&mut self) -> bool {
         let mut pongs = false;
+        let mut joined: Vec<u64> = Vec::new();
         let ids: Vec<GuestId> = self.rpc.keys().copied().collect();
         for id in ids {
             while let Some(rpc) = self.rpc.get_mut(&id) {
@@ -394,7 +553,17 @@ impl Call {
                     }
                     continue;
                 }
-                info!(guest = id.0, request = ?request, "request");
+                match &request {
+                    // Never log the password itself.
+                    Request::Room(RoomAction::SetPassword(p)) => {
+                        info!(guest = id.0, set = p.is_some(), "request: set password")
+                    }
+                    other => info!(guest = id.0, request = ?other, "request"),
+                }
+                let not_allowed = |message| Response::Error {
+                    kind: ErrorKind::NotAllowed,
+                    message,
+                };
                 let response = match request {
                     Request::Join {
                         protocol_version, ..
@@ -403,37 +572,70 @@ impl Call {
                         message: format!("host speaks protocol {PROTOCOL_VERSION}"),
                     },
                     Request::Join { display_name, .. } => {
-                        if let Some(ch) = self.data.get(&id) {
-                            let call = self.library.call().to_string();
-                            self.names.insert(id, display_name.clone());
-                            self.pullers
-                                .insert(id, Puller::new(call, display_name, ch.clone()));
-                        }
-                        Response::Joined {
-                            participant: ParticipantId(id.0),
+                        match self.room.join(id.0, &display_name) {
+                            Err(refusal) => {
+                                self.remove.push(id);
+                                not_allowed(refusal.message().into())
+                            }
+                            Ok(_) => {
+                                if let Some(ch) = self.data.get(&id) {
+                                    let call = self.library.call().to_string();
+                                    self.names.insert(id, display_name.clone());
+                                    self.pullers
+                                        .insert(id, Puller::new(call, display_name, ch.clone()));
+                                }
+                                joined.push(id.0);
+                                Response::Joined {
+                                    participant: ParticipantId(id.0),
+                                }
+                            }
                         }
                     }
                     Request::OfferTrack(offer) => self.offer_track(id, &offer),
                     Request::ClockPing { .. } => unreachable!("answered above"),
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
-                    Request::StartTake => match self.start_take() {
-                        Ok((take, _)) => Response::TakeStarted { take },
-                        Err(message) => Response::Error {
-                            kind: ErrorKind::InvalidState,
-                            message,
-                        },
-                    },
-                    Request::StopTake => match self.stop_take() {
-                        Ok((take, _)) => Response::TakeStopped { take },
-                        Err(message) => Response::Error {
-                            kind: ErrorKind::InvalidState,
-                            message,
-                        },
-                    },
+                    Request::StartTake => {
+                        match self.room.authorize(id.0, Need::Producer, "start take") {
+                            Err(message) => not_allowed(message),
+                            Ok(()) => match self.start_take() {
+                                Ok((take, host_us)) => Response::TakeStartedAt { take, host_us },
+                                Err(message) => Response::Error {
+                                    kind: ErrorKind::InvalidState,
+                                    message,
+                                },
+                            },
+                        }
+                    }
+                    Request::StopTake => {
+                        match self.room.authorize(id.0, Need::Producer, "stop take") {
+                            Err(message) => not_allowed(message),
+                            Ok(()) => match self.stop_take() {
+                                Ok((take, host_us)) => Response::TakeStoppedAt { take, host_us },
+                                Err(message) => Response::Error {
+                                    kind: ErrorKind::InvalidState,
+                                    message,
+                                },
+                            },
+                        }
+                    }
+                    Request::GetRoom => {
+                        match self.room.authorize(id.0, Need::Producer, "view room") {
+                            Err(message) => not_allowed(message),
+                            Ok(()) => Response::Room(self.room.state(self.current_link())),
+                        }
+                    }
+                    Request::Room(action) => self.room_action(id, &action),
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);
+                }
+                if joined.last() == Some(&id.0) {
+                    // After Joined: the role, then everyone producing learns
+                    // who is in.
+                    self.send_roles(&[id.0]);
+                    self.save_room();
+                    self.broadcast_room();
                 }
             }
         }
@@ -453,8 +655,9 @@ impl Call {
             .spawn(move || {
                 if let Some(p) = &self.participant {
                     self.local = Some(host.add_local_audio(&p.name));
-                    host.set_guest_audio_tap(p.heard.is_some());
                 }
+                // Always on: the safety tracks keep every guest's frames.
+                host.set_guest_audio_tap(true);
                 loop {
                     while let Ok(c) = rx.try_recv() {
                         self.command(&mut host, c);
@@ -468,7 +671,10 @@ impl Call {
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
                                 self.drop_puller(guest);
+                                self.safety.guest_gone(guest.0);
                                 self.hear(Heard::Gone(guest));
+                                self.room.left(guest.0);
+                                self.broadcast_room();
                             }
                             HostEvent::GuestConnected { guest } => {
                                 info!(guest = guest.0, "guest connected");
@@ -477,10 +683,23 @@ impl Call {
                         }
                     }
                     while let Some(a) = host.next_guest_audio() {
+                        if self.safety.recording()
+                            && let Some(who) = self.names.get(&a.guest)
+                        {
+                            let now = self.timeline.now_us();
+                            self.safety.audio(a.guest.0, who, a.rtp_time, &a.data, now);
+                        }
                         self.hear(Heard::Audio(a));
                     }
                     if self.serve() {
                         host.poll();
+                    }
+                    for id in std::mem::take(&mut self.remove) {
+                        // Kicked (or refused at Join): flush its last answer,
+                        // then drop it; it is reported gone next poll.
+                        host.poll();
+                        info!(guest = id.0, "removing guest from the call");
+                        host.remove(id);
                     }
                     self.sync();
                     // The net port has no readiness wait: sleep until the
@@ -497,10 +716,20 @@ impl Call {
             Command::Offer {
                 name,
                 offer_sdp,
+                device,
+                password,
+                at_host,
                 reply,
             } => {
-                let r = host.accept(&name, &offer_sdp).map_err(|e| e.to_string());
+                let r = match self.room.admit(&device, at_host, password.as_deref()) {
+                    Err(refusal) => Err(refusal.message().to_string()),
+                    Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
+                    Ok(Admission::Enter) => {
+                        host.accept(&name, &offer_sdp).map_err(|e| e.to_string())
+                    }
+                };
                 let r = r.map(|(id, answer)| {
+                    self.room.accepted(id.0, &device, at_host);
                     if let Some(ch) = host.control(id) {
                         self.rpc.insert(id, RpcServer::new(ch));
                     }
@@ -512,10 +741,25 @@ impl Call {
                 });
                 let _ = reply.send(r);
             }
+            // The localhost HTTP endpoints: someone at the host machine.
             Command::StartTake { reply } => {
+                crate::room::decision(
+                    "host-machine-http",
+                    "host-machine",
+                    "start take",
+                    true,
+                    "at the host machine",
+                );
                 let _ = reply.send(self.start_take());
             }
             Command::StopTake { reply } => {
+                crate::room::decision(
+                    "host-machine-http",
+                    "host-machine",
+                    "stop take",
+                    true,
+                    "at the host machine",
+                );
                 let _ = reply.send(self.stop_take());
             }
             Command::Status { reply } => {

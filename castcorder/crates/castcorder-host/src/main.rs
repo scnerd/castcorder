@@ -12,7 +12,7 @@
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
-//! [--rendezvous URL] [--relay-only] [--participate [DEVICE]] [--name NAME]`
+//! [--rendezvous URL] [--relay-only] [--participate [DEVICE]] [--name NAME] [--open]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
@@ -38,6 +38,7 @@ mod http;
 #[cfg(feature = "native-capture")]
 mod native;
 mod rendezvous;
+mod room;
 mod tls;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
@@ -54,7 +55,7 @@ use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] \
-[--participate [DEVICE]] [--name NAME] [--align resample|offset-only|off] [--aligned-format flac|wav]";
+[--participate [DEVICE]] [--name NAME] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open]";
 
 struct Args {
     dist: PathBuf,
@@ -72,6 +73,8 @@ struct Args {
     name: String,
     /// Aligned tracks (`None`: `--align off`).
     align: Option<castcorder_align::AlignConfig>,
+    /// `--open`: make the call always open (saved with the call).
+    open: bool,
 }
 
 fn fail(msg: &str) -> ! {
@@ -106,6 +109,7 @@ fn parse_args() -> Args {
         participate: None,
         name: "host".into(),
         align: Some(castcorder_align::AlignConfig::default()),
+        open: false,
     };
     let mut args = std::env::args().skip(1).peekable();
     while let Some(flag) = args.next() {
@@ -132,6 +136,7 @@ fn parse_args() -> Args {
                 a.rendezvous = Some(url.trim_end_matches('/').to_string());
             }
             "--relay-only" => a.relay_only = true,
+            "--open" => a.open = true,
             "--participate" => {
                 if !cfg!(feature = "native-capture") {
                     fail("--participate needs a build with the native-capture feature (task host)");
@@ -267,7 +272,6 @@ fn main() {
         },
     );
     let (tx, rx) = mpsc::channel();
-    #[allow(unused_mut)]
     let mut call = call::Call::new(library, last_take(&call_dir), timeline.clone());
     if let Some(cfg) = args.align {
         call = call.with_alignment(cfg);
@@ -282,15 +286,32 @@ fn main() {
         };
         call = call.with_participant(native::start(cfg, tx.clone()));
     }
-    call.spawn(host, clock, rx);
+    let secret: rendezvous::SharedSecret = Arc::new(Mutex::new(
+        rendezvous::call_secret(&call_dir).unwrap_or_else(|e| fail(&format!("call secret: {e}"))),
+    ));
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
         base: base.clone(),
         key: rendezvous::host_key(&args.library)
             .unwrap_or_else(|e| fail(&format!("host key: {e}"))),
-        secret: rendezvous::call_secret(&call_dir)
-            .unwrap_or_else(|e| fail(&format!("call secret: {e}"))),
+        secret: secret.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     });
+    // Room security: devices and settings persist in <call>/room.json.
+    let mut room = match std::fs::read_to_string(call_dir.join("room.json")) {
+        Ok(text) => room::Room::from_json(&text)
+            .unwrap_or_else(|e| fail(&format!("{}: {e}", call_dir.join("room.json").display()))),
+        Err(_) => room::Room::new(false),
+    };
+    if args.open {
+        room.set_open(true);
+    }
+    call = call.with_room(
+        room,
+        call_dir.clone(),
+        secret,
+        rendezvous.as_ref().map(rendezvous::Config::link_base),
+    );
+    call.spawn(host, clock, rx);
     let rendezvous_tx = tx.clone();
 
     let tls = tls::server_config(&args.library, &lan)

@@ -15,8 +15,16 @@
 //!    offer again, send `{"type":"hb"}` every second, `{"type":"bye"}` on leave.
 //! 4. On "control", binary frames are castcorder-protocol messages: send
 //!    `Join`, then `GetTakeStatus`; every `TakeStatusChanged` starts or stops
-//!    the track ([`crate::session::on_take_status`]).
-//! 5. While joined: hold a Screen Wake Lock, and every second check the host
+//!    the track ([`crate::session::on_take_status`]). The offer carries this
+//!    browser profile's device id and the call password, if typed; the host
+//!    may refuse it (kicked, locked, wrong password: the guest leaves with
+//!    that reason shown) or make it wait (a producer-gated call with no
+//!    producer yet: retried every few seconds, "waiting" shown).
+//! 5. `Event::Role` says whether this connection is a producer; only then is
+//!    the producer panel shown, and its controls are protocol requests
+//!    (`StartTake`, `StopTake`, `Room(..)`) the host authorizes per device
+//!    role. Grant and revoke appear only on the host machine's own page.
+//! 6. While joined: hold a Screen Wake Lock, and every second check the host
 //!    is still heard and the microphone still live. A lost connection is
 //!    retried with backoff (at once when the page becomes visible or the
 //!    network returns) while recording goes on locally; on rejoin the take
@@ -32,8 +40,8 @@ use std::rc::Rc;
 
 use castcorder_protocol::rpc::{MessageChannel, RpcClient};
 use castcorder_protocol::{
-    Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, TakeId, TakeStatus,
-    TrackOffer,
+    Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, Role, RoomAction,
+    RoomState, TakeId, TakeStatus, TrackOffer,
 };
 use js_sys::{Array, Promise, Reflect, Uint8Array};
 use leptos::prelude::*;
@@ -88,6 +96,8 @@ struct Ctx {
     url: String,
     device: String,
     name: String,
+    /// The call password typed at Join (kept for every reconnect).
+    password: Option<String>,
 }
 
 /// Everything holding a JS handle, for the life of one join.
@@ -142,6 +152,9 @@ struct Engine {
     next_ping: f64,
     /// Device time (us) the latest "control" message arrived: t3 of a pong.
     rx_us: f64,
+    /// Producer requests awaiting their response (the panel shows it), and
+    /// whether each came from the debug control.
+    producer_requests: Vec<(RequestId, bool)>,
 }
 
 thread_local! {
@@ -250,6 +263,18 @@ struct Ui {
     errors: RwSignal<Vec<String>>,
     /// Problems that do not stop the call (e.g. no local recording).
     warning: RwSignal<String>,
+    /// The call password to present at Join.
+    password: RwSignal<String>,
+    /// This connection's role, from the host.
+    role: RwSignal<Role>,
+    /// The room as the host last told this producer.
+    room: RwSignal<Option<RoomState>>,
+    /// The host's take status, as text ("idle", "recording take N").
+    take: RwSignal<String>,
+    /// The last producer request's result.
+    producer_result: RwSignal<String>,
+    /// The last debug request's result.
+    debug_result: RwSignal<String>,
 }
 
 impl Ui {
@@ -911,9 +936,47 @@ fn pump_rpc(ui: Ui) {
                 None => e.pings.push(id),
             }
         }
+        for (id, debug) in std::mem::take(&mut e.producer_requests) {
+            let Some(r) = rpc.take_response(id) else {
+                e.producer_requests.push((id, debug));
+                continue;
+            };
+            let text = match r {
+                Response::TakeStartedAt { take, host_us }
+                | Response::TakeStoppedAt { take, host_us } => {
+                    format!("{{\"take\":{},\"hostUs\":{host_us}}}", take.0)
+                }
+                Response::Done => "done".into(),
+                Response::Link(Some(l)) => format!("new call link: {l}"),
+                Response::Link(None) => "call secret regenerated".into(),
+                Response::Room(s) => {
+                    ui.room.set(Some(s));
+                    continue;
+                }
+                Response::Error { message, .. } => format!("refused: {message}"),
+                other => format!("{other:?}"),
+            };
+            info!(call = %ctx.call, device = %ctx.device, result = %text, "producer request answered");
+            if debug {
+                ui.debug_result.set(text);
+            } else {
+                ui.producer_result.set(text);
+            }
+        }
         while let Some(ev) = rpc.next_event() {
-            if let Event::TakeStatusChanged(s) = ev {
-                statuses.push(s);
+            match ev {
+                Event::TakeStatusChanged(s) => statuses.push(s),
+                Event::Role(role) => {
+                    info!(call = %ctx.call, device = %ctx.device, producer = role.producer, host_machine = role.host_machine, "role");
+                    ui.role.set(role);
+                    if !role.producer {
+                        ui.room.set(None);
+                    } else if let Ok(id) = rpc.send(Request::GetRoom) {
+                        e.producer_requests.push((id, false));
+                    }
+                }
+                Event::Room(s) => ui.room.set(Some(s)),
+                Event::Meters(_) => {}
             }
         }
         (statuses, ctx)
@@ -940,6 +1003,10 @@ fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
     let current = with_engine(|e| {
         e.status = Some(s);
         e.recording
+    });
+    ui.take.set(match s {
+        TakeStatus::Idle => "idle".into(),
+        TakeStatus::Recording { take } => format!("recording take {}", take.0),
     });
     for c in on_take_status(current, s) {
         match c {
@@ -1204,6 +1271,7 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
         url: url.clone(),
         device,
         name: name.clone(),
+        password: Some(ui.password.get_untracked()).filter(|p| !p.is_empty()),
     };
     info!(call = %ctx.call, device = %ctx.device, name = %name, "joining");
     with_engine(|e| e.ctx = ctx.clone());
@@ -1248,28 +1316,74 @@ fn connect(ui: Ui, epoch: u32) {
         e.last_rx = 0.0;
         e.attempts
     });
-    ui.connection.set(if attempt == 0 {
-        "connecting".into()
-    } else {
-        format!("reconnecting... (attempt {attempt})")
-    });
+    // A guest waiting for a producer keeps saying so while it asks again.
+    if !ui.connection.get_untracked().starts_with("waiting") {
+        ui.connection.set(if attempt == 0 {
+            "connecting".into()
+        } else {
+            format!("reconnecting... (attempt {attempt})")
+        });
+    }
     spawn_local(async move {
         if let Err(err) = connect_once(ui, epoch, conn).await
             && !stale(epoch)
             && CONN_EPOCH.get() == conn
         {
             let why = describe(&err);
-            if why.starts_with(crate::mailbox::REJECTED) {
-                // The host refused this link (wrong call secret): retrying
-                // cannot help. Leave (a local track, if any, is kept).
+            if why.starts_with(crate::mailbox::REJECTED) && why.contains("waiting:") {
+                // A producer-gated call with no producer in it yet.
+                wait_for_producer(ui, epoch);
+            } else if why.starts_with(crate::mailbox::REJECTED) {
+                // The host refused this device (wrong call secret, kicked,
+                // locked, wrong password): retrying cannot help. Leave (a
+                // local track, if any, is kept).
                 ui.error("join", &err);
                 leave(ui);
-                ui.connection.set("rejected by the host".into());
+                ui.connection.set(refusal_state(&why).into());
             } else {
                 connection_lost(ui, epoch, &why);
             }
         }
     });
+}
+
+/// What the connection line says after the host refused this device.
+fn refusal_state(why: &str) -> &'static str {
+    if why.contains("kicked:") {
+        "removed from the call by a producer"
+    } else if why.contains("locked:") {
+        "the call is locked"
+    } else if why.contains("wrong_password:") {
+        "wrong password"
+    } else {
+        "rejected by the host"
+    }
+}
+
+/// How often a guest waiting for a producer asks again.
+const WAITING_RETRY_MS: i32 = 2500;
+
+/// The call is producer-gated and no producer is in it: say so and ask again
+/// shortly (not the reconnect backoff; recording, if any, goes on).
+fn wait_for_producer(ui: Ui, epoch: u32) {
+    if stale(epoch) || with_engine(|e| e.retry.is_some()) {
+        return;
+    }
+    let ctx = with_engine(|e| e.ctx.clone());
+    info!(call = %ctx.call, device = %ctx.device, "waiting for the host or a producer to join");
+    disconnect();
+    ui.connection
+        .set("waiting for the host or a producer to join".into());
+    let cb = Closure::once_into_js(move || {
+        with_engine(|e| e.retry = None);
+        if !stale(epoch) {
+            connect(ui, epoch);
+        }
+    });
+    let id = window()
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), WAITING_RETRY_MS)
+        .ok();
+    with_engine(|e| e.retry = id);
 }
 
 async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
@@ -1441,7 +1555,8 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
                 .map(|d| d.sdp())
                 .unwrap_or_else(|| string(&offer, "sdp"));
             info!(call = %ctx.call, device = %ctx.device, gathering = ?pc.ice_gathering_state(), "offer sealed to the host through the rendezvous");
-            mb.exchange(link, &ctx.name, &sdp).await?
+            mb.exchange(link, &ctx.name, &ctx.device, ctx.password.as_deref(), &sdp)
+                .await?
         }
         _ => direct_offer(&url, &ctx, &string(&offer, "sdp")).await?,
     };
@@ -1461,6 +1576,10 @@ async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue
     let body = object();
     set(&body, "type", "offer");
     set(&body, "sdp", sdp);
+    set(&body, "device", ctx.device.as_str());
+    if let Some(p) = &ctx.password {
+        set(&body, "password", p.as_str());
+    }
     let init = object();
     set(&init, "method", "POST");
     // text/plain keeps the request "simple": no CORS preflight.
@@ -1478,10 +1597,15 @@ async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue
     .await?;
     if !get(&resp, "ok").is_truthy() {
         let text = JsFuture::from(Promise::from(call(&resp, "text", &[])?)).await?;
-        return Err(JsValue::from_str(&format!(
-            "offer rejected: {}",
-            text.as_string().unwrap_or_default()
-        )));
+        let text = text.as_string().unwrap_or_default();
+        // 403 (refused) and 503 (waiting) are the room's decisions, coded
+        // like a refusal through the rendezvous; anything else is retried.
+        let status = num(&resp, "status") as u16;
+        return Err(JsValue::from_str(&if status == 403 || status == 503 {
+            format!("{}: {text}", crate::mailbox::REJECTED)
+        } else {
+            format!("offer rejected: {text}")
+        }));
     }
     let answer = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
     Ok(string(&answer, "sdp"))
@@ -1558,6 +1682,7 @@ fn connection_lost(ui: Ui, epoch: u32, reason: &str) {
         delay / 1000
     ));
     ui.participant.set(String::new());
+    ui.role.set(Role::default());
     let cb = Closure::once_into_js(move || {
         with_engine(|e| e.retry = None);
         if !stale(epoch) {
@@ -1778,6 +1903,7 @@ fn leave(ui: Ui) {
     ui.joined.set(false);
     ui.connection.set("left".into());
     ui.participant.set(String::new());
+    ui.role.set(Role::default());
     ui.level.set(0.0);
 }
 
@@ -1789,97 +1915,84 @@ fn db(x: f64) -> String {
     }
 }
 
-/// `method` on `path` of the page's own origin: the response text, or an
-/// error naming the path and the host's message.
-async fn host_request(method: &str, path: &str) -> Result<String, JsValue> {
-    let init = object();
-    set(&init, "method", method);
-    let resp = JsFuture::from(Promise::from(call(
-        &window(),
-        "fetch",
-        &[&JsValue::from_str(path), &init],
-    )?))
-    .await?;
-    let text = JsFuture::from(Promise::from(call(&resp, "text", &[])?)).await?;
-    let text = text.as_string().unwrap_or_default();
-    if get(&resp, "ok").is_truthy() {
-        Ok(text)
-    } else {
-        Err(JsValue::from_str(&format!("{path}: {text}")))
+/// Send a request on "control" for the producer panel (or, with `debug`, the
+/// hidden debug control); the answer lands in the panel's result line.
+fn producer_request(ui: Ui, request: Request, debug: bool) {
+    let sent = with_engine(|e| {
+        let rpc = e.rpc.as_mut()?;
+        let id = rpc.send(request).ok()?;
+        e.producer_requests.push((id, debug));
+        Some(())
+    });
+    if sent.is_none() {
+        let s = if debug {
+            ui.debug_result
+        } else {
+            ui.producer_result
+        };
+        s.set("not connected to the host".into());
     }
 }
 
-/// The producer controls (start and stop a take, the connected guests). The
-/// host decides who the producer is: `GET /role` says so only to a page loaded
-/// from the host machine's own localhost listener, and refuses the take and
-/// status endpoints to everyone else.
+/// The producer controls, shown only while the host says this connection is
+/// a producer (`Event::Role`): takes, lock, password, kick, regenerate link,
+/// and on the host machine's own page grant and revoke. Every control is a
+/// protocol request the host authorizes per device role.
 #[component]
-fn Producer() -> impl IntoView {
-    let producer = RwSignal::new(false);
-    let take = RwSignal::new(String::new());
-    let guests = RwSignal::new(Vec::<String>::new());
-    let result = RwSignal::new(String::new());
-    // A start or stop request in flight.
-    let busy = RwSignal::new(false);
-    let refresh = move || {
-        spawn_local(async move {
-            if let Ok(text) = host_request("GET", "/status").await
-                && let Ok(v) = js_sys::JSON::parse(&text)
-            {
-                take.set(string(&v, "take"));
-                guests.set(
-                    Array::from(&get(&v, "guests"))
-                        .iter()
-                        .filter_map(|g| g.as_string())
-                        .collect(),
-                );
-            }
-        })
-    };
-    spawn_local(async move {
-        let Ok(role) = host_request("GET", "/role").await else {
-            return;
-        };
-        if role.contains("\"producer\":true") {
-            producer.set(true);
-            refresh();
-            every(1000, refresh);
-        }
-    });
-    let post = move |path: &'static str| {
-        busy.set(true);
-        spawn_local(async move {
-            match host_request("POST", path).await {
-                Ok(t) => result.set(t),
-                Err(e) => result.set(describe(&e)),
-            }
-            busy.set(false);
-            refresh();
-        })
-    };
-    // Only the valid action is offered, from the take status the page polls.
-    let can_start = move || !busy.get() && take.get().starts_with("idle");
-    let can_stop = move || !busy.get() && take.get().starts_with("recording");
+fn Producer(ui: Ui) -> impl IntoView {
+    let take = ui.take;
+    let can_start = move || take.get().starts_with("idle");
+    let can_stop = move || take.get().starts_with("recording");
+    let room = move || ui.room.get();
+    let locked = move || room().is_some_and(|r| r.locked);
+    let new_password = RwSignal::new(String::new());
+    let act = move |a: RoomAction| producer_request(ui, Request::Room(a), false);
+    let rows = move || room().map(|r| r.participants).unwrap_or_default();
     view! {
-        <Show when=move || producer.get()>
+        <Show when=move || ui.role.get().producer>
             <h2>"Producer"</h2>
             <p>
-                <button id="take-start" disabled=move || !can_start() on:click=move |_| post("/take/start")>"Start take"</button>
+                <button id="take-start" disabled=move || !can_start() on:click=move |_| producer_request(ui, Request::StartTake, false)>"Start take"</button>
                 " "
-                <button id="take-stop" disabled=move || !can_stop() on:click=move |_| post("/take/stop")>"Stop take"</button>
+                <button id="take-stop" disabled=move || !can_stop() on:click=move |_| producer_request(ui, Request::StopTake, false)>"Stop take"</button>
                 " Take: " <span id="take-status">{move || take.get()}</span>
-                " " <code id="take-result">{move || result.get()}</code>
+                " " <code id="take-result">{move || ui.producer_result.get()}</code>
             </p>
-            <p>"Connected guests: " <span id="guest-count">{move || guests.get().len()}</span></p>
+            <p>
+                "Room: " <span id="room-locked">{move || if locked() { "locked" } else { "unlocked" }}</span>
+                ", " <span id="room-password">{move || if room().is_some_and(|r| r.password) { "password set" } else { "no password" }}</span>
+                ", " <span id="room-open">{move || if room().is_some_and(|r| r.open) { "always open" } else { "producer-gated" }}</span>
+                " "
+                <button id="lock" on:click=move |_| act(RoomAction::Lock(!locked()))>
+                    {move || if locked() { "Unlock" } else { "Lock" }}</button>
+                " Password " <input id="new-password" type="password" prop:value=move || new_password.get()
+                    on:input=move |ev| new_password.set(event_target_value(&ev)) />
+                <button id="set-password" on:click=move |_| act(RoomAction::SetPassword(Some(new_password.get_untracked())))>"Set"</button>
+                <button id="clear-password" on:click=move |_| act(RoomAction::SetPassword(None))>"Clear"</button>
+                " " <button id="regen-link" on:click=move |_| act(RoomAction::RegenerateLink)>"Regenerate link"</button>
+            </p>
+            <p>"Call link: " <code id="call-link">{move || room().and_then(|r| r.link).unwrap_or_else(|| "(LAN only)".into())}</code></p>
+            <p>"Connected guests: " <span id="guest-count">{move || rows().len()}</span></p>
             <ul id="guests">
-                <For each=move || guests.get() key=|g| g.clone() let:g>
-                    <li>{g}</li>
+                <For each=rows key=|p| format!("{}{}{}", p.participant.0, p.producer, p.trusted) let:p>
+                    <li data-name=p.name.clone() data-participant=p.participant.0.to_string()>
+                        {format!("{} (guest {}){}{}{}", p.name, p.participant.0,
+                            if p.host_machine { " [host machine]" } else { "" },
+                            if p.producer && !p.host_machine { " [producer]" } else { "" },
+                            if p.trusted { " [trusted]" } else { " [untrusted]" })}
+                        <Show when=move || !p.host_machine>
+                            " " <button class="kick" on:click=move |_| act(RoomAction::Kick { participant: p.participant })>"Kick"</button>
+                        </Show>
+                        <Show when=move || ui.role.get().host_machine && !p.host_machine && p.trusted>
+                            " " <button class="grant" on:click=move |_| act(RoomAction::SetProducer { participant: p.participant, producer: !p.producer })>
+                                {if p.producer { "Revoke producer" } else { "Make producer" }}</button>
+                        </Show>
+                    </li>
                 </For>
             </ul>
         </Show>
     }
 }
-
 #[component]
 fn App() -> impl IntoView {
     let origin = window().location().origin().unwrap_or_default();
@@ -1907,6 +2020,12 @@ fn App() -> impl IntoView {
         inbound_json: RwSignal::new("[]".into()),
         errors: RwSignal::new(Vec::new()),
         warning: RwSignal::new(String::new()),
+        password: RwSignal::new(String::new()),
+        role: RwSignal::new(Role::default()),
+        room: RwSignal::new(None),
+        take: RwSignal::new(String::new()),
+        producer_result: RwSignal::new(String::new()),
+        debug_result: RwSignal::new(String::new()),
     };
     if bad_link {
         ui.warning
@@ -1944,6 +2063,8 @@ fn App() -> impl IntoView {
         <p>
             "Name " <input id="name" placeholder=placeholder prop:value=move || ui.name.get()
                 on:input=move |ev| ui.name.set(event_target_value(&ev)) />
+            " Password " <input id="password" type="password" placeholder="if the call has one" prop:value=move || ui.password.get()
+                on:input=move |ev| ui.password.set(event_target_value(&ev)) />
             " Host " <input id="signal" size="50" prop:value=move || ui.signal_url.get()
                 on:input=move |ev| ui.signal_url.set(event_target_value(&ev)) />
         </p>
@@ -1951,7 +2072,13 @@ fn App() -> impl IntoView {
             <button id="join" disabled=move || ui.joined.get() on:click=on_join>"Join"</button>
             <button id="leave" disabled=move || !ui.joined.get() on:click=move |_| leave(ui)>"Leave"</button>
         </p>
-        <Producer/>
+        <Producer ui=ui/>
+        <p hidden>
+            // Debug: send StartTake whatever the role (the host must refuse a
+            // non-producer on the control channel).
+            <button id="debug-start-take" on:click=move |_| producer_request(ui, Request::StartTake, true)>"debug start take"</button>
+            <code id="debug-result">{move || ui.debug_result.get()}</code>
+        </p>
         <p id="warning" style="color: #a40; font-weight: bold" hidden=move || ui.warning.get().is_empty()>
             {move || ui.warning.get()}</p>
         <p>"Connection: " <span id="state">{move || ui.connection.get()}</span>

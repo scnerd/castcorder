@@ -138,6 +138,13 @@ pub struct OfferPlain {
     pub name: String,
     /// The WebRTC offer SDP.
     pub sdp: String,
+    /// The guest's device id (stable per browser profile or install); the
+    /// host bans, trusts and grants roles by it.
+    #[serde(default)]
+    pub device: String,
+    /// The call's password, if the guest typed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 /// What the host seals back: an answer SDP, or why the guest was refused.
@@ -198,5 +205,8 @@ mod tests {
             r#"{"rejected":"no"}"#
         );
         assert_eq!(unb64(&b64(b"\x00\xff")), Some(vec![0, 255]));
+        // An offer from an older page (no device, no password) still parses.
+        let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
+        assert_eq!((old.device.as_str(), old.password), ("", None));
     }
 }

@@ -198,7 +198,9 @@ try {
   // cannot send to a WSL2 VM address).
   const HOST_IP = await localAddressToward(TURN_IP, TURN_PORT);
   host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--call', 'relay-test', '--bind', HOST_IP,
-    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP, '--relay-only'], 'host');
+    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP, '--relay-only',
+    // Always open: no producer joins here (takes go through the host machine's HTTP endpoint).
+    '--open'], 'host');
   const [, HTTP] = await line(host, /HOST_READY http=(\S+)/, 'HOST_READY');
   const link = (await line(host, /CALL_LINK (\S+)/, 'CALL_LINK'))[1];
   const alloc = await waitFor(() => host.err.match(/turn allocation created relayed=(\S+)/), 'host TURN allocation', 30000);

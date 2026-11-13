@@ -4,7 +4,9 @@
 //! - The host key (Ed25519; the host id is its public key) is made on first
 //!   run and kept in the library root (`host-identity.key`, base64url secret).
 //! - Each call has a call secret, made on first use and kept in
-//!   `<library>/<call>/call-secret`; delete that file to regenerate the link.
+//!   `<library>/<call>/call-secret`. A producer regenerates it (protocol
+//!   `RoomAction::RegenerateLink`, [`regenerate_secret`]): guests in the call
+//!   stay, new joins need the new link.
 //! - A thread holds a WebSocket to `<rendezvous>/ws`, registers by signing
 //!   the server's nonce, and answers each sealed offer: open it with the host
 //!   key, check the call secret (wrong secret = rejected), then the same
@@ -20,7 +22,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -59,6 +61,49 @@ pub fn host_key(dir: &Path) -> io::Result<HostKey> {
     Ok(key)
 }
 
+/// The call secret, shared by the rendezvous thread (which checks offers
+/// against it) and the host thread (which rotates it on "regenerate link").
+pub type SharedSecret = Arc<Mutex<CallSecret>>;
+
+/// Rotate the call's secret: write a fresh one to `call_dir` and make it the
+/// one offers are checked against. Guests already in the call stay; new
+/// joins need the new link.
+pub fn regenerate_secret(call_dir: &Path, shared: &SharedSecret) -> io::Result<CallSecret> {
+    let secret = CallSecret(random()?);
+    std::fs::create_dir_all(call_dir)?;
+    std::fs::write(
+        call_dir.join("call-secret"),
+        format!("{}\n", secret.encode()),
+    )?;
+    *shared
+        .lock()
+        .map_err(|_| io::Error::other("call secret lock poisoned"))? = secret.clone();
+    info!(call_dir = %call_dir.display(), "call secret regenerated: the old call link no longer admits anyone");
+    Ok(secret)
+}
+
+/// What a call link is made of besides the secret.
+#[derive(Clone)]
+pub struct LinkBase {
+    /// The rendezvous base URL.
+    pub base: String,
+    /// The host id.
+    pub host: castcorder_link::HostId,
+    /// The client version links pin.
+    pub version: String,
+}
+
+impl LinkBase {
+    /// The call link for `secret`.
+    pub fn link(&self, secret: &CallSecret) -> String {
+        CallLink {
+            host: self.host,
+            secret: secret.clone(),
+        }
+        .url(&self.base, &self.version)
+    }
+}
+
 /// Load the call's secret from `call_dir`, making one first if there is none.
 pub fn call_secret(call_dir: &Path) -> io::Result<CallSecret> {
     let path = call_dir.join("call-secret");
@@ -78,8 +123,8 @@ pub struct Config {
     pub base: String,
     /// The host key.
     pub key: HostKey,
-    /// The call secret.
-    pub secret: CallSecret,
+    /// The call secret (rotated by the host thread).
+    pub secret: SharedSecret,
     /// The client version links pin.
     pub version: String,
 }
@@ -87,11 +132,24 @@ pub struct Config {
 impl Config {
     /// The call link guests open.
     pub fn link(&self) -> String {
-        CallLink {
-            host: self.key.id(),
-            secret: self.secret.clone(),
+        self.link_base().link(&self.secret())
+    }
+
+    /// The current call secret.
+    pub fn secret(&self) -> CallSecret {
+        match self.secret.lock() {
+            Ok(s) => s.clone(),
+            Err(p) => p.into_inner().clone(),
         }
-        .url(&self.base, &self.version)
+    }
+
+    /// The parts of the link that never change.
+    pub fn link_base(&self) -> LinkBase {
+        LinkBase {
+            base: self.base.clone(),
+            host: self.key.id(),
+            version: self.version.clone(),
+        }
     }
 }
 
@@ -332,8 +390,9 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
     };
     let result = match serde_json::from_slice::<OfferPlain>(&plain) {
         Err(e) => AnswerPlain::Rejected(format!("bad offer: {e}")),
-        Ok(o) if !cfg.secret.admits(&o.secret) => {
+        Ok(o) if !cfg.secret().admits(&o.secret) => {
             warn!(guest_conn = from, "offer rejected: wrong call secret");
+            crate::room::decision(&o.device, "guest", "enter", false, "wrong call secret");
             AnswerPlain::Rejected("wrong call secret (ask the host for a fresh link)".into())
         }
         Ok(o) => {
@@ -343,6 +402,9 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
             let sent = tx.send(Command::Offer {
                 name,
                 offer_sdp: o.sdp,
+                device: o.device,
+                password: o.password,
+                at_host: false,
                 reply: reply_tx,
             });
             match sent
@@ -440,7 +502,7 @@ mod tests {
         let cfg = Config {
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
-            secret: CallSecret([7; 16]),
+            secret: Arc::new(Mutex::new(CallSecret([7; 16]))),
             version: "0.0.0".into(),
         };
         let (tx, rx) = mpsc::channel();
@@ -449,6 +511,8 @@ mod tests {
                 secret: secret.encode(),
                 name: "B!".into(),
                 sdp: "v=0".into(),
+                device: "dev-b".into(),
+                password: Some("pw".into()),
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -472,9 +536,20 @@ mod tests {
             Command::Offer {
                 name,
                 offer_sdp,
+                device,
+                password,
+                at_host,
                 reply,
             } => {
                 assert_eq!((name.as_str(), offer_sdp.as_str()), ("B", "v=0"));
+                assert_eq!(
+                    (device.as_str(), password.as_deref()),
+                    ("dev-b", Some("pw"))
+                );
+                assert!(
+                    !at_host,
+                    "an offer through the rendezvous is never at the host"
+                );
                 reply.send(Ok("answer-sdp".into())).unwrap();
             }
             _ => panic!("expected an offer"),
@@ -482,5 +557,46 @@ mod tests {
         let a = answer(&cfg, &tx, 6, &b64(&sealed)).unwrap();
         host.join().unwrap();
         assert_eq!(open(&guest, &a), AnswerPlain::Sdp("answer-sdp".into()));
+    }
+
+    /// Regenerating the link: the old secret no longer admits, the new one
+    /// does, and the file holds the new one (so it survives a restart).
+    #[test]
+    fn regenerated_link_rotates_the_secret() {
+        let dir = std::env::temp_dir().join(format!("castcorder-rv-rot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = call_secret(&dir).unwrap();
+        let cfg = Config {
+            base: "http://127.0.0.1:1".into(),
+            key: HostKey::from_secret([3; 32]),
+            secret: Arc::new(Mutex::new(old.clone())),
+            version: "0.0.0".into(),
+        };
+        let old_link = cfg.link();
+        let new = regenerate_secret(&dir, &cfg.secret).unwrap();
+        assert_ne!(new, old);
+        assert!(!cfg.secret().admits(&old.encode()));
+        assert!(cfg.secret().admits(&new.encode()));
+        assert_eq!(call_secret(&dir).unwrap(), new);
+        assert_ne!(cfg.link(), old_link);
+        assert_eq!(cfg.link(), cfg.link_base().link(&new));
+        // A guest with the old link is rejected through the real sealing.
+        let (tx, rx) = mpsc::channel();
+        let plain = OfferPlain {
+            secret: old.encode(),
+            name: "B".into(),
+            sdp: "v=0".into(),
+            device: "dev-b".into(),
+            password: None,
+        };
+        let (sealed, guest) =
+            castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())
+                .unwrap();
+        let a = answer(&cfg, &tx, 7, &b64(&sealed)).unwrap();
+        let r: AnswerPlain =
+            serde_json::from_slice(&guest.open_reply(&unb64(&a).unwrap()).unwrap()).unwrap();
+        assert!(matches!(r, AnswerPlain::Rejected(w) if w.contains("wrong call secret")));
+        assert!(rx.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
