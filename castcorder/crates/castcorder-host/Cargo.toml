@@ -47,12 +47,10 @@ rustls = { version = "0.23", default-features = false, features = [
 # Native capture for the host's own participant (--participate): GStreamer, so
 # off by default; `task check` builds without it, `task host` turns it on.
 castcorder-capture-gst = { workspace = true, optional = true }
-castcorder-port-capture = { workspace = true, optional = true }
-castcorder-recorder = { workspace = true, optional = true }
+castcorder-port-capture.workspace = true
+castcorder-recorder.workspace = true
+# Ctrl+C finalises an in-progress take of the host microphone before exit.
+ctrlc = { version = "3", optional = true }
 
 [features]
-native-capture = [
-  "dep:castcorder-capture-gst",
-  "dep:castcorder-port-capture",
-  "dep:castcorder-recorder",
-]
+native-capture = ["dep:castcorder-capture-gst", "dep:ctrlc"]

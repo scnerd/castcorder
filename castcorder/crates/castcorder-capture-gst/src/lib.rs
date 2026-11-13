@@ -178,17 +178,21 @@ struct LiveState {
     got_data: bool,
 }
 
-fn appsink_caps() -> gst::Caps {
+/// Sample formats a device capture tries, in order: integer S24LE, then S16LE
+/// (so the take converts to FLAC), then whatever the device delivers (F32).
+const DEVICE_FORMATS: [&[&str]; 3] = [&["S24LE"], &["S16LE"], &["S16LE", "S24LE", "F32LE"]];
+
+fn appsink_caps(formats: &[&str]) -> gst::Caps {
     gst::Caps::builder("audio/x-raw")
-        .field("format", gst::List::new(["S16LE", "S24LE", "F32LE"]))
+        .field("format", gst::List::new(formats.iter().copied()))
         .field("layout", "interleaved")
         .build()
 }
 
-fn build_sink() -> io::Result<gst_app::AppSink> {
+fn build_sink(formats: &[&str]) -> io::Result<gst_app::AppSink> {
     let sink = gst_app::AppSink::builder()
         .name("sink")
-        .caps(&appsink_caps())
+        .caps(&appsink_caps(formats))
         .sync(false)
         .build();
     Ok(sink)
@@ -240,7 +244,7 @@ impl GstCapture {
             .add_many([&file, &parse])
             .map_err(|e| err(e.to_string()))?;
         file.link(&parse).map_err(|e| err(format!("link: {e}")))?;
-        let sink = build_sink()?;
+        let sink = build_sink(&["S16LE", "S24LE", "F32LE"])?;
         // A file may be read ahead only a little: block upstream instead of buffering it all.
         sink.set_max_buffers(32);
         let opus = Self::assemble(&pipeline, &parse, &sink, live)?;
@@ -290,10 +294,39 @@ impl GstCapture {
         Ok((cap, opus.ok_or_else(|| err("live branch missing"))?))
     }
 
+    /// Open the device pinned to the best sample format it offers: S24LE,
+    /// then S16LE, then whatever it delivers (F32), each attempt a fresh
+    /// pipeline. The negotiated format is logged.
     fn open_device_inner(
         name: Option<&str>,
         watchdog: Watchdog,
         live_opts: Option<&LiveOptions>,
+    ) -> io::Result<(Self, Option<LiveOpus>)> {
+        let mut last = None;
+        for formats in DEVICE_FORMATS {
+            match Self::open_device_once(name, watchdog, live_opts, formats) {
+                Ok(c) => {
+                    tracing::info!(
+                        wanted = ?formats,
+                        negotiated = ?c.0.format.sample_format,
+                        "capture format negotiated (S24LE, then S16LE preferred; F32 when the device offers no integer format)"
+                    );
+                    return Ok(c);
+                }
+                Err(e) => {
+                    tracing::info!(wanted = ?formats, error = %e, "device does not deliver this format");
+                    last = Some(e);
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| err("no capture format")))
+    }
+
+    fn open_device_once(
+        name: Option<&str>,
+        watchdog: Watchdog,
+        live_opts: Option<&LiveOptions>,
+        formats: &[&str],
     ) -> io::Result<(Self, Option<LiveOpus>)> {
         init()?;
         let monitor = gst::DeviceMonitor::new();
@@ -337,7 +370,7 @@ impl GstCapture {
         );
 
         let pipeline = gst::Pipeline::new();
-        let sink = build_sink()?;
+        let sink = build_sink(formats)?;
         // Never block a live device on a slow reader: let the queue grow.
         sink.set_max_buffers(0);
         let opus = Self::assemble(&pipeline, &src, &sink, live_opts)?;

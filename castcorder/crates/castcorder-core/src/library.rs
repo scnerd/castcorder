@@ -144,6 +144,49 @@ pub fn parse_manifest(buf: &[u8]) -> (BTreeMap<(String, String), ManifestEntry>,
     (entries, valid)
 }
 
+/// A finished file the host wrote itself, ready for [`Library::record_local`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalItem {
+    /// The item's name on the device (unique per device and take).
+    pub name: String,
+    /// The file's name in the take directory.
+    pub file: String,
+    /// The file format as an extension (`wav`, `timing.jsonl`).
+    pub format: String,
+    /// Exact size in bytes.
+    pub size: u64,
+    /// BLAKE3 root of the whole file.
+    pub root: [u8; 32],
+}
+
+/// Read the whole file `file` in `dir` and describe it as an item `name`:
+/// the verification of a host-written track at finalize.
+pub fn hash_local_item<S: Storage>(
+    dir: &S,
+    name: &str,
+    file: &str,
+    format: &str,
+) -> io::Result<LocalItem> {
+    let mut f = dir.open(file)?;
+    let size = f.len()?;
+    let mut hasher = castcorder_transfer::blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut at = 0u64;
+    while at < size {
+        let n = ((size - at) as usize).min(buf.len());
+        castcorder_transfer::io::read_exact_at(&mut f, at, &mut buf[..n])?;
+        hasher.update(&buf[..n]);
+        at += n as u64;
+    }
+    Ok(LocalItem {
+        name: name.into(),
+        file: file.into(),
+        format: format.into(),
+        size,
+        root: *hasher.finalize().as_bytes(),
+    })
+}
+
 /// The directory of a take; take 0 (logs) is `logs`.
 fn take_dir_name(take: TakeId) -> String {
     if take.0 == 0 {
@@ -330,6 +373,78 @@ impl<S: Storage> Library<S> {
             size = offer.size, root = %hex(&offer.root), "track offered; recorded in manifest");
         t.entries.insert(key, e.clone());
         Ok(e)
+    }
+
+    /// Record a finished track the host itself wrote (its own microphone, and
+    /// that track's timing file) as an item of `device` (the host's own id),
+    /// exactly as a guest's item: `Offered`, then `Verified`. `item` comes
+    /// from [`hash_local_item`], which is the verifying: a read of the whole
+    /// file. Recording the same unchanged item again returns the entry; a
+    /// changed file under the same name is an error (a verified item never
+    /// changes).
+    pub fn record_local(
+        &mut self,
+        device: &str,
+        participant: &str,
+        take: TakeId,
+        source: &str,
+        item: &LocalItem,
+    ) -> io::Result<ManifestEntry> {
+        let call = self.call.clone();
+        let t = self.take(take)?;
+        let offer = TrackOffer {
+            device: device.into(),
+            take,
+            source: castcorder_protocol::SourceId(source.into()),
+            kind: SourceKind::Audio,
+            name: item.name.clone(),
+            size: item.size,
+            root: item.root,
+            format: item.format.clone(),
+        };
+        let key = (device.to_string(), item.name.clone());
+        if let Some(e) = t.entries.get(&key) {
+            if e.offer.root != item.root {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "local track changed after it was recorded in the manifest",
+                ));
+            }
+        } else {
+            if t.entries.values().any(|e| e.file == item.file) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "file already belongs to another manifest item",
+                ));
+            }
+            t.append(&Record::Offered {
+                offer: offer.clone(),
+                participant: participant.into(),
+                file: item.file.clone(),
+            })?;
+            t.entries.insert(
+                key.clone(),
+                ManifestEntry {
+                    offer,
+                    participant: participant.into(),
+                    file: item.file.clone(),
+                    verified: false,
+                },
+            );
+        }
+        let e = t.entries.get_mut(&key).expect("inserted above");
+        if !e.verified {
+            e.verified = true;
+            let rec = Record::Verified {
+                root: hex(&item.root),
+                device: Some(device.into()),
+                name: Some(item.name.clone()),
+            };
+            t.append(&rec)?;
+        }
+        info!(call = %call, device, take = take.0, track = %item.file, size = item.size,
+            root = %hex(&item.root), "host track recorded in manifest (verified at finalize)");
+        Ok(t.entries[&key].clone())
     }
 
     /// The manifest entry of a track, if it was offered.
