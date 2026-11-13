@@ -125,3 +125,29 @@ fn sync_dir_covers_only_its_own_directory() {
     assert_eq!(disk.list().unwrap(), vec!["top"]);
     assert!(sub.list().unwrap().is_empty());
 }
+
+#[test]
+fn renames_need_sync_dir_to_survive() {
+    let disk = SimDisk::new(9);
+    let put = |name: &str, data: &[u8]| {
+        let mut f = disk.open(name).unwrap();
+        f.write_at(0, data).unwrap();
+        f.sync().unwrap();
+    };
+    put("final", b"old");
+    disk.sync_dir().unwrap();
+    put("final.part", b"new");
+    disk.sync_dir().unwrap();
+    disk.rename("final.part", "final").unwrap();
+    // No sync_dir yet: the old state comes back.
+    disk.crash();
+    assert_eq!(disk.list().unwrap(), vec!["final", "final.part"]);
+    assert_eq!(contents(&disk, "final"), b"old");
+    assert_eq!(contents(&disk, "final.part"), b"new");
+    // With sync_dir the rename is durable and the part name is gone.
+    disk.rename("final.part", "final").unwrap();
+    disk.sync_dir().unwrap();
+    disk.crash();
+    assert_eq!(disk.list().unwrap(), vec!["final"]);
+    assert_eq!(contents(&disk, "final"), b"new");
+}

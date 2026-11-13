@@ -852,14 +852,16 @@ async function identityChecks() {
     const post = async (body) => (await fetch('/offer?name=I', { method: 'POST', body: JSON.stringify(body) })).status;
     const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n';
     const unsigned = await post({ type: 'offer', sdp, device: mId });
-    // A correct signature (castcorder-link identity::offer_message, LAN
-    // audience, no alias) by the impostor's own key, claiming M's id.
+    // A correct signature (castcorder-link identity::offer_message, the
+    // host id from GET /role as audience, no alias) by the impostor's own
+    // key, claiming M's id.
+    const host = (await (await fetch('/role')).json()).host;
     const pair = await crypto.subtle.generateKey({ name: 'Ed25519' }, false, ['sign', 'verify']);
     const key = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
     const ts = Date.now();
     const enc = new TextEncoder();
     const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(sdp)));
-    const parts = [enc.encode('castcorder-link device offer v1\0lan\0'), key, enc.encode('\0' + ts + '\0'), hash];
+    const parts = [enc.encode('castcorder-link device offer v1\0' + host + '\0'), key, enc.encode('\0' + ts + '\0'), hash];
     const msg = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
     let o = 0;
     for (const p of parts) { msg.set(p, o); o += p.length; }

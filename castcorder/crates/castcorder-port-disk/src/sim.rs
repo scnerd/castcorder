@@ -158,6 +158,31 @@ impl Storage for SimDisk {
         }
     }
 
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let (from_key, to_key) = (self.key(from)?, self.key(to)?);
+        let mut s = self.lock();
+        let mut moved = s.files.remove(&from_key).ok_or(io::ErrorKind::NotFound)?;
+        if from_key == to_key {
+            s.files.insert(to_key, moved);
+            return Ok(());
+        }
+        // The old name comes back after a crash unless `sync_dir` ran; so does
+        // whatever the new name replaced.
+        if moved.entry_durable {
+            s.ghosts
+                .insert(from_key, moved.durable.clone().unwrap_or_default());
+        }
+        if let Some(old) = s.files.remove(&to_key)
+            && old.entry_durable
+        {
+            s.ghosts
+                .insert(to_key.clone(), old.durable.unwrap_or_default());
+        }
+        moved.entry_durable = false;
+        s.files.insert(to_key, moved);
+        Ok(())
+    }
+
     fn list(&self) -> io::Result<Vec<String>> {
         // BTreeMap keys are already sorted, and a common prefix keeps that order.
         Ok(self

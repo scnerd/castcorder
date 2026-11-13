@@ -45,6 +45,13 @@ pub trait Storage: Send + Sync {
     fn exists(&self, name: &str) -> io::Result<bool>;
     /// Delete a file. Fails with `NotFound` if it does not exist.
     fn remove(&self, name: &str) -> io::Result<()>;
+    /// Rename `from` to `to` in this directory, replacing `to` if it exists. Fails
+    /// with `NotFound` if `from` does not exist. Contents, synced or not, move
+    /// with the file. Like a create and a remove, the rename survives a crash
+    /// only once [`Storage::sync_dir`] has run: before that a crash may bring
+    /// back the old name (and the file it replaced) instead. Renaming a file
+    /// that still has an open handle is unspecified (Windows refuses it).
+    fn rename(&self, from: &str, to: &str) -> io::Result<()>;
     /// The names of every file directly in this directory (not in subdirectories),
     /// sorted.
     fn list(&self) -> io::Result<Vec<String>>;

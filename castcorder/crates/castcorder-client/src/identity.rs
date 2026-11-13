@@ -68,8 +68,8 @@ pub async fn device() -> Result<Device, JsValue> {
     })
 }
 
-/// Sign an offer of `sdp` to `audience` (the host id, or
-/// [`identity::LAN`]) with this profile's key.
+/// Sign an offer of `sdp` to `audience` (the host id, encoded: from the call
+/// link, or from the LAN host's `GET /role`) with this profile's key.
 pub async fn prove(d: &Device, audience: &str, sdp: &str) -> Result<DeviceProof, JsValue> {
     let ts = js_sys::Date::now() as u64;
     let msg = identity::offer_message(audience, &d.key, d.alias.as_deref(), ts, sdp);

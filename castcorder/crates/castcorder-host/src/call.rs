@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
-use castcorder_core::safety::SafetyRecorder;
+use castcorder_core::safety::{self, SafetyRecorder, SafetyWriter};
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
@@ -40,8 +40,8 @@ pub enum Command {
         /// The device key proof (castcorder-link `identity`); checked before
         /// any room decision.
         proof: Option<castcorder_link::DeviceProof>,
-        /// What the proof must be signed for: the host id through a
-        /// rendezvous, `identity::LAN` on the host's own listener.
+        /// What the proof must be signed for: this host's id (encoded),
+        /// through a rendezvous and on the host's own listener alike.
         audience: String,
         /// The offer came from the host machine itself (the localhost page).
         at_host: bool,
@@ -95,6 +95,12 @@ pub enum Command {
     LocalTracksDone {
         /// The take.
         take: TakeId,
+    },
+    /// The host is exiting (Ctrl+C): finish every safety track and stop
+    /// their writer thread.
+    Shutdown {
+        /// Told once the safety tracks are finished.
+        done: mpsc::Sender<()>,
     },
     /// One Opus frame of the host's own participant (`--participate`).
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
@@ -155,8 +161,9 @@ pub struct Call {
     participant: Option<Participant>,
     local: Option<LocalAudio>,
     timeline: HostTimeline<SystemClock>,
-    /// Each guest's live Opus stream, kept per take (safety tracks).
-    safety: SafetyRecorder<FsStorage>,
+    /// Each guest's live Opus stream, kept per take (safety tracks), written
+    /// and synced on their own thread, never this one.
+    safety: SafetyWriter<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
     align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
     /// Room security: admission, roles, producer actions.
@@ -227,7 +234,10 @@ impl Call {
         last_take: u32,
         timeline: HostTimeline<SystemClock>,
     ) -> Self {
-        let safety = SafetyRecorder::new(library.call(), timeline.id());
+        let safety = SafetyWriter::spawn(
+            SafetyRecorder::new(library.call(), timeline.id()),
+            safety::DEFAULT_CAPACITY,
+        );
         Self {
             safety,
             status: TakeStatus::Idle,
@@ -512,9 +522,7 @@ impl Call {
         info!(call = %self.library.call(), take = take.0, host_us, "take started");
         match self.library.take_dir(take) {
             Ok(dir) => {
-                if let Err(e) = self.safety.start_take(take.0, dir) {
-                    warn!(take = take.0, error = %e, "no safety directory; safety tracks not kept");
-                }
+                self.safety.start_take(take.0, dir.clone());
                 if let Some(p) = &self.participant {
                     let _ = p.takes.send(TakeCtl::Start {
                         take,
@@ -781,12 +789,13 @@ impl Call {
                 let verified =
                     self.room
                         .verify(&device, proof.as_ref(), &audience, &offer_sdp, now_ms);
-                // Binding an alias changes room.json.
-                self.save_room();
                 let device = verified.clone().unwrap_or(device);
-                let r = match verified
-                    .and_then(|d| self.room.admit(&d, at_host, password.as_deref()))
-                {
+                // The old id the signature covers (migration from pre-key ids).
+                let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
+                let r = match verified.and_then(|d| {
+                    self.room
+                        .admit_offer(&d, alias, at_host, password.as_deref())
+                }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     Ok(Admission::Enter) => {
@@ -794,7 +803,14 @@ impl Call {
                     }
                 };
                 let r = r.map(|(id, answer)| {
+                    // Admitted and accepted: only now may it take over an
+                    // old id's record (a refused or waiting offer binds
+                    // nothing). Binding changes room.json.
+                    if let Some(old) = alias {
+                        self.room.bind_alias(old, &device);
+                    }
                     self.room.accepted(id.0, &device, at_host);
+                    self.save_room();
                     if let Some(ch) = host.control(id) {
                         self.rpc.insert(id, RpcServer::new(ch));
                     }
@@ -855,6 +871,11 @@ impl Call {
             Command::LocalTracksDone { take } => {
                 self.local_busy.remove(&take.0);
                 self.align_completed(vec![take]);
+            }
+            Command::Shutdown { done } => {
+                info!("host exiting: finishing safety tracks");
+                self.safety.close();
+                let _ = done.send(());
             }
             Command::LocalAudio { rtp_time, data } => {
                 if let Some(local) = &self.local {

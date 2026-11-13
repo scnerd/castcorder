@@ -48,9 +48,9 @@
 //! long the take. FLAC output is encoded incrementally
 //! ([`FlacWriter`](castcorder_recorder::FlacWriter)); WAV output is RF64 when
 //! its data would pass [`AlignConfig::rf64_threshold`] (just under 4 GiB, about
-//! 3 hours of 48 kHz stereo float). The output file is written in place: if
-//! rendering fails midway the track file is partial, and
-//! `takeNN_alignment.json`, written last, is absent.
+//! 3 hours of 48 kHz stereo float). Each aligned track is rendered under a
+//! temporary `.part` name and renamed into place when whole; if rendering fails the
+//! partial file is removed, and `takeNN_alignment.json`, written last, is absent.
 
 mod model;
 mod output;
@@ -818,44 +818,61 @@ pub fn align_take<S: Storage>(dir: &S, cfg: &AlignConfig) -> io::Result<TakeSumm
             description: &description,
             reference: &t.found.base,
         };
-        let file = out_dir.open(&name)?;
-        let mut sink = if flac {
-            TrackSink::flac(file, t.channels, t.format, &stamp)?
-        } else {
-            TrackSink::wav(
-                file,
-                t.channels,
-                t.format,
-                n_out as u64,
-                cfg.rf64_threshold,
-                &stamp,
-            )?
-        };
-        let grid = Grid {
-            t0,
-            rate: r,
-            n_out: n_out as i64,
-            mode: cfg.mode,
-        };
-        let mut sources = t
-            .segs
-            .iter()
-            .map(|m| SegSource::open(dir, m, usize::from(t.channels)))
-            .collect::<io::Result<Vec<_>>>()?;
-        let mut planes = vec![vec![0f32; BLOCK]; usize::from(t.channels)];
-        let mut b0 = 0usize;
-        while b0 < n_out {
-            let len = BLOCK.min(n_out - b0);
-            for p in &mut planes {
-                p[..len].fill(0.0);
-            }
-            for s in &mut sources {
-                s.render_block(&mut planes, b0 as i64, len as i64, &grid)?;
-            }
-            sink.write(&planes, len)?;
-            b0 += len;
+        let tmp = format!("{name}.part");
+        // A part file left by an earlier crash would leave stale bytes past
+        // the end of a shorter render.
+        if out_dir.exists(&tmp)? {
+            out_dir.remove(&tmp)?;
         }
-        sink.finish()?;
+        let render = || -> io::Result<()> {
+            let file = out_dir.open(&tmp)?;
+            let mut sink = if flac {
+                TrackSink::flac(file, t.channels, t.format, &stamp)?
+            } else {
+                TrackSink::wav(
+                    file,
+                    t.channels,
+                    t.format,
+                    n_out as u64,
+                    cfg.rf64_threshold,
+                    &stamp,
+                )?
+            };
+            let grid = Grid {
+                t0,
+                rate: r,
+                n_out: n_out as i64,
+                mode: cfg.mode,
+            };
+            let mut sources = t
+                .segs
+                .iter()
+                .map(|m| SegSource::open(dir, m, usize::from(t.channels)))
+                .collect::<io::Result<Vec<_>>>()?;
+            let mut planes = vec![vec![0f32; BLOCK]; usize::from(t.channels)];
+            let mut b0 = 0usize;
+            while b0 < n_out {
+                let len = BLOCK.min(n_out - b0);
+                for p in &mut planes {
+                    p[..len].fill(0.0);
+                }
+                for s in &mut sources {
+                    s.render_block(&mut planes, b0 as i64, len as i64, &grid)?;
+                }
+                sink.write(&planes, len)?;
+                b0 += len;
+            }
+            sink.finish()
+        };
+        // Write under a temporary name; the final name only ever holds a whole
+        // track. The handles are closed by now.
+        match render() {
+            Ok(()) => out_dir.rename(&tmp, &name)?,
+            Err(e) => {
+                let _ = out_dir.remove(&tmp);
+                return Err(e);
+            }
+        }
         let offset_s = seg_sum.first().map_or(0.0, |s| s.start_s);
         info!(take, track = %name, offset_s, drift_ppm, clock_offset_us = t.clock.offset_us,
             clock_drift_ppm = t.clock.drift_ppm, segments = seg_sum.len(), gaps = gaps.len(),

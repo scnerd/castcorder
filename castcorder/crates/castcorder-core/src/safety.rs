@@ -32,9 +32,26 @@
 //! (the host stamps arrival; the least-delayed arrival per second wins, as in
 //! [`RefPoints`]). Aligning a safety track later is then the same as for any
 //! other track. [`read_ogg_opus`] reads a file back (tests, tools).
+//!
+//! # Off the network thread
+//!
+//! The host's network thread answers clock pings, and their delay is error,
+//! so it never writes or syncs a safety track itself: [`SafetyWriter`] hands
+//! every packet (stamped with its arrival time there) to a writer thread
+//! that owns the [`SafetyRecorder`]. Take start and stop and a guest leaving
+//! go through the same queue, in order, and are never dropped; audio is
+//! bounded: when [`SafetyWriter::capacity`] packets are already waiting (the
+//! disk is stalling), further packets are dropped for the safety track only
+//! (they are still forwarded), counted, and logged at most once a second.
+//! A dropped packet is a gap in the file, like a packet lost on the network.
+//! Dropping the writer finishes every open track and joins the thread.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use castcorder_port_disk::{Storage, StorageFile};
 use tracing::{debug, info, warn};
@@ -430,6 +447,241 @@ impl<S: Storage> SafetyRecorder<S> {
     }
 }
 
+/// What the writer thread is told, in order.
+enum Job<S> {
+    Start(u32, S),
+    Stop,
+    Gone(u64),
+    Audio {
+        guest: u64,
+        who: String,
+        rtp_time: u64,
+        data: Vec<u8>,
+        host_us: i64,
+    },
+}
+
+/// How many packets may wait for the writer thread by default: about ten
+/// seconds of one guest's 20 ms packets.
+pub const DEFAULT_CAPACITY: usize = 500;
+
+/// Drops are logged at most this often (host microseconds).
+const DROP_LOG_EVERY_US: i64 = 1_000_000;
+
+/// The network thread's side of the safety tracks: the same calls as
+/// [`SafetyRecorder`], none of which touches the disk or waits (see the
+/// module docs). Dropping it finishes every track and joins the thread.
+pub struct SafetyWriter<S: Storage + 'static> {
+    tx: Option<mpsc::Sender<Job<S>>>,
+    /// Audio packets sent and not yet taken by the writer thread.
+    queued: Arc<AtomicUsize>,
+    capacity: usize,
+    recording: bool,
+    /// Audio dropped (queue full) this take.
+    dropped: u64,
+    /// Dropped since the last drop log line.
+    unlogged: u64,
+    last_log_us: Option<i64>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+/// The writer thread's side: runs the jobs on the [`SafetyRecorder`].
+pub struct SafetyWorker<S: Storage + 'static> {
+    rx: mpsc::Receiver<Job<S>>,
+    queued: Arc<AtomicUsize>,
+    recorder: SafetyRecorder<S>,
+}
+
+impl<S: Storage + 'static> SafetyWorker<S> {
+    /// Run every job until the [`SafetyWriter`] is dropped, then finish
+    /// every open track.
+    pub fn run(mut self) {
+        for job in self.rx.iter() {
+            match job {
+                Job::Start(take, dir) => {
+                    if let Err(e) = self.recorder.start_take(take, &dir) {
+                        warn!(take, error = %e, "no safety directory; safety tracks not kept");
+                    }
+                }
+                Job::Stop => self.recorder.stop_take(),
+                Job::Gone(guest) => self.recorder.guest_gone(guest),
+                Job::Audio {
+                    guest,
+                    who,
+                    rtp_time,
+                    data,
+                    host_us,
+                } => {
+                    self.queued.fetch_sub(1, Ordering::AcqRel);
+                    self.recorder.audio(guest, &who, rtp_time, &data, host_us);
+                }
+            }
+        }
+        self.recorder.stop_take();
+    }
+}
+
+impl<S: Storage + 'static> SafetyWriter<S> {
+    /// A writer for `recorder` holding at most `capacity` waiting packets,
+    /// and the worker to run on the writer thread (tests run it themselves;
+    /// [`spawn`](Self::spawn) starts the thread).
+    pub fn new(recorder: SafetyRecorder<S>, capacity: usize) -> (Self, SafetyWorker<S>) {
+        let (tx, rx) = mpsc::channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let writer = Self {
+            tx: Some(tx),
+            queued: queued.clone(),
+            capacity,
+            recording: false,
+            dropped: 0,
+            unlogged: 0,
+            last_log_us: None,
+            thread: None,
+        };
+        (
+            writer,
+            SafetyWorker {
+                rx,
+                queued,
+                recorder,
+            },
+        )
+    }
+
+    /// A writer for `recorder` with its own writer thread (`safety`). If the
+    /// thread cannot start, safety tracks are not kept (logged).
+    pub fn spawn(recorder: SafetyRecorder<S>, capacity: usize) -> Self {
+        let (mut writer, worker) = Self::new(recorder, capacity);
+        match thread::Builder::new()
+            .name("safety".into())
+            .spawn(move || worker.run())
+        {
+            Ok(h) => writer.thread = Some(h),
+            Err(e) => {
+                warn!(error = %e, "safety writer thread not started; safety tracks will not be kept");
+                writer.tx = None;
+            }
+        }
+        writer
+    }
+
+    /// How many packets may wait for the writer thread.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Audio packets dropped this take because the writer thread was behind.
+    pub fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Whether a take is being recorded.
+    pub fn recording(&self) -> bool {
+        self.recording
+    }
+
+    fn send(&mut self, job: Job<S>) -> bool {
+        let Some(tx) = &self.tx else {
+            return false;
+        };
+        if tx.send(job).is_err() {
+            warn!("safety writer thread gone; safety tracks will not be kept");
+            self.tx = None;
+            return false;
+        }
+        true
+    }
+
+    /// A take starts; its safety tracks go to `<take_dir>/safety/`.
+    pub fn start_take(&mut self, take: u32, take_dir: S) {
+        self.recording = self.send(Job::Start(take, take_dir));
+        self.dropped = 0;
+        self.unlogged = 0;
+        self.last_log_us = None;
+    }
+
+    /// The take stopped: the writer thread finishes every track.
+    pub fn stop_take(&mut self) {
+        if !self.recording {
+            return;
+        }
+        self.recording = false;
+        self.send(Job::Stop);
+        if self.dropped > 0 {
+            warn!(
+                dropped = self.dropped,
+                "safety tracks: packets dropped this take (disk too slow)"
+            );
+        }
+    }
+
+    /// The guest left: the writer thread finishes its track.
+    pub fn guest_gone(&mut self, guest: u64) {
+        self.send(Job::Gone(guest));
+    }
+
+    /// One Opus frame from `guest` (named `who`), received at `host_us`.
+    /// Ignored while no take records; dropped (counted) if the writer thread
+    /// is [`capacity`](Self::capacity) packets behind. Never waits.
+    pub fn audio(&mut self, guest: u64, who: &str, rtp_time: u64, data: &[u8], host_us: i64) {
+        if !self.recording || self.tx.is_none() {
+            return;
+        }
+        if self.queued.load(Ordering::Acquire) >= self.capacity {
+            self.dropped += 1;
+            self.unlogged += 1;
+            if self
+                .last_log_us
+                .is_none_or(|t| host_us - t >= DROP_LOG_EVERY_US)
+            {
+                warn!(
+                    guest,
+                    dropped = self.unlogged,
+                    total = self.dropped,
+                    capacity = self.capacity,
+                    "safety writer behind (disk slow); safety packets dropped"
+                );
+                self.last_log_us = Some(host_us);
+                self.unlogged = 0;
+            }
+            return;
+        }
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        let sent = self.send(Job::Audio {
+            guest,
+            who: who.to_string(),
+            rtp_time,
+            data: data.to_vec(),
+            host_us,
+        });
+        if !sent {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl<S: Storage + 'static> SafetyWriter<S> {
+    /// Finish every open track and wait for the writer thread to end (the
+    /// host is shutting down). Later calls do nothing; so does dropping it.
+    pub fn close(&mut self) {
+        self.stop_take();
+        // Closing the queue ends the writer thread once it has written
+        // everything sent, finishing every open track.
+        self.tx = None;
+        if let Some(h) = self.thread.take()
+            && h.join().is_err()
+        {
+            warn!("safety writer thread panicked; safety tracks may be unfinished");
+        }
+    }
+}
+
+impl<S: Storage + 'static> Drop for SafetyWriter<S> {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 fn clean(who: &str) -> String {
     let c: String = who
         .chars()
@@ -731,5 +983,77 @@ mod tests {
         castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf).expect("read");
         let ogg = read_ogg_opus(&buf).expect("prefix parses");
         assert!(!ogg.finished);
+    }
+
+    fn read_back<S: Storage>(take_dir: &S, file: &str) -> OggOpus {
+        let dir = take_dir.subdir(DIR).expect("subdir");
+        let mut f = dir.open(file).expect("open");
+        let mut buf = vec![0u8; f.len().expect("len") as usize];
+        castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf).expect("read");
+        read_ogg_opus(&buf).expect("parses")
+    }
+
+    /// The writer thread, on the real file system: tracks are finished when
+    /// their guest leaves, when the take stops, and when the writer is
+    /// dropped mid-take (the host shutting down); the thread then ends.
+    #[test]
+    fn the_writer_thread_finishes_every_track_and_shuts_down() {
+        use castcorder_port_disk::FsStorage;
+        let root = std::env::temp_dir().join(format!("castcorder-safety-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let take1 = FsStorage::new(root.join("take01")).expect("dir");
+        let take2 = FsStorage::new(root.join("take02")).expect("dir");
+        let mut w = SafetyWriter::spawn(SafetyRecorder::new("call", 3), DEFAULT_CAPACITY);
+        assert!(!w.recording());
+        w.audio(1, "ann", 0, &pkt(1), 0); // no take yet: ignored
+        w.start_take(1, take1.clone());
+        assert!(w.recording());
+        for i in 0..60u64 {
+            // A second of host time apart: every packet syncs.
+            w.audio(1, "ann", i * 960, &pkt(1), i as i64 * 1_000_000);
+            w.audio(2, "bob", i * 960, &pkt(2), i as i64 * 1_000_000);
+        }
+        w.guest_gone(1);
+        w.stop_take();
+        w.start_take(2, take2.clone());
+        for i in 0..30u64 {
+            w.audio(2, "bob", i * 960, &pkt(3), i as i64 * 20_000);
+        }
+        assert_eq!(w.dropped(), 0);
+        drop(w); // joins the thread
+        for (dir, file, n) in [
+            (&take1, "take01_ann_safety.opus", 60),
+            (&take1, "take01_bob_safety.opus", 60),
+            (&take2, "take02_bob_safety.opus", 30),
+        ] {
+            let ogg = read_back(dir, file);
+            assert!(ogg.finished, "{file} finished");
+            assert_eq!(ogg.packets().count(), n, "{file}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With the writer thread stalled (here: not running at all), audio
+    /// never waits: past the capacity it is dropped and counted, while take
+    /// start and stop still reach the writer in order.
+    #[test]
+    fn a_full_queue_drops_safety_packets_and_never_waits() {
+        let disk = take_dir();
+        let (mut w, worker) = SafetyWriter::new(SafetyRecorder::new("call", 0), 10);
+        assert_eq!(w.capacity(), 10);
+        w.start_take(4, disk.clone());
+        for i in 0..1000u64 {
+            w.audio(7, "cat", i * 960, &pkt(i as u8), i as i64 * 20_000);
+        }
+        assert_eq!(w.dropped(), 990);
+        w.stop_take();
+        drop(w);
+        // The writer catches up: what was queued is written, then finished.
+        worker.run();
+        let ogg = read_back(&disk, "take04_cat_safety.opus");
+        assert!(ogg.finished);
+        let got: Vec<&Vec<u8>> = ogg.packets().collect();
+        assert_eq!(got.len(), 10);
+        assert!(got.iter().enumerate().all(|(i, p)| **p == pkt(i as u8)));
     }
 }

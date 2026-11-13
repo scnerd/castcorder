@@ -151,3 +151,21 @@ pub fn sync_dir_keeps_what_reads_see<H: DiskHarness>(h: &H) {
         assert_eq!(read_all(&mut st.open("keep").unwrap()), b"k");
     }
 }
+
+/// `rename` moves contents to the new name, replaces an existing target, and
+/// fails with `NotFound` when the source is missing.
+pub fn rename_moves_and_replaces<H: DiskHarness>(h: &H) {
+    let s = h.storage();
+    s.open("a.part").unwrap().write_at(0, b"new").unwrap();
+    s.open("a").unwrap().write_at(0, b"old data").unwrap();
+    s.rename("a.part", "a").unwrap();
+    assert_eq!(s.list().unwrap(), vec!["a"]);
+    assert_eq!(read_all(&mut s.open("a").unwrap()), b"new");
+    let missing = s.rename("a.part", "b").unwrap_err();
+    assert_eq!(missing.kind(), ErrorKind::NotFound);
+    s.rename("a", "b").unwrap();
+    assert_eq!(s.list().unwrap(), vec!["b"]);
+    let kind = s.rename("b", "../x").err().map(|e| e.kind());
+    assert_eq!(kind, Some(ErrorKind::InvalidInput));
+    s.sync_dir().unwrap();
+}

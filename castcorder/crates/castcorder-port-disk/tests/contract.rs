@@ -76,6 +76,10 @@ macro_rules! contract_tests {
                 contract::list_and_remove(&$harness);
             }
             #[test]
+            fn rename_moves_and_replaces() {
+                contract::rename_moves_and_replaces(&$harness);
+            }
+            #[test]
             fn invalid_names_are_refused() {
                 contract::invalid_names_are_refused(&$harness);
             }

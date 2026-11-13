@@ -52,6 +52,10 @@ impl Storage for FsStorage {
         fs::remove_file(self.path(name)?)
     }
 
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        fs::rename(self.path(from)?, self.path(to)?)
+    }
+
     fn list(&self) -> io::Result<Vec<String>> {
         let mut names = Vec::new();
         for entry in fs::read_dir(&self.root)? {

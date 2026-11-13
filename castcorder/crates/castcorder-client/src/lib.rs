@@ -21,7 +21,8 @@
 //! - `mailbox`: for a page opened from a call link
 //!   (`/v/<version>/#<host-id>.<call-secret>`), signaling through the
 //!   rendezvous with the offer sealed to the host key (castcorder-link);
-//!   otherwise the offer is POSTed to the host's `/offer` (LAN mode).
+//!   otherwise the offer is POSTed to the host's `/offer` (LAN mode), signed
+//!   for the host id its `GET /role` names.
 //! - `identity`: this profile's device key (WebCrypto Ed25519, non-extractable,
 //!   in IndexedDB); the device id is its fingerprint and every offer is signed.
 //! - [`wav`], [`signal`], [`session`]: the pure parts, unit-tested natively.
