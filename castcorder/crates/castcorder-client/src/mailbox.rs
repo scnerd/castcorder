@@ -113,13 +113,16 @@ impl Mailbox {
         }
     }
 
-    /// Seal `sdp` (with the call secret and `name`) to the link's host, send
+    /// Seal `sdp` (with the call secret, `name`, the device id and the
+    /// password, if any) to the link's host, send
     /// it, and open the host's answer SDP. A refusal (wrong call secret, host
     /// offline) is an error naming why.
     pub async fn exchange(
         &self,
         link: &CallLink,
         name: &str,
+        device: &str,
+        password: Option<&str>,
         sdp: &str,
     ) -> Result<String, JsValue> {
         let mut ephemeral = [0u8; 32];
@@ -131,6 +134,8 @@ impl Mailbox {
             secret: link.secret.encode(),
             name: name.to_string(),
             sdp: sdp.to_string(),
+            device: device.to_string(),
+            password: password.map(str::to_string),
         };
         let (sealed, guest) = GuestSeal::seal(&link.host, ephemeral, to_json(&plain).as_bytes())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

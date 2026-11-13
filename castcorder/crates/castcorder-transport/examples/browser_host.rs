@@ -220,6 +220,11 @@ impl Call {
                             message,
                         },
                     },
+                    // The example has no room security.
+                    Request::GetRoom | Request::Room(_) => Response::Error {
+                        kind: ErrorKind::NotAllowed,
+                        message: "no room controls in this example".into(),
+                    },
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);

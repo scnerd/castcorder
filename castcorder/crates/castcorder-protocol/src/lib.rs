@@ -117,6 +117,83 @@ pub enum Request {
         /// Device time the ping was sent, microseconds.
         t0_us: i64,
     },
+    /// Ask for the call's room state (producers only; answered with
+    /// [`Response::Room`]).
+    GetRoom,
+    /// A producer action on the room (answered with [`Response::Done`],
+    /// [`Response::Link`] or an error with [`ErrorKind::NotAllowed`]).
+    Room(RoomAction),
+}
+
+/// What a producer can do to the room. Who may do what is the host's
+/// decision, per device role (see castcorder-host `room`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoomAction {
+    /// Lock (true) or unlock the call: a locked call admits trusted devices only.
+    Lock(bool),
+    /// Set (Some) or clear (None) the call's password.
+    SetPassword(Option<String>),
+    /// Remove a participant and ban its device from the call.
+    Kick {
+        /// Who to remove.
+        participant: ParticipantId,
+    },
+    /// Grant (true) or revoke the producer role of a participant's device
+    /// (only from the host machine, only to a trusted device).
+    SetProducer {
+        /// Whose device.
+        participant: ParticipantId,
+        /// Grant or revoke.
+        producer: bool,
+    },
+    /// Rotate the call secret: new joins need the new call link; everyone in
+    /// the call stays (answered with [`Response::Link`]).
+    RegenerateLink,
+    /// Make the call always open (true) or producer-gated (only from the host
+    /// machine).
+    SetOpen(bool),
+}
+
+/// This connection's role in the call, sent as [`Event::Role`] after joining
+/// and whenever it changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    /// Holds the producer controls.
+    pub producer: bool,
+    /// Is at the host machine (may grant and revoke the producer role).
+    pub host_machine: bool,
+}
+
+/// One participant as producers see it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomParticipant {
+    /// The participant.
+    pub participant: ParticipantId,
+    /// Display name.
+    pub name: String,
+    /// The device id (as the device presented it).
+    pub device: String,
+    /// The device joined while a producer was present.
+    pub trusted: bool,
+    /// The participant holds the producer role.
+    pub producer: bool,
+    /// The participant is at the host machine.
+    pub host_machine: bool,
+}
+
+/// The call's access settings and who is in it, for producers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomState {
+    /// Only trusted devices may enter.
+    pub locked: bool,
+    /// A password is set.
+    pub password: bool,
+    /// Always open (false: guests wait until a producer is in the call).
+    pub open: bool,
+    /// The current call link, if the host is reachable through a rendezvous.
+    pub link: Option<String>,
+    /// Everyone joined.
+    pub participants: Vec<RoomParticipant>,
 }
 
 /// Whether a take is recording.
@@ -193,6 +270,28 @@ pub enum Response {
         /// earlier exchanges no longer apply.
         timeline: u64,
     },
+    /// The room state (answer to [`Request::GetRoom`]).
+    Room(RoomState),
+    /// A room action was carried out.
+    Done,
+    /// The link was regenerated: the new call link, if the host is reachable
+    /// through a rendezvous.
+    Link(Option<String>),
+    /// A take started (answer to [`Request::StartTake`]), and when on the
+    /// host timeline.
+    TakeStartedAt {
+        /// The new take.
+        take: TakeId,
+        /// Host timeline, microseconds.
+        host_us: i64,
+    },
+    /// The take stopped (answer to [`Request::StopTake`]), and when.
+    TakeStoppedAt {
+        /// The take that stopped.
+        take: TakeId,
+        /// Host timeline, microseconds.
+        host_us: i64,
+    },
 }
 
 /// The level of one source over the last metering interval.
@@ -215,6 +314,10 @@ pub enum Event {
     Meters(Vec<Meter>),
     /// The take status changed.
     TakeStatusChanged(TakeStatus),
+    /// This connection's role (after joining, and when it changes).
+    Role(Role),
+    /// The room changed (sent to producers only).
+    Room(RoomState),
 }
 
 /// Everything a client sends to a core.
@@ -294,6 +397,18 @@ mod tests {
             Request::ClockPing {
                 t0_us: 1_767_225_600_000_000,
             },
+            Request::GetRoom,
+            Request::Room(RoomAction::Lock(true)),
+            Request::Room(RoomAction::SetPassword(Some("pw".into()))),
+            Request::Room(RoomAction::Kick {
+                participant: ParticipantId(4),
+            }),
+            Request::Room(RoomAction::SetProducer {
+                participant: ParticipantId(5),
+                producer: true,
+            }),
+            Request::Room(RoomAction::RegenerateLink),
+            Request::Room(RoomAction::SetOpen(false)),
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -343,6 +458,46 @@ mod tests {
             CoreMessage::Event(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(2),
             })),
+            CoreMessage::Event(Event::Role(Role {
+                producer: true,
+                host_machine: false,
+            })),
+            CoreMessage::Event(Event::Room(RoomState {
+                locked: true,
+                password: false,
+                open: false,
+                link: Some("https://rv/v/1/#h.s".into()),
+                participants: vec![RoomParticipant {
+                    participant: ParticipantId(2),
+                    name: "B".into(),
+                    device: "dev-b".into(),
+                    trusted: true,
+                    producer: false,
+                    host_machine: false,
+                }],
+            })),
+            CoreMessage::Response {
+                id: RequestId(11),
+                response: Response::Done,
+            },
+            CoreMessage::Response {
+                id: RequestId(12),
+                response: Response::Link(None),
+            },
+            CoreMessage::Response {
+                id: RequestId(13),
+                response: Response::TakeStartedAt {
+                    take: TakeId(3),
+                    host_us: 99,
+                },
+            },
+            CoreMessage::Response {
+                id: RequestId(14),
+                response: Response::TakeStoppedAt {
+                    take: TakeId(3),
+                    host_us: 199,
+                },
+            },
         ];
         for msg in core {
             assert_eq!(decode::<CoreMessage>(&encode(&msg)).unwrap(), msg);
@@ -395,6 +550,72 @@ mod tests {
             encode(&Event::TakeStatusChanged(TakeStatus::Idle)),
             vec![1, 0]
         );
+        // Producers and room security (appended).
+        assert_eq!(encode(&Request::GetRoom), vec![7]);
+        assert_eq!(
+            encode(&Request::Room(RoomAction::Lock(true))),
+            vec![8, 0, 1]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::SetPassword(None))),
+            vec![8, 1, 0]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::Kick {
+                participant: ParticipantId(3)
+            })),
+            vec![8, 2, 3]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::SetProducer {
+                participant: ParticipantId(3),
+                producer: false
+            })),
+            vec![8, 3, 3, 0]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::RegenerateLink)),
+            vec![8, 4]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::SetOpen(true))),
+            vec![8, 5, 1]
+        );
+        assert_eq!(encode(&Response::Done), vec![9]);
+        assert_eq!(encode(&Response::Link(None)), vec![10, 0]);
+        assert_eq!(
+            encode(&Response::TakeStartedAt {
+                take: TakeId(1),
+                host_us: 1
+            }),
+            vec![11, 1, 2]
+        );
+        assert_eq!(
+            encode(&Response::TakeStoppedAt {
+                take: TakeId(1),
+                host_us: 1
+            }),
+            vec![12, 1, 2]
+        );
+        assert_eq!(
+            encode(&Event::Role(Role {
+                producer: true,
+                host_machine: false
+            })),
+            vec![2, 1, 0]
+        );
+        let room = RoomState {
+            locked: false,
+            password: true,
+            open: false,
+            link: None,
+            participants: vec![],
+        };
+        assert_eq!(
+            encode(&Response::Room(room.clone())),
+            vec![8, 0, 1, 0, 0, 0]
+        );
+        assert_eq!(encode(&Event::Room(room)), vec![3, 0, 1, 0, 0, 0]);
     }
 
     #[test]
