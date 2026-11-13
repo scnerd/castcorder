@@ -15,6 +15,11 @@
 // connect with the host's chosen pair on its relayed address; B hears A; a
 // take started through the host's producer HTTP endpoint records and both
 // guests' tracks sync into the host library; nothing logs the TURN secret.
+// Then the credentials renew (minted with a short TTL, CASTCORDER_RELAY_TTL,
+// default 60 s): the host allocates again and restarts ICE; each guest must
+// answer with its own new relay candidate, the call moves to the new
+// allocation without a reconnect, audio keeps flowing once the old
+// allocation is deleted, and a second take syncs.
 //
 // Every port is picked by the OS. CARGO_TARGET_DIR and CASTCORDER_DIST select
 // other build dirs; DOCKER_HOST is honoured by the docker CLI.
@@ -46,6 +51,11 @@ for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
 }
 const VERSION = '0.0.0';
 const COTURN_IMAGE = 'coturn/coturn:4.6';
+// Lifetime of minted TURN credentials (s). The host renews at 80% of it, so
+// the first renewal lands mid-test; everything after it must finish before
+// the second (at 160%), when the guests' own credentials (minted once, at
+// join; browser guests do not renew them) have expired.
+const TTL = Number(process.env.CASTCORDER_RELAY_TTL || 60);
 
 mkdirSync(RESULTS, { recursive: true });
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
@@ -190,7 +200,7 @@ try {
   console.log('coturn (' + COTURN_IMAGE + ', Docker) answering STUN at ' + TURN_IP + ':' + TURN_PORT + '/udp');
 
   rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist,
-    '--turn', TURN_URL, '--turn-ttl', '600'], 'rendezvous', { CASTCORDER_TURN_SECRET: SECRET });
+    '--turn', TURN_URL, '--turn-ttl', String(TTL)], 'rendezvous', { CASTCORDER_TURN_SECRET: SECRET });
   const [, RV_HTTP] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
   console.log('rendezvous at ' + RV_HTTP);
 
@@ -262,6 +272,66 @@ try {
     const wav = files.find((f) => new RegExp('^take01_' + n + '.*\\.wav$').test(f));
     check(!!wav && statSync(join(TAKE_DIR, wav)).size > 100000, 'guest ' + n + '\'s take synced into the host library over the relay (' + wav + ')');
   }
+
+  // Credential renewal (cast-dns): at 80% of the TTL the host fetches new
+  // credentials, allocates again beside the live allocation, offers every
+  // guest the new relayed address with an ICE restart, and deletes the old
+  // allocation a few seconds later. Each browser guest's answer to that
+  // restart must carry its own new relay candidate (no trickle), and the call
+  // must carry on over the new allocation without a reconnect.
+  const participants = {};
+  for (const [n, p] of [['A', A], ['B', B]]) participants[n] = await text(p, '#participant');
+  const SWITCH = /relayed address switched to the renewed allocation; restarting ICE.*? new=(\S+)/;
+  const sw = await waitFor(() => host.err.match(SWITCH), 'the host renewing its relay credentials', (TTL + 30) * 1000, 250);
+  const at = host.err.indexOf(sw[0]);
+  const NEW_RELAYED = sw[1];
+  check(NEW_RELAYED !== RELAYED, 'the host renewed its credentials and switched to a new allocation: ' + RELAYED + ' -> ' + NEW_RELAYED);
+  const answers = await waitFor(() => {
+    const last = {};
+    for (const n of ['A', 'B']) {
+      const l = logs[n].filter((x) => x.includes('answered host renegotiation')).pop() || '';
+      const relay = Number((l.match(/relay_candidates = (\d+)/) || [])[1] || 0);
+      if (relay < 1) return null;
+      last[n] = l;
+    }
+    return last;
+  }, 'each guest answering the ICE restart with a relay candidate', 15000).catch(() => null);
+  check(answers !== null, 'each guest answered the ICE restart with its own new relay candidate'
+    + (answers ? '' : ': ' + ['A', 'B'].map((n) => n + ' ' + (logs[n].filter((x) => x.includes('answered host renegotiation')).pop() || 'none')).join(' | ')));
+  const newPairs = await waitFor(() => {
+    const m = [...host.err.slice(at).matchAll(/chosen candidate pair candidate_pair=Udp (\S+) -> (\S+)/g)];
+    return m.filter((x) => x[1] === NEW_RELAYED).length >= 2 ? m : null;
+  }, 'host chosen pairs on the new relayed address', 20000).catch(() => null);
+  check(newPairs !== null, 'after the ICE restart both guests\x27 chosen pairs on the host use the new relayed address'
+    + (newPairs ? ': ' + newPairs.map((m) => m[1] + ' -> ' + m[2]).join(', ') : ''));
+  await waitFor(() => host.err.slice(at).includes('old relay allocation deleted'), 'the old allocation deleted', 20000);
+  const after = await waitFor(async () => {
+    const x = audioFrom(await json(B, '#debug-inbound'), 'A');
+    await sleep(2000);
+    const y = audioFrom(await json(B, '#debug-inbound'), 'A');
+    return y.packets > x.packets ? { x, y } : null;
+  }, 'B receiving audio from A after the renewal', 15000, 0).catch(() => null);
+  check(after !== null, 'B still hears A once the old allocation is gone'
+    + (after ? ' (' + Math.round((after.y.packets - after.x.packets) / 2) + ' pkt/s)' : ''));
+  const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
+  const same = [];
+  for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);
+  check(lost.length === 0 && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
+    + (lost.length ? ' (lost: ' + lost.join(', ') + ')' : ''));
+  const started2 = await post('/take/start');
+  check(started2[0] === 200, 'take 2 started after the renewal: ' + started2.join(' '));
+  await sleep(4000);
+  const stopped2 = await post('/take/stop');
+  check(stopped2[0] === 200, 'take 2 stopped: ' + stopped2.join(' '));
+  const TAKE2 = join(LIBRARY, 'relay-test', 'take02');
+  const verified2 = () => {
+    const m = join(TAKE2, 'manifest.jsonl');
+    return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
+  };
+  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 60000, 250).catch(() => false);
+  check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
+  const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
+  check(minted2 >= 4, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
 
   coturnLog = docker(['logs', CONTAINER]);
   check(/session \d+: new, realm=<castcorder.test>/.test(coturnLog) || coturnLog.includes('ALLOCATE processed, success'),
