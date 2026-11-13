@@ -87,12 +87,12 @@ Each device continuously measures its clock offset to the host and logs it besid
 
 ## Testing
 
-| Tier          | Covers                                                                                    | Needs            |
-| ------------- | ----------------------------------------------------------------------------------------- | ---------------- |
-| 1. Unit       | Pure logic                                                                                | nothing          |
-| 2. Simulation | Multi-device calls, clock sync, failure model, outbox sync, alignment, bit-exactness      | nothing          |
-| 3. System     | Real binaries, fake sources, real rendezvous and coturn, forced relay, injected faults    | Docker           |
-| 4. Browser    | Playwright with Chromium fake devices against a headless host; also covers the desktop UI | Docker, Chromium |
+| Tier          | Covers                                                                                    | Needs                         |
+| ------------- | ----------------------------------------------------------------------------------------- | ----------------------------- |
+| 1. Unit       | Pure logic                                                                                | nothing                       |
+| 2. Simulation | Multi-device calls, clock sync, failure model, outbox sync, alignment, bit-exactness      | nothing                       |
+| 3. System     | Real binaries, fake sources, real rendezvous and coturn, forced relay, injected faults    | Docker                        |
+| 4. Browser    | Playwright with Chromium fake devices against a headless host; also covers the desktop UI | Chromium, Firefox (no Docker) |
 
 `task check` runs formatting, lints, and tiers 1-2 with no Docker. `task test` adds tiers 3-4. Virtual audio devices exercise the real capture path on Linux. Real hardware and the Windows capture path are covered only by the maintainer's own use and never block a merge.
 
