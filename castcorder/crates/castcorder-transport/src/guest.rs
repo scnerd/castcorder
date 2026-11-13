@@ -2,27 +2,68 @@
 //! read and socket write going through the ports.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use castcorder_port_net::DatagramSocket;
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::channel::{ChannelData, ChannelId};
-use str0m::format::Codec;
+use str0m::format::{Codec, CodecExtra};
 use str0m::media::{
-    Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid,
+    Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid, Rid,
 };
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tracing::{debug, info, warn};
 
+use crate::alloc;
 use crate::channel::{ChannelKind, Shared, lock};
 use crate::relay::Relay;
 use crate::signal::Signal;
-use crate::{GoneReason, GuestId, GuestStats, HostEvent};
+use crate::{GoneReason, GuestId, GuestStats, HostEvent, VideoOut};
 
-/// Minimum gap between keyframe requests sent to one source track.
+/// Minimum gap between keyframe requests sent to one source layer.
 const KEYFRAME_THROTTLE: Duration = Duration::from_millis(300);
+/// How often each receiver's video allocation is recomputed.
+const ALLOCATE_EVERY: Duration = Duration::from_millis(250);
+/// A layer with no frame for this long is not being sent (camera off, or the
+/// browser paused it for its own uplink).
+const LAYER_STALE: Duration = Duration::from_secs(2);
+/// The rate measurement window.
+const RATE_WINDOW: Duration = Duration::from_millis(500);
+/// The rate assumed for an audio track not measured yet (Opus plus headers).
+const AUDIO_KBPS_DEFAULT: u64 = 40;
+
+/// One stream a source sends on a track: its simulcast rid, or `None` for a
+/// track without simulcast.
+pub(crate) type Layer = Option<Rid>;
+
+/// The measured rate of one layer of an incoming track.
+#[derive(Debug)]
+struct LayerRate {
+    layer: Layer,
+    window_start: Instant,
+    bytes: u64,
+    kbps: Option<u64>,
+    last: Instant,
+}
+
+impl LayerRate {
+    /// The best rate known: the smoothed one, else what the current window
+    /// shows once it is long enough to mean something.
+    fn kbps(&self) -> u64 {
+        if let Some(k) = self.kbps {
+            return k;
+        }
+        let ms = self
+            .last
+            .saturating_duration_since(self.window_start)
+            .as_millis() as u64;
+        // Over at least 100 ms: a first keyframe alone reads as a high rate, so
+        // a layer not measured yet is chosen cautiously, never as free.
+        self.bytes * 8 / ms.max(100)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct TrackIn {
@@ -30,12 +71,95 @@ pub(crate) struct TrackIn {
     pub(crate) origin_device: String,
     pub(crate) mid: Mid,
     pub(crate) kind: MediaKind,
+    rates: Mutex<Vec<LayerRate>>,
+}
+
+impl TrackIn {
+    pub(crate) fn new(origin: GuestId, origin_device: String, mid: Mid, kind: MediaKind) -> Self {
+        Self {
+            origin,
+            origin_device,
+            mid,
+            kind,
+            rates: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Count one frame of `len` bytes on `layer`.
+    fn record(&self, layer: Layer, len: usize, now: Instant) {
+        let mut rates = self.rates.lock().unwrap_or_else(|p| p.into_inner());
+        let r = match rates.iter_mut().position(|r| r.layer == layer) {
+            Some(i) => &mut rates[i],
+            None => {
+                rates.push(LayerRate {
+                    layer,
+                    window_start: now,
+                    bytes: 0,
+                    kbps: None,
+                    last: now,
+                });
+                rates.last_mut().expect("just pushed")
+            }
+        };
+        let span = now.saturating_duration_since(r.window_start);
+        if span >= RATE_WINDOW {
+            let rate = r.bytes * 8 / (span.as_millis() as u64).max(1);
+            r.kbps = Some(r.kbps.map_or(rate, |old| (old + rate) / 2));
+            r.window_start = now;
+            r.bytes = 0;
+        }
+        r.bytes += len as u64;
+        r.last = now;
+    }
+
+    /// The layers being sent now with their rates in kbps, lowest rate first.
+    fn layers(&self, now: Instant) -> Vec<(Layer, u64)> {
+        let rates = self.rates.lock().unwrap_or_else(|p| p.into_inner());
+        let mut v: Vec<(Layer, u64)> = rates
+            .iter()
+            .filter(|r| now.saturating_duration_since(r.last) < LAYER_STALE)
+            .map(|r| (r.layer, r.kbps()))
+            .collect();
+        v.sort_by_key(|(l, k)| (*k, l.map(|r| r.to_string())));
+        v
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct TrackInEntry {
     pub(crate) id: Arc<TrackIn>,
-    last_keyframe_request: Option<Instant>,
+    last_keyframe_request: Vec<(Layer, Instant)>,
+}
+
+/// Which layer of a source's video a receiver gets, and the RTP time rewrite
+/// that keeps its timestamps continuous across layer switches.
+#[derive(Debug, Default)]
+struct Forward {
+    /// The layer chosen by the allocation; `None`: no video.
+    target: Option<Layer>,
+    /// The layer forwarded now; follows `target` at the target's next keyframe.
+    current: Option<Layer>,
+    /// Added to the source's RTP time (in the track's clock rate).
+    offset: i64,
+    /// The last RTP time written toward the receiver.
+    last_out: Option<u64>,
+    frames: u64,
+}
+
+fn is_keyframe(d: &MediaData) -> bool {
+    match &d.codec_extra {
+        CodecExtra::Vp8(e) => e.is_keyframe,
+        // The VP8 frame tag's P bit is clear on a key frame.
+        _ => d.data.first().is_some_and(|b| b & 1 == 0),
+    }
+}
+
+fn layer_name(l: &Option<Layer>) -> String {
+    match l {
+        None => "none".into(),
+        Some(None) => "single".into(),
+        Some(Some(r)) => r.to_string(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +175,7 @@ enum TrackOutState {
 struct TrackOut {
     track_in: Weak<TrackIn>,
     state: TrackOutState,
+    fwd: Forward,
 }
 
 impl TrackOut {
@@ -74,6 +199,7 @@ pub(crate) enum Propagated {
     KeyframeRequest {
         origin: GuestId,
         mid_in: Mid,
+        layer: Layer,
         kind: KeyframeRequestKind,
     },
 }
@@ -133,6 +259,13 @@ pub(crate) struct Guest {
     last_pair: Option<String>,
     /// The next renegotiation restarts ICE (the host's relayed address changed).
     ice_restart: bool,
+    /// The initial bandwidth estimate, or `None` without estimation.
+    bwe_initial: Option<u64>,
+    /// When the video allocation is next due; `allocate_now` brings it forward.
+    next_alloc: Duration,
+    allocate_now: bool,
+    /// The (minimum, desired) kbps last given to str0m's estimator.
+    bwe_asked: Option<(u64, u64)>,
     pub(crate) stats: GuestStats,
 }
 
@@ -144,6 +277,7 @@ impl Guest {
         rtc: Rtc,
         base: Instant,
         now: Duration,
+        bwe_initial: Option<u64>,
     ) -> Self {
         Self {
             id,
@@ -166,6 +300,10 @@ impl Guest {
             next_heartbeat: now,
             last_pair: None,
             ice_restart: false,
+            bwe_initial,
+            next_alloc: now,
+            allocate_now: false,
+            bwe_asked: None,
             stats: GuestStats::default(),
         }
     }
@@ -239,7 +377,110 @@ impl Guest {
             self.next_heartbeat = now + timing.heartbeat_interval;
         }
         self.flush(timing.data_flush_limit);
-        deadline.min(self.next_heartbeat)
+        if self.allocate_now || now >= self.next_alloc {
+            self.allocate_now = false;
+            self.next_alloc = now + ALLOCATE_EVERY;
+            self.allocate(self.base + now);
+        }
+        deadline.min(self.next_heartbeat).min(self.next_alloc)
+    }
+
+    /// Choose, per forwarded video track, the layer this guest gets: audio is
+    /// reserved first, then layers by the bandwidth estimate (see `alloc`).
+    /// Also tells the estimator what to probe for.
+    fn allocate(&mut self, now: Instant) {
+        let mut audio = 0;
+        let mut tracks = Vec::new();
+        let mut which = Vec::new();
+        for (i, t) in self.tracks_out.iter().enumerate() {
+            if !matches!(t.state, TrackOutState::Open(_)) {
+                continue;
+            }
+            let Some(ti) = t.track_in.upgrade() else {
+                continue;
+            };
+            let layers = ti.layers(now);
+            if ti.kind == MediaKind::Audio {
+                audio += layers
+                    .first()
+                    .map_or(AUDIO_KBPS_DEFAULT, |l| l.1.max(AUDIO_KBPS_DEFAULT / 2));
+                continue;
+            }
+            let current = t
+                .fwd
+                .current
+                .and_then(|c| layers.iter().position(|(l, _)| *l == c));
+            tracks.push(alloc::Track {
+                layers: layers.iter().map(|l| l.1).collect(),
+                current,
+            });
+            which.push((i, layers));
+        }
+        let estimate = self
+            .bwe_initial
+            .map(|initial| self.stats.bwe_kbps.unwrap_or(initial));
+        let a = alloc::allocate(estimate, audio, &tracks);
+        for ((i, layers), choice) in which.into_iter().zip(a.choices) {
+            self.set_target(i, choice.map(|c| layers[c].0));
+        }
+        if self.bwe_initial.is_some() {
+            // Sustain the next layer's rate and probe for the best one; never
+            // below a floor, so a receiver dropped to audio can climb back.
+            let min = a.next_kbps.max(300);
+            let desired = a.desired_kbps.max(min);
+            if self.bwe_asked != Some((min, desired)) {
+                self.bwe_asked = Some((min, desired));
+                self.rtc
+                    .bwe()
+                    .set_bitrate(Bitrate::kbps(min), Bitrate::kbps(desired));
+            }
+        }
+        self.stats.video_out = self
+            .tracks_out
+            .iter()
+            .filter(|t| matches!(t.state, TrackOutState::Open(_)))
+            .filter_map(|t| {
+                let ti = t.track_in.upgrade()?;
+                (ti.kind == MediaKind::Video).then(|| VideoOut {
+                    origin: ti.origin,
+                    target: t.fwd.target.map(|l| l.map(|r| r.to_string())),
+                    current: t.fwd.current.map(|l| l.map(|r| r.to_string())),
+                    frames: t.fwd.frames,
+                })
+            })
+            .collect();
+    }
+
+    /// Point track `i` at `target`; a new layer is forwarded from its next
+    /// keyframe, asked for now (and again each allocation until it comes).
+    fn set_target(&mut self, i: usize, target: Option<Layer>) {
+        let Some(ti) = self.tracks_out[i].track_in.upgrade() else {
+            return;
+        };
+        let fwd = &mut self.tracks_out[i].fwd;
+        if fwd.target != target {
+            info!(
+                origin = ti.origin.0,
+                from = %layer_name(&fwd.target),
+                to = %layer_name(&target),
+                bwe_kbps = ?self.stats.bwe_kbps,
+                "video layer chosen"
+            );
+            fwd.target = target;
+            self.stats.layer_changes += 1;
+        }
+        match target {
+            None => fwd.current = None,
+            Some(l) if fwd.current != Some(l) => {
+                self.outbox.push(Propagated::KeyframeRequest {
+                    origin: ti.origin,
+                    mid_in: ti.mid,
+                    layer: l,
+                    kind: KeyframeRequestKind::Pli,
+                });
+            }
+            Some(_) => {}
+        }
     }
 
     /// Move queued application messages into the connection, as far as it accepts.
@@ -318,13 +559,8 @@ impl Guest {
                 if m.direction == Direction::RecvOnly {
                     info!(mid = %m.mid, kind = ?m.kind, "incoming track");
                     let t = TrackInEntry {
-                        id: Arc::new(TrackIn {
-                            origin: self.id,
-                            origin_device: self.device.clone(),
-                            mid: m.mid,
-                            kind: m.kind,
-                        }),
-                        last_keyframe_request: None,
+                        id: Arc::new(TrackIn::new(self.id, self.device.clone(), m.mid, m.kind)),
+                        last_keyframe_request: Vec::new(),
                     };
                     self.outbox
                         .push(Propagated::TrackOpen(self.id, Arc::downgrade(&t.id)));
@@ -333,8 +569,11 @@ impl Guest {
             }
             Event::MediaData(d) => {
                 self.stats.frames_in += 1;
+                if let Some(t) = self.tracks_in.iter().find(|t| t.id.mid == d.mid) {
+                    t.id.record(d.rid, d.data.len(), now);
+                }
                 if !d.contiguous {
-                    self.request_keyframe(d.mid, KeyframeRequestKind::Fir, now);
+                    self.request_keyframe(d.mid, d.rid, KeyframeRequestKind::Fir, now);
                 }
                 self.outbox
                     .push(Propagated::MediaData(self.id, Box::new(d)));
@@ -435,16 +674,9 @@ impl Guest {
             if let TrackOutState::Negotiating(m) = t.state {
                 t.state = TrackOutState::Open(m);
                 // Sharp edge: a new subscriber needs a keyframe now; Chromium's
-                // encoder sends almost no periodic keyframes.
-                if let Some(ti) = t.track_in.upgrade()
-                    && ti.kind == MediaKind::Video
-                {
-                    self.outbox.push(Propagated::KeyframeRequest {
-                        origin: ti.origin,
-                        mid_in: ti.mid,
-                        kind: KeyframeRequestKind::Pli,
-                    });
-                }
+                // encoder sends almost no periodic keyframes. The allocation,
+                // run at once, picks its layer and asks for that layer's.
+                self.allocate_now = true;
             }
         }
         self.tracks_out
@@ -456,7 +688,16 @@ impl Guest {
             .count();
     }
 
-    pub(crate) fn request_keyframe(&mut self, mid: Mid, kind: KeyframeRequestKind, now: Instant) {
+    /// Ask this guest for a keyframe on one layer of its track `mid`
+    /// (throttled per layer). A simulcast track has no stream without a rid,
+    /// so the layer must be the one wanted.
+    pub(crate) fn request_keyframe(
+        &mut self,
+        mid: Mid,
+        layer: Layer,
+        kind: KeyframeRequestKind,
+        now: Instant,
+    ) {
         let Some(entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == mid) else {
             return;
         };
@@ -465,17 +706,24 @@ impl Guest {
         }
         if entry
             .last_keyframe_request
-            .is_some_and(|t| now.saturating_duration_since(t) < KEYFRAME_THROTTLE)
+            .iter()
+            .any(|(l, t)| *l == layer && now.saturating_duration_since(*t) < KEYFRAME_THROTTLE)
         {
             return;
         }
         let Some(mut w) = self.rtc.writer(mid) else {
             return;
         };
-        if w.request_keyframe(None, kind).is_ok() {
-            entry.last_keyframe_request = Some(now);
-            self.stats.keyframe_requests_sent += 1;
-            debug!(?kind, mid = %mid, "keyframe request sent to source");
+        match w.request_keyframe(layer, kind) {
+            Ok(()) => {
+                entry.last_keyframe_request.retain(|(l, _)| *l != layer);
+                entry.last_keyframe_request.push((layer, now));
+                self.stats.keyframe_requests_sent += 1;
+                debug!(?kind, mid = %mid, layer = ?layer, "keyframe request sent to source");
+            }
+            Err(e) => {
+                debug!(error = ?e, mid = %mid, layer = ?layer, "keyframe request not possible")
+            }
         }
     }
 
@@ -487,9 +735,14 @@ impl Guest {
         let Some(ti) = t.track_in.upgrade() else {
             return;
         };
+        // The layer this receiver is getting, or about to.
+        let Some(layer) = t.fwd.target.or(t.fwd.current) else {
+            return;
+        };
         self.outbox.push(Propagated::KeyframeRequest {
             origin: ti.origin,
             mid_in: ti.mid,
+            layer,
             kind: req.kind,
         });
     }
@@ -566,30 +819,57 @@ impl Guest {
         self.tracks_out.push(TrackOut {
             track_in,
             state: TrackOutState::ToOpen,
+            fwd: Forward::default(),
         });
     }
 
+    /// Forward one frame from `origin`. Audio always goes through. Video only
+    /// from the layer chosen for this guest: a newly chosen layer takes over
+    /// at its first keyframe (the old one carries on until then), and its RTP
+    /// times are shifted to continue the outgoing stream.
     pub(crate) fn handle_media_data_out(&mut self, origin: GuestId, data: &MediaData) {
-        let Some(mid) = self
-            .tracks_out
-            .iter()
-            .find(|o| {
-                matches!(o.state, TrackOutState::Open(_))
-                    && o.track_in
-                        .upgrade()
-                        .is_some_and(|i| i.origin == origin && i.mid == data.mid)
-            })
-            .and_then(|o| o.mid())
-        else {
+        let Some(t) = self.tracks_out.iter_mut().find(|o| {
+            matches!(o.state, TrackOutState::Open(_))
+                && o.track_in
+                    .upgrade()
+                    .is_some_and(|i| i.origin == origin && i.mid == data.mid)
+        }) else {
             return;
         };
+        let Some(mid) = t.mid() else { return };
+        let mut time = data.time;
+        let video = t
+            .track_in
+            .upgrade()
+            .is_some_and(|i| i.kind == MediaKind::Video);
+        if video {
+            let f = &mut t.fwd;
+            let Some(target) = f.target else { return };
+            if f.current != Some(data.rid) {
+                if target != data.rid || !is_keyframe(data) {
+                    return;
+                }
+                let switching = f.current.is_some();
+                f.current = Some(data.rid);
+                if let Some(last) = f.last_out {
+                    // One frame (at 30 fps) after the last one written.
+                    let step = i64::from(data.time.frequency().get()) / 30;
+                    f.offset = last as i64 + step - data.time.numer() as i64;
+                }
+                debug!(origin = origin.0, layer = %layer_name(&Some(data.rid)), switching, "video layer forwarded from this keyframe");
+            }
+            let out = (data.time.numer() as i64 + f.offset).max(0) as u64;
+            f.last_out = Some(out);
+            f.frames += 1;
+            time = MediaTime::new(out, data.time.frequency());
+        }
         let Some(w) = self.rtc.writer(mid) else {
             return;
         };
         let Some(pt) = w.match_params(data.params) else {
             return;
         };
-        if let Err(e) = w.write(pt, data.network_time, data.time, data.data.clone()) {
+        if let Err(e) = w.write(pt, data.network_time, time, data.data.clone()) {
             warn!(error = ?e, "forwarding write failed, disconnecting");
             self.mark_gone(GoneReason::Failed(format!("{e}")));
             return;

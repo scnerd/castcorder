@@ -9,6 +9,10 @@
 //    page over HTTPS (the self-signed certificate, errors ignored), so it gets
 //    no producer controls and the host refuses it the take endpoints. Both join.
 // 2. B receives A's forwarded audio (inbound RTP from A's stream rising).
+//    Live video (every mode, see videoChecks): each guest decodes the other's
+//    fake camera in a named tile, A sends two simulcast layers, and A's camera
+//    turned off is released, stops B's frames while audio goes on, and turned
+//    on again is decoded again, with no renegotiation.
 // 3. A's producer controls start a take; ~5 s later they stop it.
 // 4. Each guest's outbox syncs its track and JSON sidecar into the host's
 //    library (--library test-results/library), verified; only then is the
@@ -240,7 +244,7 @@ async function readOpfs(page, dir, name) {
 }
 
 function audioFrom(inbound, origin) {
-  return (inbound || []).filter((i) => i.origin.startsWith(origin + '-'))
+  return (inbound || []).filter((i) => i.kind === 'audio' && i.origin.startsWith(origin + '-'))
     .reduce((a, i) => ({ packets: a.packets + i.packetsReceived, bytes: a.bytes + i.bytesReceived }), { packets: 0, bytes: 0 });
 }
 
@@ -303,6 +307,10 @@ try {
       if (MODE === 'fallback') check(path === 'worklet' || path === 'mstp-worker', 'guest ' + n + ' (no MSTP on window) fell back to ' + path);
     }
   }
+
+  // Live video (every mode): each decodes the other's camera, simulcast, and
+  // the camera turns off and on without renegotiating.
+  await videoChecks(A, B);
 
   // The raw path is warm (read since join; the spike's 500 ms warm-up lesson).
   await waitFor(async () => (await text(A, '#level-db')) !== '-inf dBFS', 'A level meter');
@@ -646,6 +654,80 @@ console.log(!passed ? 'FAIL (' + MODE + ')'
   : FULL ? 'PASS browser guest joins, forwards audio, records a bit-exact take to OPFS, syncs it to the host and deletes it locally'
     : 'PASS (' + MODE + ') guests join, hear each other, record a take without MediaStreamTrackProcessor on the page, and the tracks reach the host');
 process.exit(passed ? 0 : 1);
+
+// Video decoded from `origin`'s forwarded camera: frames (summed), size.
+function videoFrom(inbound, origin) {
+  return (inbound || []).filter((i) => i.kind === 'video' && i.origin.startsWith(origin + '-'))
+    .reduce((a, i) => ({ frames: a.frames + (i.framesDecoded || 0), w: Math.max(a.w, i.frameWidth || 0), h: Math.max(a.h, i.frameHeight || 0) }),
+      { frames: 0, w: 0, h: 0 });
+}
+
+// Wait until `page` decodes new frames from `origin` over a 2 s window.
+function decoding(page, origin, what, timeout = 30000) {
+  return waitFor(async () => {
+    const x = videoFrom(await json(page, '#debug-inbound'), origin);
+    await sleep(2000);
+    const y = videoFrom(await json(page, '#debug-inbound'), origin);
+    return y.frames > x.frames ? { fps: (y.frames - x.frames) / 2, w: y.w, h: y.h } : null;
+  }, what, timeout, 0);
+}
+
+// Audio packets from `origin` rise over a 2 s window.
+async function audioRising(page, origin) {
+  const x = audioFrom(await json(page, '#debug-inbound'), origin);
+  await sleep(2000);
+  const y = audioFrom(await json(page, '#debug-inbound'), origin);
+  return y.packets - x.packets;
+}
+
+// Live video (cast-riw): A and B each decode the other's forwarded camera
+// (fake devices) and show it in a tile named after them; A sends two
+// simulcast layers where the browser does (Chromium); A's camera turned off
+// is released and B's frames from A stop while the audio goes on; turned on
+// again, B decodes it again.
+async function videoChecks(A, B) {
+  for (const [rx, n, from] of [[B, 'B', 'A'], [A, 'A', 'B']]) {
+    const v = await decoding(rx, from, n + ' decoding video from ' + from);
+    check(v.fps >= 3, n + ' decodes ' + from + '\x27s forwarded video (' + v.fps.toFixed(1) + ' fps, ' + v.w + 'x' + v.h + ')');
+    const tile = await rx.evaluate((from) => {
+      const t = [...document.querySelectorAll('#remote .tile')].find((e) => e.dataset.origin.startsWith(from + '-'));
+      const el = t && t.querySelector('video');
+      return el ? { w: el.videoWidth, h: el.videoHeight, ready: el.readyState, name: t.querySelector('.tile-name').textContent } : null;
+    }, from);
+    check(!!tile && tile.w > 0 && tile.ready >= 2 && tile.name === from,
+      n + ' shows ' + from + '\x27s video playing in a tile named after them: ' + JSON.stringify(tile));
+  }
+  const outbound = await A.evaluate(async () => {
+    const pc = window.__pcs[window.__pcs.length - 1];
+    const out = [];
+    (await pc.getStats()).forEach((s) => {
+      if (s.type === 'outbound-rtp' && s.kind === 'video') out.push({ rid: s.rid || '', framesEncoded: s.framesEncoded || 0, w: s.frameWidth || 0, h: s.frameHeight || 0 });
+    });
+    return out;
+  });
+  console.log('info A outbound video: ' + JSON.stringify(outbound));
+  const layers = outbound.filter((o) => o.rid && o.framesEncoded > 0).map((o) => o.rid).sort();
+  check(layers.join(',') === 'h,l', 'A sends two simulcast layers (' + layers.join(',') + ')');
+  // Camera off: released, B's frames from A stop, audio goes on.
+  const offers = () => (hostLog.match(/sent offer/g) || []).length;
+  const offersBefore = offers();
+  await A.click('#camera');
+  await waitFor(async () => (await text(A, '#camera-state')) === 'off', 'A camera off', 5000);
+  const live = await A.evaluate(() => window.__tracks.filter((t) => t.kind === 'video' && t.readyState !== 'ended').length);
+  check(live === 0, 'turning the camera off releases it (' + live + ' live video tracks)');
+  await sleep(1500);
+  const x = videoFrom(await json(B, '#debug-inbound'), 'A');
+  const audio = await audioRising(B, 'A');
+  await sleep(1000);
+  const y = videoFrom(await json(B, '#debug-inbound'), 'A');
+  check(y.frames - x.frames <= 2 && audio > 0,
+    'with A\x27s camera off B decodes no new frames from A (' + (y.frames - x.frames) + ' in 3 s) and still gets A\x27s audio (' + audio + ' packets in 2 s)');
+  await A.click('#camera');
+  await waitFor(async () => (await text(A, '#camera-state')) === 'on', 'A camera on again', 10000);
+  const again = await decoding(B, 'A', 'B decoding A\x27s camera again', 20000);
+  check(again.fps >= 3 && offers() === offersBefore, 'A\x27s camera back on: B decodes it again (' + again.fps.toFixed(1)
+    + ' fps); the host sent ' + (offers() - offersBefore) + ' offers meanwhile (no renegotiation)');
+}
 
 // A timing metadata file (castcorder-core timing): JSON lines.
 function parseTiming(text) {

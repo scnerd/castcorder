@@ -22,6 +22,17 @@ pub struct LinkConfig {
     pub loss_per_million: u32,
 }
 
+/// A capacity limit on one direction between two hosts: datagrams queue and
+/// leave one after another at `kbps`; one that would wait longer than
+/// `max_queue` is dropped (a tail-drop router queue).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bottleneck {
+    /// Capacity in kilobits per second (payload bytes only).
+    pub kbps: u32,
+    /// The longest a datagram may wait for its turn.
+    pub max_queue: Duration,
+}
+
 /// Small, fast, seedable PRNG (splitmix64). Same seed, same draws, every platform.
 #[derive(Debug)]
 struct Rng(u64);
@@ -55,6 +66,8 @@ struct State {
     default_link: LinkConfig,
     links: BTreeMap<(IpAddr, IpAddr), LinkConfig>,
     partitions: BTreeSet<(IpAddr, IpAddr)>,
+    /// Per direction: the limit and when its queue is next free.
+    bottlenecks: BTreeMap<(IpAddr, IpAddr), (Bottleneck, Duration)>,
     inboxes: BTreeMap<SocketAddr, VecDeque<(Vec<u8>, SocketAddr)>>,
     /// Keyed by (delivery time, send sequence) so ties break in send order.
     in_flight: BTreeMap<(Duration, u64), Datagram>,
@@ -109,6 +122,7 @@ impl SimNetwork {
                 default_link: LinkConfig::default(),
                 links: BTreeMap::new(),
                 partitions: BTreeSet::new(),
+                bottlenecks: BTreeMap::new(),
                 inboxes: BTreeMap::new(),
                 in_flight: BTreeMap::new(),
                 seq: 0,
@@ -165,6 +179,21 @@ impl SimNetwork {
         self.lock().links.insert((from, to), link);
     }
 
+    /// Limit the capacity from host `from` to host `to` (one direction), or
+    /// lift the limit with `None`. Applies to datagrams sent from now on,
+    /// before the link's latency and jitter.
+    pub fn set_bottleneck(&self, from: IpAddr, to: IpAddr, limit: Option<Bottleneck>) {
+        let mut s = self.lock();
+        match limit {
+            Some(b) => {
+                s.bottlenecks.insert((from, to), (b, Duration::ZERO));
+            }
+            None => {
+                s.bottlenecks.remove(&(from, to));
+            }
+        }
+    }
+
     /// Cut hosts `a` and `b` off from each other, in both directions. Datagrams
     /// already in flight between them are dropped too.
     pub fn partition(&self, a: IpAddr, b: IpAddr) {
@@ -215,7 +244,17 @@ impl DatagramSocket for SimSocket {
         if loss_draw < u64::from(link.loss_per_million) || s.partitioned(from_ip, to_ip) {
             return Ok(());
         }
-        let at = now + link.latency + Duration::from_nanos(jitter);
+        let mut leaves = now;
+        if let Some((b, free_at)) = s.bottlenecks.get_mut(&(from_ip, to_ip)) {
+            let start = (*free_at).max(now);
+            if start - now > b.max_queue {
+                return Ok(());
+            }
+            let bits = payload.len() as u64 * 8;
+            *free_at = start + Duration::from_nanos(bits * 1_000_000 / u64::from(b.kbps.max(1)));
+            leaves = *free_at;
+        }
+        let at = leaves + link.latency + Duration::from_nanos(jitter);
         let seq = s.seq;
         s.seq += 1;
         s.in_flight.insert(

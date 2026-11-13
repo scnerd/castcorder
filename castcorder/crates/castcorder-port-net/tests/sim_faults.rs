@@ -147,3 +147,40 @@ fn same_seed_same_trace_different_seed_different_trace() {
     assert_eq!(trace(11), trace(11));
     assert_ne!(trace(11), trace(12));
 }
+
+#[test]
+fn a_bottleneck_paces_datagrams_and_drops_past_its_queue() {
+    use castcorder_port_net::Bottleneck;
+    let n = net(1, LinkConfig::default());
+    // 80 kbit/s: a 1000-byte datagram takes 100 ms to leave; 250 ms of queue.
+    n.set_bottleneck(
+        host(1),
+        host(2),
+        Some(Bottleneck {
+            kbps: 80,
+            max_queue: Duration::from_millis(250),
+        }),
+    );
+    let (a, b) = (n.bind(host(1)), n.bind(host(2)));
+    for i in 0..5u8 {
+        a.send_to(&[i; 1000], b.local_addr()).unwrap();
+    }
+    // The other direction is not limited.
+    b.send_to(b"back", a.local_addr()).unwrap();
+    assert_eq!(drain(&a), vec![b"back".to_vec()]);
+    let mut got = vec![];
+    for _ in 0..10 {
+        n.time().advance(Duration::from_millis(100));
+        got.push(drain(&b).iter().map(|p| p[0]).collect::<Vec<u8>>());
+    }
+    // Datagrams 0-3 queue (waits 0, 100, 200, 300 ms: the last is past 250 ms
+    // and dropped) and arrive one per 100 ms.
+    assert_eq!(got[..4], [vec![0], vec![1], vec![2], vec![]]);
+    assert!(got[4..].iter().all(|g| g.is_empty()));
+    // Lifted: no pacing.
+    n.set_bottleneck(host(1), host(2), None);
+    for i in 0..5u8 {
+        a.send_to(&[i; 1000], b.local_addr()).unwrap();
+    }
+    assert_eq!(drain(&b).len(), 5);
+}

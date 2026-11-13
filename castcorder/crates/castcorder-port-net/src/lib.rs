@@ -5,7 +5,7 @@
 //!   `Transmit`s and takes received packets with their source address).
 //! - [`UdpDatagramSocket`] is the real implementation: a UDP socket on loopback.
 //! - [`SimNetwork`] is the simulated one: an in-process network with per-link
-//!   latency, jitter (which reorders), loss, and partitions, driven by a shared
+//!   latency, jitter (which reorders), loss, capacity limits, and partitions, driven by a shared
 //!   [`SimTime`] and deterministic from a seed.
 //! - [`contract`] is the behaviour both implementations must show; it runs against
 //!   each in `tests/contract.rs`.
@@ -22,7 +22,7 @@ pub use castcorder_port_clock::SimTime;
 pub mod contract;
 mod sim;
 
-pub use sim::{LinkConfig, SimNetwork, SimSocket};
+pub use sim::{Bottleneck, LinkConfig, SimNetwork, SimSocket};
 
 /// The largest payload a datagram may carry (the IPv4 UDP limit).
 pub const MAX_DATAGRAM: usize = 65_507;

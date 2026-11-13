@@ -78,7 +78,9 @@ tasks:
       that directory's node_modules (PLAYWRIGHT_BROWSERS_PATH=0), never globally.
       The host (bound to loopback) serves dist/ over localhost HTTP to guest A, the
       producer, and over HTTPS to guest B; A is fed a deterministic WAV, both join,
-      B must receive A's audio, and A's take must come back out of OPFS bit-exact.
+      B must receive A's audio, each must decode the other's simulcast video
+      (camera off and on again without renegotiating), and A's take must come
+      back out of OPFS bit-exact.
       Then the recording fallbacks: `fallback` (Chromium with
       MediaStreamTrackProcessor deleted from window) and `firefox` (two headless
       Firefox guests, AudioWorklet capture; the host binds 0.0.0.0 and advertises

@@ -121,6 +121,14 @@ What they changed or left open:
 - **Start-up gap.** A freshly opened virtual microphone delivered nothing for about 2 s. Acceptable if not easy to avoid: producers wait for everyone to be back before talking.
 - **Unverified:** Firefox and Safari end to end (medium-low priority), any relayed or lossy network path, Windows and macOS capture, and virtual webcams on CI runners.
 
+## M4 live video (part 1: live only)
+
+- **Sending.** A browser guest opens its camera with its own `getUserMedia` (a missing or refused camera never costs the microphone) and sends it on one video transceiver created at connect with two VP8 simulcast encodings: `h` full size up to 800 kbit/s, `l` half size up to 150 kbit/s. Turning the camera off or on swaps the sender's track (`replaceTrack`, null when off) and releases or reopens the device, so it never renegotiates. Headless Chromium and Firefox both send both layers.
+- **Forwarding.** Per receiver, every 250 ms, the host reserves the forwarded audio's measured rate, then gives every video track its lowest live layer while it fits 90 % of the receiver's TWCC estimate, then upgrades one step at a time (stepping up needs 25 % to spare; stepping down is immediate); otherwise that receiver gets no video. A layer silent for 2 s counts as not sent. A new layer is asked for a keyframe (PLI per rid: a simulcast track has no stream without one) and takes over at that keyframe, with RTP times shifted to continue the outgoing stream. The estimator is told to sustain what the next upgrade needs and probe for the best layers. str0m sends audio unpaced, ahead of queued video.
+- **UI.** Each remote participant gets a tile (video plus audio) labelled with the name in its stream id; the guest's own camera shows in a muted preview tile. The host's native participant stays audio only.
+- **Tested.** A simulation through str0m's real estimator on `SimNetwork` with capacity limits: an unlimited receiver climbs to `h`, one at 500 kbit/s gets `l`, one at 120 kbit/s gets no video, and all keep every audio frame. The browser test decodes each other's video in Chromium and Firefox, sees two layers sent, and toggles a camera without an offer.
+- **Open.** Video recording and the per-call decision to record video; native camera capture; tile names from the room rather than stream ids; Safari; real lossy and congested paths; CPU cost of two encodes on weak machines.
+
 ## Not in v1
 
 Screen sharing, text chat, live streaming to platforms, editing or mixing, transcription, mobile apps, scheduling UI, S3 targets, continuous upload during takes, explicit device pairing, self-served browser client, code signing. Host markers during a take are the first candidate after v1.

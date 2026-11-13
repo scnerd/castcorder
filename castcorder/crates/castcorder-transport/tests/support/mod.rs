@@ -15,7 +15,10 @@ use castcorder_transport::signal::Signal;
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::ChannelId;
 use str0m::format::Codec;
-use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
+use str0m::media::{
+    Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Rid, Simulcast,
+    SimulcastLayer,
+};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, Input, Output, Rtc};
 
@@ -27,6 +30,8 @@ pub struct Received {
     pub stream: String,
     pub kind: MediaKind,
     pub data: Vec<u8>,
+    /// The RTP time it arrived with (90 kHz for video).
+    pub rtp_time: u64,
 }
 
 pub struct TestGuest<S, C> {
@@ -48,6 +53,8 @@ pub struct TestGuest<S, C> {
     pub received: Vec<Received>,
     /// Keyframe requests the host sent for this guest's own video.
     pub keyframe_requests: usize,
+    /// The layer (rid) of each of those requests, in order.
+    pub keyframe_layers: Vec<Option<Rid>>,
     pub offers_received: usize,
     pub host_heartbeats: usize,
     pub control_in: Vec<Vec<u8>>,
@@ -61,6 +68,12 @@ fn crypto() -> Arc<str0m::crypto::CryptoProvider> {
 impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
     /// A guest and its first offer (SDP text).
     pub fn new(socket: S, clock: C) -> (Self, String) {
+        Self::with_simulcast(socket, clock, false)
+    }
+
+    /// A guest whose video is sent as two simulcast layers, "h" and "l" (with
+    /// `simulcast`), as a Chromium guest sends it.
+    pub fn with_simulcast(socket: S, clock: C, simulcast: bool) -> (Self, String) {
         let base = Instant::now();
         let now = base + clock.monotonic();
         let mut rtc = Rtc::builder()
@@ -84,7 +97,10 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
             Direction::SendOnly,
             Some("own".into()),
             None,
-            None,
+            simulcast.then(|| Simulcast {
+                send: vec![SimulcastLayer::new("h"), SimulcastLayer::new("l")],
+                recv: vec![],
+            }),
         );
         api.add_channel("control".into());
         api.add_channel("data".into());
@@ -106,6 +122,7 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
             connected: false,
             received: vec![],
             keyframe_requests: 0,
+            keyframe_layers: vec![],
             offers_received: 0,
             host_heartbeats: 0,
             control_in: vec![],
@@ -202,9 +219,13 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
                     stream: self.streams.get(&d.mid).cloned().unwrap_or_default(),
                     kind,
                     data: d.data.to_vec(),
+                    rtp_time: d.time.numer(),
                 });
             }
-            Event::KeyframeRequest(r) if r.mid == self.video_mid => self.keyframe_requests += 1,
+            Event::KeyframeRequest(r) if r.mid == self.video_mid => {
+                self.keyframe_requests += 1;
+                self.keyframe_layers.push(r.rid);
+            }
             Event::ChannelData(d) if Some(d.id) == self.control => {
                 if d.binary {
                     self.control_in.push(d.data);
@@ -280,6 +301,26 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
         frame.resize(len, tag);
         let t = MediaTime::new(self.rtp_time * 90 / 48, Frequency::NINETY_KHZ);
         let w = self.rtc.writer(self.video_mid).unwrap();
+        w.write(pt, now, t, frame).unwrap();
+    }
+
+    /// Send one VP8 frame of `len` bytes on simulcast layer `rid` (see
+    /// [`TestGuest::with_simulcast`]): a key frame or a delta frame, its
+    /// payload filled with `tag`. The RTP time follows the audio clock.
+    pub fn send_video_layer(&mut self, rid: &str, keyframe: bool, tag: u8, len: usize) {
+        let now = self.now();
+        let Some(pt) = self.pt_for(self.video_mid, Codec::Vp8) else {
+            return;
+        };
+        let mut frame = if keyframe {
+            vec![0x50, 0x2a, 0x00, 0x9d, 0x01, 0x2a, 0x40, 0x01, 0xb4, 0x00]
+        } else {
+            // The frame tag's P bit set: an inter frame.
+            vec![0x51, 0x2a, 0x00]
+        };
+        frame.resize(len, tag);
+        let t = MediaTime::new(self.rtp_time * 90 / 48, Frequency::NINETY_KHZ);
+        let w = self.rtc.writer(self.video_mid).unwrap().rid(Rid::from(rid));
         w.write(pt, now, t, frame).unwrap();
     }
 
