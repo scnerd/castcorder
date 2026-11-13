@@ -17,7 +17,8 @@
 //! against `performance.timeOrigin + now()`, placed on the host timeline by
 //! the clock estimate the page's pings feed (`clock-sample`). On
 //! `list` any track left unfinalised by a crash is repaired from the file
-//! length.
+//! length (an empty or torn sidecar is rebuilt from the timing header); the scan creates
+//! no file and skips tracks another tab holds open.
 //!
 //! The raw audio arrives by one of three capture paths, chosen by the page:
 //! `mstp-window` (`source {readable}`: MediaStreamTrackProcessor on the page,
@@ -136,6 +137,25 @@ pub(crate) async fn open_sync(
     Ok(JsFuture::from(fh.create_sync_access_handle())
         .await?
         .unchecked_into())
+}
+
+/// An attempt to open a file that should already exist.
+pub(crate) enum Opened {
+    Open(FileSystemSyncAccessHandle),
+    /// There is no such file.
+    Missing,
+    /// It exists but cannot be opened now: OPFS allows one sync handle per
+    /// file, so another tab recording or syncing it holds it. Why, as text.
+    Busy(String),
+}
+
+/// Open `name` in `dir` if it exists; never creates it.
+pub(crate) async fn open_existing(dir: &FileSystemDirectoryHandle, name: &str) -> Opened {
+    match open_sync(dir, name, false).await {
+        Ok(h) => Opened::Open(h),
+        Err(e) if string(&e, "name") == "NotFoundError" => Opened::Missing,
+        Err(e) => Opened::Busy(describe(&e)),
+    }
 }
 
 pub(crate) fn at(pos: f64) -> FileSystemReadWriteOptions {
@@ -874,7 +894,97 @@ pub(crate) async fn entry_names(dir: &FileSystemDirectoryHandle) -> Result<Vec<S
     Ok(out)
 }
 
-/// List every track, repairing any that a crash left unfinalised.
+/// The sidecar of `track` as it was when recording started, rebuilt from its
+/// timing metadata's header (written with the first audio): `Ok(None)` if
+/// there is no usable header, `Err` if the file is held elsewhere.
+async fn rebuilt_meta(
+    dir: &FileSystemDirectoryHandle,
+    track: &str,
+) -> Result<Option<JsValue>, String> {
+    let h = match open_existing(dir, &format!("{track}{}", timing::SUFFIX)).await {
+        Opened::Open(h) => h,
+        Opened::Missing => return Ok(None),
+        Opened::Busy(why) => return Err(why),
+    };
+    let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
+    h.close();
+    let Some(hd) = timing::header(&text).filter(|hd| hd.track == track) else {
+        return Ok(None);
+    };
+    let m = object();
+    set(&m, "name", track);
+    set(&m, "file", format!("{track}.wav"));
+    set(&m, "take", hd.take);
+    set(&m, "call", hd.call);
+    set(&m, "device", hd.device);
+    set(&m, "source", hd.source);
+    set(&m, "sampleRate", hd.sample_rate);
+    set(&m, "channels", hd.channels);
+    Ok(Some(m))
+}
+
+/// Check one track that is not recording here and not in the outbox: a
+/// track a crash left unfinalised (or with a torn header) is repaired from
+/// the file length, and its sidecar, if it has one, rewritten in place.
+/// Fills `item` for the list.
+fn check_track(
+    wav: &FileSystemSyncAccessHandle,
+    sidecar: Option<&FileSystemSyncAccessHandle>,
+    meta: &JsValue,
+    track: &str,
+    rebuilt: bool,
+    item: &JsValue,
+) -> Result<(), JsValue> {
+    let size = wav.get_size()? as u64;
+    let mut head = [0u8; HEADER_LEN];
+    let got = wav.read_with_u8_array_and_options(&mut head, &at(0.0))? as usize;
+    let Some(fmt) = parse_header(&head[..got]) else {
+        return Err("unreadable header".into());
+    };
+    let frames = frames_in_file(size, fmt.channels);
+    let finalised = get(meta, "finalised").is_truthy();
+    let mut recovered = get(meta, "recovered").is_truthy();
+    // Without a sidecar there is no record to mark finalised: the header is
+    // repaired only when it disagrees with the length.
+    if header_frames(&head) != frames || (!finalised && sidecar.is_some()) {
+        // Crash recovery: trust the file length, drop any torn final frame.
+        wav.truncate_with_f64(frame_offset(frames, fmt.channels) as f64)?;
+        wav.write_with_u8_array_and_options(
+            &wav_header(fmt.sample_rate, fmt.channels, frames),
+            &at(0.0),
+        )?;
+        wav.flush()?;
+        recovered = true;
+        set(meta, "finalised", true);
+        set(meta, "recovered", true);
+        set(
+            meta,
+            "headerFramesBeforeRecovery",
+            header_frames(&head) as f64,
+        );
+        set(meta, "frames", frames as f64);
+        if rebuilt {
+            set(meta, "sidecarRebuilt", true);
+        }
+        if let Some(h) = sidecar {
+            write_text(h, &String::from(JSON::stringify(meta)?))?;
+        }
+        warn!(track = %track, frames, sidecar = sidecar.is_some(), sidecar_rebuilt = rebuilt, "track recovered after an unclean stop");
+    }
+    set(item, "sampleRate", fmt.sample_rate);
+    set(item, "channels", fmt.channels);
+    set(item, "frames", frames as f64);
+    set(item, "recovered", recovered);
+    set(
+        item,
+        "seconds",
+        frames as f64 / f64::from(fmt.sample_rate.max(1)),
+    );
+    Ok(())
+}
+
+/// List every track, repairing any that a crash left unfinalised. Creates no
+/// file, and skips (lists as `busy`) a track whose files another tab holds.
 pub(crate) async fn list() -> Result<(), JsValue> {
     let dir = tracks_dir().await?;
     let active = ACTIVE.with(|a| a.borrow().as_ref().map(|a| a.name.clone()));
@@ -915,61 +1025,71 @@ pub(crate) async fn list() -> Result<(), JsValue> {
             tracks.push(&item);
             continue;
         }
-        let meta: JsValue = match open_sync(&dir, &format!("{track}.json"), true).await {
-            Ok(h) => {
-                let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
-                h.close();
-                JSON::parse(&text).unwrap_or_else(|_| object())
-            }
-            Err(_) => object(),
-        };
-        set(&item, "take", get(&meta, "take"));
-        let wav = open_sync(&dir, n, false).await?;
-        let size = wav.get_size()? as u64;
-        let mut head = [0u8; HEADER_LEN];
-        let got = wav.read_with_u8_array_and_options(&mut head, &at(0.0))? as usize;
-        let Some(fmt) = parse_header(&head[..got]) else {
-            wav.close();
-            set(&item, "error", "unreadable header");
+        // The scan never creates a file: a track's files are opened only if
+        // they exist. One held elsewhere (another tab recording or syncing
+        // it) is skipped this pass; that tab owns it.
+        let busy = |why: &str| {
+            info!(track = %track, reason = %why, "track in use elsewhere; skipped this scan");
+            set(&item, "busy", true);
             tracks.push(&item);
-            continue;
         };
-        let frames = frames_in_file(size, fmt.channels);
-        let finalised = get(&meta, "finalised").is_truthy();
-        let mut recovered = get(&meta, "recovered").is_truthy();
-        if !finalised || header_frames(&head) != frames {
-            // Crash recovery: trust the file length, drop any torn final frame.
-            wav.truncate_with_f64(frame_offset(frames, fmt.channels) as f64)?;
-            wav.write_with_u8_array_and_options(
-                &wav_header(fmt.sample_rate, fmt.channels, frames),
-                &at(0.0),
-            )?;
-            wav.flush()?;
-            recovered = true;
-            set(&meta, "finalised", true);
-            set(&meta, "recovered", true);
-            set(
-                &meta,
-                "headerFramesBeforeRecovery",
-                header_frames(&head) as f64,
-            );
-            set(&meta, "frames", frames as f64);
-            if let Ok(h) = open_sync(&dir, &format!("{track}.json"), true).await {
-                let _ = write_text(&h, &String::from(JSON::stringify(&meta)?));
-                h.close();
+        let sidecar = match open_existing(&dir, &format!("{track}.json")).await {
+            Opened::Open(h) => Some(h),
+            Opened::Missing => None,
+            Opened::Busy(why) => {
+                busy(&why);
+                continue;
             }
-            warn!(track = %track, frames, "track recovered after an unclean stop");
+        };
+        let wav = match open_existing(&dir, n).await {
+            Opened::Open(h) => h,
+            Opened::Missing | Opened::Busy(_) => {
+                if let Some(s) = sidecar {
+                    s.close();
+                }
+                busy("the audio file is not openable now");
+                continue;
+            }
+        };
+        let text = sidecar
+            .as_ref()
+            .map(|h| String::from_utf8_lossy(&read_all(h).unwrap_or_default()).to_string())
+            .unwrap_or_default();
+        let mut meta = JSON::parse(&text).ok().filter(JsValue::is_object);
+        let mut rebuilt = false;
+        if meta.is_none() {
+            // A missing, empty or torn sidecar (a kill between its truncate
+            // and write): what it said is in the timing metadata's header.
+            match rebuilt_meta(&dir, &track).await {
+                Ok(m) => {
+                    rebuilt = m.is_some();
+                    meta = m;
+                }
+                Err(why) => {
+                    wav.close();
+                    if let Some(s) = sidecar {
+                        s.close();
+                    }
+                    busy(&why);
+                    continue;
+                }
+            }
         }
+        let meta = meta.unwrap_or_else(object);
+        set(&item, "take", get(&meta, "take"));
+        if sidecar.is_none() {
+            // Nothing to sync it with (the host needs the sidecar): kept as
+            // it is, never deleted, listed.
+            set(&item, "noSidecar", true);
+        }
+        let r = check_track(&wav, sidecar.as_ref(), &meta, &track, rebuilt, &item);
         wav.close();
-        set(&item, "sampleRate", fmt.sample_rate);
-        set(&item, "channels", fmt.channels);
-        set(&item, "frames", frames as f64);
-        set(&item, "recovered", recovered);
-        set(
-            &item,
-            "seconds",
-            frames as f64 / f64::from(fmt.sample_rate.max(1)),
-        );
+        if let Some(s) = sidecar {
+            s.close();
+        }
+        if let Err(e) = r {
+            set(&item, "error", describe(&e));
+        }
         tracks.push(&item);
     }
     let o = object();

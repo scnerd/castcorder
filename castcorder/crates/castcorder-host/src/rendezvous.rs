@@ -14,8 +14,9 @@
 //!   ephemeral key. It reconnects with backoff.
 //! - The rendezvous's STUN port is handed to the transport, which learns the
 //!   host's server-reflexive address through its own UDP socket.
-//! - The WebSocket URL names the host id (`/ws?host=...`), so a rendezvous
-//!   with a TURN server puts relay credentials in the hello; the first UDP
+//! - A rendezvous with a TURN server puts relay credentials for this host in
+//!   its `registered` frame (once the key is proven; older versions put them
+//!   in the hello, for the host id the WebSocket URL names); the first UDP
 //!   `turn:` server is handed to the transport, which allocates a relayed
 //!   address on it for guests that cannot reach this machine directly.
 
@@ -316,13 +317,12 @@ fn session(
 ) -> Result<(), String> {
     let t = target(&cfg.base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
-    // Naming our host id asks the rendezvous for relay (TURN) credentials.
-    let url = format!("{}?host={}", t.ws_url, cfg.key.id().encode());
-    let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
+    // The rendezvous gives this host relay (TURN) credentials in `registered`,
+    // once it has proved its key (a `?host=` here would ask for them in the
+    // hello, which is refused while this host is not yet online).
+    let (mut ws, _) = tungstenite::client(t.ws_url.as_str(), stream).map_err(|e| e.to_string())?;
     let ServerMsg::Hello {
-        nonce,
-        stun_port,
-        ice_servers,
+        nonce, stun_port, ..
     } = read_msg(&mut ws)?
     else {
         return Err("expected hello".into());
@@ -335,13 +335,17 @@ fn session(
             sig: b64(&cfg.key.sign_register(&nonce)),
         },
     )?;
-    match read_msg(&mut ws)? {
-        ServerMsg::Registered { observed } => {
+    let ice_servers = match read_msg(&mut ws)? {
+        ServerMsg::Registered {
+            observed,
+            ice_servers,
+        } => {
             info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), observed = %observed, "registered with the rendezvous");
+            ice_servers
         }
         ServerMsg::Error { code, message } => return Err(format!("{code}: {message}")),
         other => return Err(format!("expected registered, got {other:?}")),
-    }
+    };
     if let Some(port) = stun_port {
         let server = (t.host.as_str(), port)
             .to_socket_addrs()

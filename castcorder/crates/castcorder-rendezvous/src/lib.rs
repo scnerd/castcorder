@@ -17,8 +17,10 @@
 //!
 //! Stateless beyond live connections: nothing is stored on disk.
 //! Wire protocol: `castcorder_link::wire`. Structured `tracing` logs.
-//! With a TURN server configured, the hello also carries short-lived relay
-//! credentials for the host named in the WebSocket URL ([`turn`]).
+//! With a TURN server configured, a host gets short-lived relay credentials
+//! ([`turn`]) in its `registered` frame, once it has proved its key, and a
+//! guest in the hello for the host named in the WebSocket URL, only while
+//! that host is online (otherwise the hello's `relay_error` says why).
 
 pub mod mailbox;
 pub mod server;

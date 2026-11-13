@@ -13,6 +13,8 @@
 // 4. Each guest's outbox syncs its track and JSON sidecar into the host's
 //    library (--library test-results/library), verified; only then is the
 //    OPFS copy deleted, and the test waits until both guests' OPFS is empty.
+//    Mid-take, a second tab of A's profile loads: its startup scan must list
+//    A's recording track as busy (files held by A's worker), with no error.
 // 5. A's track, as the host received it, must be bit-exact against the input
 //    (Chrome's int16 -> float scaling, every frame aligned, no dropped,
 //    duplicated or inserted frames), about 5 s long, 44.1 kHz stereo.
@@ -49,7 +51,9 @@
 // 10. (chromium, firefox) Device identity: every join above proves its device
 //    key; on a third host an upgraded pre-key profile keeps its trust and its
 //    pending track, and an impostor with another device's id is refused: see
-//    identityChecks() at the end.
+//    identityChecks() at the end. The same profile also holds a track with an
+//    empty sidecar (recovered from its timing header and synced) and audio
+//    with no sidecar (kept; the scan creates no file).
 //
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
@@ -317,7 +321,30 @@ try {
     await waitFor(async () => { await noErrors(p, n); return (await text(p, '#recording')).includes('recording take'); },
       'guest ' + n + ' recording', 10000);
   }
-  await sleep(TAKE_SECONDS * 1000);
+  const takeT0 = Date.now();
+  // A second tab of A's profile (same OPFS) loads mid-take: its worker's
+  // startup scan meets the files A's worker holds open (one sync handle per
+  // file) and must list the track as busy, without an error and without
+  // touching it (A's take is checked bit-exact below).
+  {
+    const second = await A.context().newPage();
+    const secondLog = [];
+    second.on('console', (m) => secondLog.push(m.text()));
+    second.on('pageerror', (e) => secondLog.push('[pageerror] ' + e.message));
+    await second.goto(HTTP + '/?name=A2');
+    let listed;
+    try {
+      listed = await waitFor(async () => { const t = await json(second, '#debug-tracks'); return t && t.length ? t : null; },
+        'second tab lists A\x27s tracks', 10000);
+    } catch { listed = []; }
+    const errs = await text(second, '#errors');
+    check(listed.length > 0 && listed.every((t) => t.busy) && errs === '',
+      'a second tab\x27s startup scan skips the track another tab is recording (busy, no error): '
+      + JSON.stringify(listed) + (errs ? ' errors: ' + errs : ''));
+    await second.close();
+    writeFileSync(join(RESULTS, 'guest-A-second-tab' + (FULL ? '' : '-' + MODE) + '.log'), secondLog.join('\n'));
+  }
+  await sleep(Math.max(0, TAKE_SECONDS * 1000 - (Date.now() - takeT0)));
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);
   check(true, 'producer stopped take 1');
@@ -805,21 +832,35 @@ async function identityChecks() {
     await seedTrack(seed);
     await seed.close();
   };
+  // Beside it (cast-dao): `torn-` is a track killed while its sidecar was
+  // being rewritten (an empty sidecar, a header still counting 0 frames, the
+  // timing metadata's header intact): the scan rebuilds the sidecar from the
+  // timing header and the track must sync like any other. `orphan-` is audio
+  // with no sidecar at all: the scan must not create one and must keep the
+  // audio.
   const seedTrack = (page) => page.evaluate(async ([uuid, call]) => {
     const frames = 4800, ch = 1, rate = 48000;
-    const buf = new ArrayBuffer(58 + frames * ch * 4);
-    const v = new DataView(buf);
-    const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-    str(0, 'RIFF'); v.setUint32(4, 50 + frames * ch * 4, true); str(8, 'WAVE'); str(12, 'fmt ');
-    v.setUint32(16, 18, true); v.setUint16(20, 3, true); v.setUint16(22, ch, true); v.setUint32(24, rate, true);
-    v.setUint32(28, rate * ch * 4, true); v.setUint16(32, ch * 4, true); v.setUint16(34, 32, true); v.setUint16(36, 0, true);
-    str(38, 'fact'); v.setUint32(42, 4, true); v.setUint32(46, frames, true); str(50, 'data'); v.setUint32(54, frames * ch * 4, true);
-    for (let i = 0; i < frames; i++) v.setFloat32(58 + i * 4, 0.25 * Math.sin(i / 10), true);
+    const wav = (freq, headerFrames) => {
+      const buf = new ArrayBuffer(58 + frames * ch * 4);
+      const v = new DataView(buf);
+      const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+      str(0, 'RIFF'); v.setUint32(4, 50 + headerFrames * ch * 4, true); str(8, 'WAVE'); str(12, 'fmt ');
+      v.setUint32(16, 18, true); v.setUint16(20, 3, true); v.setUint16(22, ch, true); v.setUint32(24, rate, true);
+      v.setUint32(28, rate * ch * 4, true); v.setUint16(32, ch * 4, true); v.setUint16(34, 32, true); v.setUint16(36, 0, true);
+      str(38, 'fact'); v.setUint32(42, 4, true); v.setUint32(46, headerFrames, true); str(50, 'data'); v.setUint32(54, headerFrames * ch * 4, true);
+      for (let i = 0; i < frames; i++) v.setFloat32(58 + i * 4, 0.25 * Math.sin(i / freq), true);
+      return buf;
+    };
     const meta = { name: 'legacy-take0001', file: 'legacy-take0001.wav', take: 1, device: uuid, displayName: 'M', call,
       source: 'mic', finalised: true, frames, sampleRate: rate, channels: ch };
+    const timingHeader = { type: 'header', version: 1, call, device: uuid, take: 1, track: 'torn-take0001', source: 'mic',
+      sample_rate: rate, channels: ch, device_clock: 'test', host_clock: 'test', host_timeline: 0 };
     const root = await navigator.storage.getDirectory();
     const d = await root.getDirectoryHandle('tracks', { create: true });
-    for (const [name, data] of [['legacy-take0001.wav', buf], ['legacy-take0001.json', JSON.stringify(meta)]]) {
+    for (const [name, data] of [['legacy-take0001.wav', wav(10, frames)], ['legacy-take0001.json', JSON.stringify(meta)],
+      ['torn-take0001.wav', wav(7, 0)], ['torn-take0001.json', ''],
+      ['torn-take0001.timing.jsonl', JSON.stringify(timingHeader) + '\n{"type":"segment","segment":1,"file":"torn-take0001.wav"}\n'],
+      ['orphan-take0001.wav', wav(13, frames)]]) {
       const w = await (await d.getFileHandle(name, { create: true })).createWritable();
       await w.write(data);
       await w.close();
@@ -845,10 +886,18 @@ async function identityChecks() {
       for await (const k of d.keys()) out.push(k);
       return out;
     });
-    return names.some((n) => n.startsWith('legacy-')) ? null : names;
-  }, 'M\x27s OPFS emptied of the old track', 30000);
+    return names.some((n) => n.startsWith('legacy-') || n.startsWith('torn-')) ? null : names;
+  }, 'M\x27s OPFS emptied of the old and the torn track', 30000);
   check(opfsLeft.every((n) => !n.startsWith('legacy-')),
     'M\x27s pending track from before the upgrade synced (kept under its old UUID in the manifest) and left OPFS');
+  check(opfsLeft.every((n) => !n.startsWith('torn-')),
+    'a track whose sidecar a crash left empty was recovered from its timing header, synced and left OPFS');
+  check(opfsLeft.includes('orphan-take0001.wav') && !opfsLeft.includes('orphan-take0001.json'),
+    'the startup scan created no sidecar for audio that has none, and kept the audio: ' + opfsLeft.join(' '));
+  const listed = JSON.parse((await M.textContent('#debug-tracks')) || '[]');
+  const orphan = listed.find((t) => t.name === 'orphan-take0001');
+  check(orphan && orphan.noSidecar && !orphan.error && orphan.frames === 4800,
+    'the audio without a sidecar is listed (noSidecar, 4800 frames): ' + JSON.stringify(orphan));
 
   // N: another profile presenting the same old UUID: no takeover.
   const refusedBefore = count(/device alias binding refused/g);

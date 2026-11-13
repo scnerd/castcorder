@@ -203,6 +203,16 @@ pub fn parse(text: &str) -> Result<Vec<TimingLine>, serde_json::Error> {
     Ok(out)
 }
 
+/// The `header` of a timing file, from its first line alone (the rest may be
+/// torn or still growing). `None` if that line is not a header.
+pub fn header(text: &str) -> Option<Header> {
+    let first = text.lines().find(|l| !l.trim().is_empty())?;
+    match serde_json::from_str::<TimingLine>(first).ok()? {
+        TimingLine::Header(h) => Some(h),
+        _ => None,
+    }
+}
+
 /// Builds reference points from audio deliveries, about one per `interval`
 /// frames.
 ///
@@ -386,6 +396,19 @@ mod tests {
         assert_eq!(m.host_us(1, 96_000), Some(3_000_200.0));
         assert_eq!(m.end_frames, Some(96_000));
         assert!(parse("{\"type\":\"ref\"\n{\"type\":\"end\",\"frames\":1}\n").is_err());
+        // The header alone, even when a later line is torn mid-file.
+        let torn = format!(
+            "{}{{\"type\":\"ref\"\n{}",
+            lines[0].to_line(),
+            lines[1].to_line()
+        );
+        assert_eq!(
+            header(&torn).map(TimingLine::Header),
+            Some(lines[0].clone())
+        );
+        assert_eq!(header(&lines[1].to_line()), None);
+        assert_eq!(header(""), None);
+        assert_eq!(header("{\"type\":\"head"), None);
     }
 
     #[test]

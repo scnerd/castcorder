@@ -83,7 +83,14 @@ impl Mailbox {
             ice_servers: js_sys::Array::new().into(),
         };
         match mb.next(HELLO_MS).await? {
-            ServerMsg::Hello { ice_servers, .. } => {
+            ServerMsg::Hello {
+                ice_servers,
+                relay_error,
+                ..
+            } => {
+                if let Some(why) = relay_error {
+                    tracing::warn!(reason = %why, "the rendezvous gave no relay (TURN) credentials");
+                }
                 mb.ice_servers = js_sys::JSON::parse(&to_json(&ice_servers))?;
                 Ok(mb)
             }

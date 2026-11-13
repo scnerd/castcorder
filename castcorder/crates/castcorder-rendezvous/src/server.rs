@@ -15,7 +15,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
+use castcorder_link::wire::{IceServer, ServerMsg, b64, code, to_json};
 use castcorder_link::{HostId, stun};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
@@ -253,6 +253,24 @@ fn dispatch(senders: &HashMap<ConnId, mpsc::UnboundedSender<Message>>, outs: Vec
     }
 }
 
+/// A host that just proved its key (`registered` to `conn` among `outs`)
+/// gets relay credentials for itself in that frame.
+fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: Instant) {
+    let Some(turn) = &hub.turn else {
+        return;
+    };
+    for o in outs {
+        if let Out::Send(c, ServerMsg::Registered { ice_servers, .. }) = o
+            && *c == conn
+            && let Some(host) = mb.host_of(conn)
+            && mb.mint_allowed(host, now)
+        {
+            info!(conn, host = %host.short(), ttl_s = turn.ttl.as_secs(), registered = true, "relay credentials minted");
+            ice_servers.push(mint(turn, &host, unix_now()));
+        }
+    }
+}
+
 async fn connection(
     hub: Arc<Hub>,
     mut socket: WebSocket,
@@ -267,17 +285,32 @@ async fn connection(
         return;
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let mut relay_error = None;
     let opened = {
         let mut g = hub.mailbox.lock().expect("mailbox lock");
         let now = Instant::now();
         let r = g.0.open(ip, peer, nonce, now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
-            if let (Some(turn), Some(host)) = (&hub.turn, host)
-                && g.0.mint_allowed(host, now)
-            {
-                info!(conn = id, host = %host.short(), ttl_s = turn.ttl.as_secs(), "relay credentials minted");
-                ice.push(mint(turn, &host, unix_now()));
+            if let (Some(turn), Some(host)) = (&hub.turn, host) {
+                // Only for a host that is connected now: a link to a host
+                // that is gone (or never was) mints nothing. A host gets its
+                // own credentials once registered (see `registered`).
+                if !g.0.is_online(host) {
+                    info!(conn = id, host = %host.short(), "relay credentials refused: that host is not online");
+                    relay_error = Some(format!(
+                        "{}: that host is not online; no relay credentials",
+                        code::HOST_OFFLINE
+                    ));
+                } else if g.0.mint_allowed(host, now) {
+                    info!(conn = id, host = %host.short(), ttl_s = turn.ttl.as_secs(), "relay credentials minted");
+                    ice.push(mint(turn, &host, unix_now()));
+                } else {
+                    relay_error = Some(format!(
+                        "{}: too many relay credentials for this host",
+                        code::RATE_LIMITED
+                    ));
+                }
             }
         }
         r
@@ -294,6 +327,7 @@ async fn connection(
         nonce: b64(&nonce),
         stun_port: hub.stun_port,
         ice_servers: ice,
+        relay_error,
     };
     let _ = tx.send(Message::Text(to_json(&hello).into()));
     let mut ping = tokio::time::interval(PING);
@@ -311,7 +345,9 @@ async fn connection(
                 match msg {
                     Some(Ok(Message::Text(t))) => {
                         let mut g = hub.mailbox.lock().expect("mailbox lock");
-                        let outs = g.0.receive(id, t.as_str(), Instant::now());
+                        let now = Instant::now();
+                        let mut outs = g.0.receive(id, t.as_str(), now);
+                        registered(&hub, &mut g.0, id, &mut outs, now);
                         dispatch(&g.1, outs);
                     }
                     Some(Ok(Message::Binary(_))) => {

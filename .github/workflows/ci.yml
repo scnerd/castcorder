@@ -133,3 +133,84 @@ jobs:
         run: |
           ip -4 addr show
           task test:browser
+
+  # Tier 3, forced relay: coturn in Docker (the runner's Docker Engine), the real host
+  # and rendezvous as processes, two relay-only headless Chromium guests; spans a TURN
+  # credential renewal (relay.mjs). Then the local dev stack (docker-compose.yml) is
+  # validated and brought up for real: the rendezvous image builds and serves, and
+  # both STUN ports answer.
+  relay:
+    name: relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install browser system libraries
+        working-directory: castcorder/crates/castcorder-client/browser-test
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install-deps chromium
+
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+
+      - name: Pull coturn
+        run: docker pull coturn/coturn:4.6
+
+      - name: Relay test (spans a credential renewal)
+        run: task test:relay
+
+      - name: Upload relay logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-logs
+          path: castcorder/crates/castcorder-client/browser-test/test-results/relay-*
+
+      # The client build test:relay left in dist/ is what the compose file mounts.
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+
+      - name: Bring up the dev stack
+        run: |
+          docker compose up -d --build --wait --wait-timeout 600 || { docker compose logs; exit 1; }
+          for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
+          curl -fsS -o /dev/null -w 'client index %{http_code}\n' http://localhost:8080/v/0.0.0/
+          node castcorder/crates/castcorder-client/browser-test/stun-probe.mjs 127.0.0.1:3479 127.0.0.1:3478
+
+      - name: Stack logs
+        if: always()
+        run: docker compose logs --no-color || true
+
+      - name: Tear down the dev stack
+        if: always()
+        run: docker compose down --volumes || true
