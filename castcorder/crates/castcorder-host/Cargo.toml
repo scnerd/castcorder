@@ -49,8 +49,8 @@ rustls = { version = "0.23", default-features = false, features = [
 castcorder-capture-gst = { workspace = true, optional = true }
 castcorder-port-capture.workspace = true
 castcorder-recorder.workspace = true
-# Ctrl+C finalises an in-progress take of the host microphone before exit.
-ctrlc = { version = "3", optional = true }
+# Ctrl+C finalises an in-progress take (host microphone, safety tracks) before exit.
+ctrlc = "3"
 
 [features]
-native-capture = ["dep:castcorder-capture-gst", "dep:ctrlc"]
+native-capture = ["dep:castcorder-capture-gst"]

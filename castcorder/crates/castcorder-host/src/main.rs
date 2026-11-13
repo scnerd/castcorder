@@ -317,6 +317,9 @@ fn main() {
         call = call.with_alignment(cfg);
         call.align_recovered(recovered.iter().map(|r| r.take).collect());
     }
+    // The host's own recorder, told to finalise on Ctrl+C.
+    #[cfg_attr(not(feature = "native-capture"), allow(unused_mut))]
+    let mut local_takes: Option<mpsc::Sender<call::TakeCtl>> = None;
     #[cfg(feature = "native-capture")]
     if let Some(device) = args.participate.clone() {
         let cfg = native::Config {
@@ -328,10 +331,16 @@ fn main() {
             keep_wav: args.keep_wav,
         };
         let participant = native::start(cfg, tx.clone());
-        // Ctrl+C: finalise an in-progress take (WAV, timing, manifest, FLAC)
-        // before exiting; what is not finished is recovered at the next start.
-        let takes = participant.takes.clone();
-        if let Err(e) = ctrlc::set_handler(move || {
+        local_takes = Some(participant.takes.clone());
+        call = call.with_participant(participant);
+    }
+    // Ctrl+C: finalise an in-progress take of the host microphone (WAV,
+    // timing, manifest, FLAC) and finish the safety tracks before exiting;
+    // what is not finished is recovered at the next start (safety tracks are
+    // synced once a second, so a valid prefix survives anyway).
+    let shutdown = tx.clone();
+    if let Err(e) = ctrlc::set_handler(move || {
+        if let Some(takes) = &local_takes {
             let (done, finished) = mpsc::channel();
             if takes.send(call::TakeCtl::Stop { done: Some(done) }).is_ok() {
                 match finished.recv_timeout(std::time::Duration::from_secs(60)) {
@@ -345,11 +354,19 @@ fn main() {
                     }
                 }
             }
-            std::process::exit(0);
-        }) {
-            tracing::warn!(error = %e, "Ctrl+C handler not installed; an interrupted take is recovered at the next start");
         }
-        call = call.with_participant(participant);
+        let (done, finished) = mpsc::channel();
+        if shutdown.send(call::Command::Shutdown { done }).is_ok() {
+            match finished.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(()) => tracing::info!("Ctrl+C: safety tracks finished"),
+                Err(_) => tracing::warn!(
+                    "Ctrl+C: safety tracks not finished in time; their synced prefix stays readable"
+                ),
+            }
+        }
+        std::process::exit(0);
+    }) {
+        tracing::warn!(error = %e, "Ctrl+C handler not installed; an interrupted take is recovered at the next start");
     }
     let secret: rendezvous::SharedSecret = Arc::new(Mutex::new(
         rendezvous::call_secret(&call_dir).unwrap_or_else(|e| fail(&format!("call secret: {e}"))),

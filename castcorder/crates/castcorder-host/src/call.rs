@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::library::{Library, Puller};
-use castcorder_core::safety::SafetyRecorder;
+use castcorder_core::safety::{self, SafetyRecorder, SafetyWriter};
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
@@ -96,6 +96,12 @@ pub enum Command {
         /// The take.
         take: TakeId,
     },
+    /// The host is exiting (Ctrl+C): finish every safety track and stop
+    /// their writer thread.
+    Shutdown {
+        /// Told once the safety tracks are finished.
+        done: mpsc::Sender<()>,
+    },
     /// One Opus frame of the host's own participant (`--participate`).
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     LocalAudio {
@@ -155,8 +161,9 @@ pub struct Call {
     participant: Option<Participant>,
     local: Option<LocalAudio>,
     timeline: HostTimeline<SystemClock>,
-    /// Each guest's live Opus stream, kept per take (safety tracks).
-    safety: SafetyRecorder<FsStorage>,
+    /// Each guest's live Opus stream, kept per take (safety tracks), written
+    /// and synced on their own thread, never this one.
+    safety: SafetyWriter<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
     align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
     /// Room security: admission, roles, producer actions.
@@ -227,7 +234,10 @@ impl Call {
         last_take: u32,
         timeline: HostTimeline<SystemClock>,
     ) -> Self {
-        let safety = SafetyRecorder::new(library.call(), timeline.id());
+        let safety = SafetyWriter::spawn(
+            SafetyRecorder::new(library.call(), timeline.id()),
+            safety::DEFAULT_CAPACITY,
+        );
         Self {
             safety,
             status: TakeStatus::Idle,
@@ -512,9 +522,7 @@ impl Call {
         info!(call = %self.library.call(), take = take.0, host_us, "take started");
         match self.library.take_dir(take) {
             Ok(dir) => {
-                if let Err(e) = self.safety.start_take(take.0, dir) {
-                    warn!(take = take.0, error = %e, "no safety directory; safety tracks not kept");
-                }
+                self.safety.start_take(take.0, dir.clone());
                 if let Some(p) = &self.participant {
                     let _ = p.takes.send(TakeCtl::Start {
                         take,
@@ -863,6 +871,11 @@ impl Call {
             Command::LocalTracksDone { take } => {
                 self.local_busy.remove(&take.0);
                 self.align_completed(vec![take]);
+            }
+            Command::Shutdown { done } => {
+                info!("host exiting: finishing safety tracks");
+                self.safety.close();
+                let _ = done.send(());
             }
             Command::LocalAudio { rtp_time, data } => {
                 if let Some(local) = &self.local {
