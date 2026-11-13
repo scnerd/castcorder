@@ -75,11 +75,21 @@ pub enum ServerMsg {
         stun_port: Option<u16>,
         /// ICE servers a guest should give its RTCPeerConnection.
         ice_servers: Vec<IceServer>,
+        /// Why relay (TURN) credentials were asked for (`/ws?host=...`) but
+        /// not given: `<code>: <message>`, e.g. [`code::HOST_OFFLINE`] when
+        /// that host is not connected (credentials are only minted for a
+        /// host that is online).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_error: Option<String>,
     },
     /// The host is registered and will receive offers.
     Registered {
         /// The host's TCP source address as the server saw it.
         observed: String,
+        /// Relay (TURN) credentials for this host, minted once it proved its
+        /// key; empty without a TURN server (or when rate limited).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ice_servers: Vec<IceServer>,
     },
     /// A guest's sealed offer, to a host.
     Offer {
@@ -193,9 +203,30 @@ mod tests {
                     urls: vec!["stun:x:3479".into()],
                     username: None,
                     credential: None
-                }]
+                }],
+                relay_error: None,
             }),
             r#"{"type":"hello","nonce":"n","stun_port":3479,"ice_servers":[{"urls":["stun:x:3479"]}]}"#
+        );
+        // Older peers: a hello without relay_error, a registered without
+        // ice_servers, both still parse.
+        assert_eq!(
+            from_json::<ServerMsg>(
+                r#"{"type":"hello","nonce":"n","stun_port":null,"ice_servers":[]}"#
+            ),
+            Some(ServerMsg::Hello {
+                nonce: "n".into(),
+                stun_port: None,
+                ice_servers: vec![],
+                relay_error: None,
+            })
+        );
+        assert_eq!(
+            from_json::<ServerMsg>(r#"{"type":"registered","observed":"1.2.3.4:5"}"#),
+            Some(ServerMsg::Registered {
+                observed: "1.2.3.4:5".into(),
+                ice_servers: vec![],
+            })
         );
         assert_eq!(
             from_json::<ClientMsg>(r#"{"type":"offer","to":"h","sealed":"s"}"#),

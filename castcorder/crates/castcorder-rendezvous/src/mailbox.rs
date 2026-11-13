@@ -151,6 +151,19 @@ impl Mailbox {
         self.hosts.len()
     }
 
+    /// Whether a connection is registered as `host` right now.
+    pub fn is_online(&self, host: HostId) -> bool {
+        self.hosts.contains_key(&host)
+    }
+
+    /// The host `conn` is registered as, if it is a host.
+    pub fn host_of(&self, conn: ConnId) -> Option<HostId> {
+        match self.conns.get(&conn)?.role {
+            Role::Host(id) if self.hosts.get(&id) == Some(&conn) => Some(id),
+            _ => None,
+        }
+    }
+
     /// Live connections.
     pub fn connections(&self) -> usize {
         self.conns.len()
@@ -279,6 +292,8 @@ impl Mailbox {
             conn,
             ServerMsg::Registered {
                 observed: peer.to_string(),
+                // Filled by the server, which holds the TURN config.
+                ice_servers: vec![],
             },
         ));
         out
@@ -409,11 +424,16 @@ mod tests {
             vec![Out::Send(
                 h,
                 ServerMsg::Registered {
-                    observed: "10.0.0.1:5000".into()
+                    observed: "10.0.0.1:5000".into(),
+                    ice_servers: vec![],
                 }
             )]
         );
         assert_eq!(t.mb.hosts_online(), 1);
+        assert!(t.mb.is_online(key.id()));
+        assert!(!t.mb.is_online(HostKey::from_secret([2; 32]).id()));
+        assert_eq!(t.mb.host_of(h), Some(key.id()));
+        assert_eq!(t.mb.host_of(h + 1), None);
 
         let g = t.open(2);
         let (sealed, guest) = GuestSeal::seal(&key.id(), [9; 32], b"offer").unwrap();
