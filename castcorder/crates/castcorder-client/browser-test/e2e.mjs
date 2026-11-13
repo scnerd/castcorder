@@ -788,8 +788,21 @@ async function identityChecks() {
   };
 
   // M: the upgraded profile, with a pending track from before the upgrade.
-  const M = await openGuest('M', [], HTTPS3, withOldId(UUID));
-  await M.evaluate(async ([uuid, call]) => {
+  // The track is seeded before the app first loads in M's context, as it
+  // would be on disk after an upgrade: seeding into a running app races the
+  // storage worker's startup scan, which opens each track's sidecar with a
+  // sync access handle (Firefox, whose worker starts later, then refuses
+  // createWritable with NoModificationAllowedError). The seed page is an
+  // empty document on the app's origin (same OPFS), served by the test.
+  const seedLegacyTrack = async (ctx) => {
+    await withOldId(UUID)(ctx);
+    const seed = await ctx.newPage();
+    await seed.route(HTTPS3 + '/seed', (r) => r.fulfill({ contentType: 'text/html', body: '<!doctype html><title>seed</title>' }));
+    await seed.goto(HTTPS3 + '/seed');
+    await seedTrack(seed);
+    await seed.close();
+  };
+  const seedTrack = (page) => page.evaluate(async ([uuid, call]) => {
     const frames = 4800, ch = 1, rate = 48000;
     const buf = new ArrayBuffer(58 + frames * ch * 4);
     const v = new DataView(buf);
@@ -809,8 +822,7 @@ async function identityChecks() {
       await w.close();
     }
   }, [UUID, HTTPS3 + '/offer']);
-  await M.reload();
-  await M.waitForSelector('#join');
+  const M = await openGuest('M', [], HTTPS3, seedLegacyTrack);
   await M.click('#join');
   await waitFor(() => joined(M), 'M joined with its key', 30000);
   await waitFor(async () => /device alias bound/.test(host3Log), 'host bound M\x27s old id', 10000);
