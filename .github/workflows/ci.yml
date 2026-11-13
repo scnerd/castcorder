@@ -76,3 +76,60 @@ jobs:
       # Tiers 1-2 (unit, simulation). The system and browser tiers join here with M1.
       - name: Unit and simulation tests
         run: task check
+
+  # Tier 4: Playwright against headless Chromium and Firefox. No Docker: the host, the
+  # transport example and the client build all run as plain processes on the runner.
+  browser:
+    name: browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+
+      # Prebuilt binary; trunk downloads the pinned wasm-bindgen itself (Trunk.toml).
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Playwright itself and the browsers are installed by the tasks (setup.mjs); only
+      # the OS libraries need root, so they are installed here.
+      - name: Install browser system libraries
+        working-directory: castcorder/crates/castcorder-client/browser-test
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install-deps chromium firefox
+
+      # Headless runners have no sound server; without a sink Firefox's AudioContext stays
+      # suspended and the capture worklet never starts. A null sink stands in for a speaker.
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+          pactl info
+
+      - name: Browser tests
+        run: |
+          ip -4 addr show
+          task test:browser

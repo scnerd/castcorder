@@ -95,7 +95,7 @@ tasks:
       - node relay.mjs
 
   test:browser:
-    desc: Tier 4 browser tests (Playwright with headless Chromium, installed locally on first run)
+    desc: Tier 4 browser tests (Playwright with headless Chromium and Firefox, installed locally on first run; no Docker)
     cmds:
       - task: test:browser:transport
       - task: test:browser:client

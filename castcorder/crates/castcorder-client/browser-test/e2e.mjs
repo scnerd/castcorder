@@ -423,6 +423,9 @@ try {
   // Timing metadata (cast-whr): each guest's file parses, and its mapping
   // places the track's first frame just after the host's take start (loopback:
   // clocks are shared, so this checks the plumbing, not the estimator).
+  // The worklet capture path (fallback, firefox) starts on the audio thread's own schedule,
+  // and on a loaded CI runner Firefox was seen 44-72 ms late, so those modes allow 150 ms.
+  const FRAME0_TOL_MS = MODE === 'chromium' ? 50 : 150;
   for (const n of ['A', 'B']) {
     const t = parseTiming(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.timing.jsonl'), 'utf8'));
     const start = t.hostUsAt(0);
@@ -430,8 +433,8 @@ try {
     console.log('info ' + n + ' timing: ' + t.refs.length + ' refs, ' + t.sync.length + ' clock samples, last estimate '
       + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start');
     check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
-      && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < 50,
-      n + '\x27s timing metadata places frame 0 within 50 ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
+      && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_TOL_MS,
+      n + '\x27s timing metadata places frame 0 within ' + FRAME0_TOL_MS + ' ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
   }
   const SUFFIX = FULL ? '' : '-' + MODE;
   const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
