@@ -58,7 +58,12 @@ impl<F: StorageFile> GuestOutbox<F> {
         offer.root = *outboard.root.as_bytes();
         info!(call = %self.call, device = %offer.device, take = offer.take.0, track = %offer.name,
             size = offer.size, root = %hex(&offer.root), "track added to outbox");
-        self.sender.add_blob(file, outboard, self.cfg.unit_log);
+        self.sender.add_item_blob(
+            file,
+            outboard,
+            self.cfg.unit_log,
+            offer.name.clone().into_bytes(),
+        );
         self.offers.push(offer.clone());
         self.reported.push(false);
         Ok(offer)

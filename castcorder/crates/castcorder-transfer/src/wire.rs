@@ -7,7 +7,7 @@
 //! ```text
 //! REQUEST  0x01 | root[32] | n:u32 | n x (start_unit:u64, end_unit:u64)
 //! DATA     0x02 | root[32] | unit:u64 | offset:u32 | total:u32 | payload
-//! DONE     0x03 | root[32]
+//! DONE     0x03 | root[32] | item (rest of the message, may be empty)
 //! ERROR    0x04 | root[32] | code:u8
 //! ```
 //!
@@ -15,6 +15,9 @@
 //! receiver still needs. DATA carries a slice `[offset, offset+len)` of the
 //! bao-tree encoding of one unit; the unit encoding is `total` bytes long.
 //! DONE tells the sender the whole blob is verified on the receiver's disk.
+//! `item` names which of the sender's blobs that is (the guest's track name),
+//! because several blobs can share one root: byte-identical items. An empty
+//! item is the original frame and confirms every blob with that root.
 
 use std::ops::Range;
 
@@ -45,6 +48,7 @@ pub enum Msg {
     },
     Done {
         root: [u8; 32],
+        item: Vec<u8>,
     },
     Error {
         root: [u8; 32],
@@ -95,9 +99,10 @@ impl Msg {
                 out.extend_from_slice(&total.to_le_bytes());
                 out.extend_from_slice(payload);
             }
-            Msg::Done { root } => {
+            Msg::Done { root, item } => {
                 out.push(T_DONE);
                 out.extend_from_slice(root);
+                out.extend_from_slice(item);
             }
             Msg::Error { root, code } => {
                 out.push(T_ERROR);
@@ -142,14 +147,17 @@ impl Msg {
                     payload,
                 }
             }
-            T_DONE => Msg::Done { root },
+            T_DONE => Msg::Done {
+                root,
+                item: r.rest().to_vec(),
+            },
             T_ERROR => Msg::Error {
                 root,
                 code: r.u8()?,
             },
             _ => return Err(WireError("unknown message type")),
         };
-        if r.pos != b.len() && t != T_DATA {
+        if r.pos != b.len() {
             return Err(WireError("trailing bytes"));
         }
         Ok(msg)
@@ -208,7 +216,14 @@ mod tests {
                 total: 2000,
                 payload: vec![1, 2, 3],
             },
-            Msg::Done { root },
+            Msg::Done {
+                root,
+                item: Vec::new(),
+            },
+            Msg::Done {
+                root,
+                item: b"take1-mic".to_vec(),
+            },
             Msg::Error { root, code: 2 },
         ] {
             assert_eq!(Msg::decode(&m.encode()).unwrap(), m);

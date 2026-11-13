@@ -99,6 +99,7 @@ pub struct Receiver<F: StorageFile> {
     journal_len: u64,
     state: State,
     done_sent: bool,
+    item: Vec<u8>,
     pub stats: ReceiverStats,
 }
 
@@ -159,6 +160,7 @@ impl<F: StorageFile> Receiver<F> {
             journal_len: 0,
             state: State::Receiving,
             done_sent: false,
+            item: Vec::new(),
             stats,
         };
         if me.cfg.rescan_on_open && !me.stats.journal_reset {
@@ -192,6 +194,12 @@ impl<F: StorageFile> Receiver<F> {
 
     pub fn geometry(&self) -> Geometry {
         self.geo
+    }
+
+    /// Name the item this receiver fills: its DONE carries the name, so the
+    /// sender confirms that item and not others with the same content.
+    pub fn set_item(&mut self, item: impl Into<Vec<u8>>) {
+        self.item = item.into();
     }
 
     pub fn units_have(&self) -> u64 {
@@ -356,6 +364,7 @@ impl<F: StorageFile> Receiver<F> {
                     return Ok(Some(
                         Msg::Done {
                             root: *self.root.as_bytes(),
+                            item: self.item.clone(),
                         }
                         .encode(),
                     ));
