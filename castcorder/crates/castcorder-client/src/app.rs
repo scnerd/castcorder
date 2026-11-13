@@ -832,14 +832,41 @@ async fn answer_one(pc: &RtcPeerConnection, sdp: &str) -> Result<(), JsValue> {
     let local = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
     local.set_sdp(&string(&answer, "sdp"));
     JsFuture::from(pc.set_local_description(&local)).await?;
-    let sdp = pc
-        .local_description()
-        .map(|d| d.sdp())
-        .unwrap_or_else(|| string(&answer, "sdp"));
+    // No trickle (the host reads candidates from the SDP only), as for the
+    // first offer: after an ICE restart (the host's relay credentials
+    // renewed) the answer carries new credentials and must wait, briefly, for
+    // their candidates (a relay-only guest gathers a new TURN allocation).
+    // Right after setLocalDescription the gathering state may still read the
+    // previous "complete", so a candidate in the SDP is required too. A plain
+    // renegotiation already has both and goes at once.
+    let start = js_sys::Date::now();
+    let local_sdp = || {
+        pc.local_description()
+            .map(|d| d.sdp())
+            .unwrap_or_else(|| string(&answer, "sdp"))
+    };
+    while !(pc.ice_gathering_state() == RtcIceGatheringState::Complete
+        && candidates(&local_sdp()).0 > 0)
+        && pc.connection_state() != web_sys::RtcPeerConnectionState::Closed
+        && js_sys::Date::now() - start < 3000.0
+    {
+        crate::mailbox::sleep_ms(50).await;
+    }
+    let sdp = local_sdp();
+    let (count, relay) = candidates(&sdp);
     send_signal(&Signal::Answer { sdp });
     let ctx = with_engine(|e| e.ctx.clone());
-    info!(call = %ctx.call, device = %ctx.device, "answered host renegotiation");
+    info!(call = %ctx.call, device = %ctx.device, candidates = count, relay_candidates = relay, gathering = ?pc.ice_gathering_state(), waited_ms = js_sys::Date::now() - start, "answered host renegotiation");
     Ok(())
+}
+
+/// ICE candidates in `sdp`: (all, relayed).
+fn candidates(sdp: &str) -> (usize, usize) {
+    sdp.lines()
+        .filter(|l| l.starts_with("a=candidate:"))
+        .fold((0, 0), |(n, r), l| {
+            (n + 1, r + usize::from(l.contains(" typ relay")))
+        })
 }
 
 /// Drain the protocol client: responses we wait for and events.
