@@ -130,8 +130,6 @@ jobs:
           pactl info
 
       - name: Browser tests
-        continue-on-error: true
         run: |
           ip -4 addr show
-          task test:browser:transport
-          cd castcorder/crates/castcorder-client/browser-test && cargo build --release --locked -p castcorder-host && (cd .. && trunk build --release) && node setup.mjs && node e2e.mjs firefox
+          task test:browser
