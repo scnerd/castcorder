@@ -129,6 +129,10 @@ jobs:
           pactl set-default-sink ci
           pactl info
 
+      # ffprobe checks the recorded webcam tracks (WebM) in the video recording test.
+      - name: Install ffprobe
+        run: sudo apt-get install -y --no-install-recommends ffmpeg && ffprobe -version | head -1
+
       - name: Browser tests
         run: |
           ip -4 addr show

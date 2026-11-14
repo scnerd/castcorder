@@ -127,19 +127,19 @@ impl Call {
     }
 
     fn start_take(&mut self) -> Result<TakeId, String> {
-        if let TakeStatus::Recording { take } = self.status {
+        if let TakeStatus::Recording { take, .. } = self.status {
             return Err(format!("take {} is already recording", take.0));
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
-        self.status = TakeStatus::Recording { take };
+        self.status = TakeStatus::Recording { take, video: false };
         info!(call = "browser-test", take = take.0, "take started");
         self.broadcast();
         Ok(take)
     }
 
     fn stop_take(&mut self) -> Result<TakeId, String> {
-        let TakeStatus::Recording { take } = self.status else {
+        let TakeStatus::Recording { take, .. } = self.status else {
             return Err("no take is recording".into());
         };
         self.status = TakeStatus::Idle;
@@ -224,6 +224,10 @@ impl Call {
                     Request::GetRoom | Request::Room(_) => Response::Error {
                         kind: ErrorKind::NotAllowed,
                         message: "no room controls in this example".into(),
+                    },
+                    Request::ProfileUnmet(_) => Response::Error {
+                        kind: ErrorKind::Other,
+                        message: "no recording profile in this example".into(),
                     },
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {

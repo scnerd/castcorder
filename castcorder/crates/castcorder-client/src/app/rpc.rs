@@ -198,6 +198,21 @@ pub(super) fn pump_rpc(ui: Ui) {
                     }
                 }
                 Event::Room(s) => ui.room.set(Some(s)),
+                Event::ProfileUnmet {
+                    participant,
+                    name,
+                    issue,
+                } => {
+                    warn!(call = %ctx.call, device = %ctx.device, guest = participant.0, name = %name,
+                        take = issue.take.0, source = %issue.source.0, reason = %issue.reason,
+                        "a device cannot meet the recording profile");
+                    ui.profile_warnings.update(|v| {
+                        v.push(format!(
+                            "{name} (guest {}) cannot record {} for take {}: {}",
+                            participant.0, issue.source.0, issue.take.0, issue.reason
+                        ))
+                    });
+                }
                 Event::Meters(_) => {}
             }
         }
@@ -228,20 +243,24 @@ pub(super) fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
     });
     ui.take.set(match s {
         TakeStatus::Idle => "idle".into(),
-        TakeStatus::Recording { take } => format!("recording take {}", take.0),
+        TakeStatus::Recording { take, video: false } => format!("recording take {}", take.0),
+        TakeStatus::Recording { take, video: true } => {
+            format!("recording take {} (with video)", take.0)
+        }
     });
     for c in on_take_status(current, s) {
         match c {
-            RecorderCommand::Start(take) => start_track(ui, take),
+            RecorderCommand::Start(take, video) => start_track(ui, take, video),
             RecorderCommand::Stop(take) => stop_track(take),
         }
     }
     current
 }
 
-pub(super) fn start_track(ui: Ui, take: TakeId) {
+pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
     let (ctx, participant, raw, capture) = with_engine(|e| {
         e.recording = Some(take);
+        e.video_take = video.then_some(take);
         (
             e.ctx.clone(),
             e.participant,
@@ -249,6 +268,11 @@ pub(super) fn start_track(ui: Ui, take: TakeId) {
             e.capture.clone(),
         )
     });
+    if video {
+        start_video(ui, take);
+    } else {
+        ui.video_rec.set(String::new());
+    }
     if capture.as_deref() == Some("none") {
         warn!(call = %ctx.call, device = %ctx.device, take = take.0, "RECORDING UNAVAILABLE: take started but this guest cannot record a local track");
         ui.recording
@@ -286,6 +310,7 @@ pub(super) fn stop_track(take: TakeId) {
         e.ctx.clone()
     });
     info!(call = %ctx.call, device = %ctx.device, take = take.0, "take stopped: closing track");
+    end_video_take();
     if with_engine(|e| e.capture.as_deref() == Some("none")) {
         // No track to close: close the log file instead, so the host gets
         // this guest's log (and why it recorded nothing) now.

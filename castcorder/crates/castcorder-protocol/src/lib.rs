@@ -123,6 +123,25 @@ pub enum Request {
     /// A producer action on the room (answered with [`Response::Done`],
     /// [`Response::Link`] or an error with [`ErrorKind::NotAllowed`]).
     Room(RoomAction),
+    /// This device cannot meet the call's recording profile for one source
+    /// (for example no MediaRecorder codec for video): the host tells every
+    /// producer ([`Event::ProfileUnmet`]). Never blocks the take. Answered
+    /// with [`Response::Done`].
+    ProfileUnmet(ProfileIssue),
+}
+
+/// One source of one device that cannot be recorded as the recording profile
+/// asks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileIssue {
+    /// The take it applies to.
+    pub take: TakeId,
+    /// The source (for example `cam`).
+    pub source: SourceId,
+    /// Audio or video.
+    pub kind: SourceKind,
+    /// Why, for the producer.
+    pub reason: String,
 }
 
 /// What a producer can do to the room. Who may do what is the host's
@@ -152,6 +171,9 @@ pub enum RoomAction {
     /// Make the call always open (true) or producer-gated (only from the host
     /// machine).
     SetOpen(bool),
+    /// Record video (webcams) in the call's takes (true) or not. Independent
+    /// of live video; applies from the next take start.
+    SetRecordVideo(bool),
 }
 
 /// This connection's role in the call, sent as [`Event::Role`] after joining
@@ -194,6 +216,8 @@ pub struct RoomState {
     pub link: Option<String>,
     /// Everyone joined.
     pub participants: Vec<RoomParticipant>,
+    /// The recording profile records video (from the next take start).
+    pub record_video: bool,
 }
 
 /// Whether a take is recording.
@@ -205,6 +229,9 @@ pub enum TakeStatus {
     Recording {
         /// The take being recorded.
         take: TakeId,
+        /// Devices record their webcams too: the call's recording profile
+        /// when the take started.
+        video: bool,
     },
 }
 
@@ -318,6 +345,15 @@ pub enum Event {
     Role(Role),
     /// The room changed (sent to producers only).
     Room(RoomState),
+    /// A device cannot meet the recording profile (sent to producers only).
+    ProfileUnmet {
+        /// Who.
+        participant: ParticipantId,
+        /// Their display name.
+        name: String,
+        /// What and why.
+        issue: ProfileIssue,
+    },
 }
 
 /// Everything a client sends to a core.
@@ -409,6 +445,13 @@ mod tests {
             }),
             Request::Room(RoomAction::RegenerateLink),
             Request::Room(RoomAction::SetOpen(false)),
+            Request::Room(RoomAction::SetRecordVideo(true)),
+            Request::ProfileUnmet(ProfileIssue {
+                take: TakeId(1),
+                source: SourceId("cam".into()),
+                kind: SourceKind::Video,
+                reason: "no MediaRecorder codec".into(),
+            }),
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -457,7 +500,18 @@ mod tests {
             }])),
             CoreMessage::Event(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(2),
+                video: true,
             })),
+            CoreMessage::Event(Event::ProfileUnmet {
+                participant: ParticipantId(3),
+                name: "Bob".into(),
+                issue: ProfileIssue {
+                    take: TakeId(2),
+                    source: SourceId("cam".into()),
+                    kind: SourceKind::Video,
+                    reason: "no codec".into(),
+                },
+            }),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,
@@ -475,6 +529,7 @@ mod tests {
                     producer: false,
                     host_machine: false,
                 }],
+                record_video: true,
             })),
             CoreMessage::Response {
                 id: RequestId(11),
@@ -610,12 +665,45 @@ mod tests {
             open: false,
             link: None,
             participants: vec![],
+            record_video: false,
         };
+        // RoomState.record_video appended (M4 video recording): one byte.
         assert_eq!(
             encode(&Response::Room(room.clone())),
-            vec![8, 0, 1, 0, 0, 0]
+            vec![8, 0, 1, 0, 0, 0, 0]
         );
-        assert_eq!(encode(&Event::Room(room)), vec![3, 0, 1, 0, 0, 0]);
+        assert_eq!(encode(&Event::Room(room)), vec![3, 0, 1, 0, 0, 0, 0]);
+        // Video recording (appended): the take status says whether devices
+        // record video; a producer sets it; a device that cannot comply says so.
+        assert_eq!(
+            encode(&Event::TakeStatusChanged(TakeStatus::Recording {
+                take: TakeId(3),
+                video: true
+            })),
+            vec![1, 1, 3, 1]
+        );
+        assert_eq!(
+            encode(&Request::Room(RoomAction::SetRecordVideo(true))),
+            vec![8, 6, 1]
+        );
+        let issue = ProfileIssue {
+            take: TakeId(2),
+            source: SourceId(String::new()),
+            kind: SourceKind::Video,
+            reason: String::new(),
+        };
+        assert_eq!(
+            encode(&Request::ProfileUnmet(issue.clone())),
+            vec![9, 2, 0, 1, 0]
+        );
+        assert_eq!(
+            encode(&Event::ProfileUnmet {
+                participant: ParticipantId(4),
+                name: String::new(),
+                issue
+            }),
+            vec![4, 4, 0, 2, 0, 1, 0]
+        );
     }
 
     #[test]

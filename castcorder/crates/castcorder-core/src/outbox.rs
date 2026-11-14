@@ -21,7 +21,7 @@ use castcorder_transfer::incremental::outboard_of_file;
 use castcorder_transfer::sender::Sender;
 use tracing::{info, warn};
 
-use crate::sync::{SyncConfig, hex};
+use crate::sync::{SyncConfig, hex, sync_order};
 
 /// One participant's outbox: the tracks it still has to deliver.
 pub struct GuestOutbox<F: StorageFile> {
@@ -74,15 +74,20 @@ impl<F: StorageFile> GuestOutbox<F> {
         self.offers.iter().any(|o| o.name == name)
     }
 
-    /// The offers the host has not yet confirmed, in the order added. Send them
-    /// all on every connect.
+    /// The offers the host has not yet confirmed, in sync order (audio, then
+    /// video, then logs; oldest take first: [`sync_order`]). Send them all on
+    /// every connect, in this order: the host starts pulling the first offer
+    /// it holds, so a video offered ahead of an audio track would go first.
     pub fn pending(&self) -> Vec<TrackOffer> {
-        self.offers
+        let mut v: Vec<TrackOffer> = self
+            .offers
             .iter()
             .zip(&self.reported)
             .filter(|(_, r)| !**r)
             .map(|(o, _)| o.clone())
-            .collect()
+            .collect();
+        v.sort_by_key(sync_order);
+        v
     }
 
     /// Handle one message from the host's "data" channel. Returns the tracks the

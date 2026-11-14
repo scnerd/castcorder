@@ -13,6 +13,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let can_stop = move || take.get().starts_with("recording");
     let room = move || ui.room.get();
     let locked = move || room().is_some_and(|r| r.locked);
+    let record_video = move || room().is_some_and(|r| r.record_video);
     let new_password = RwSignal::new(String::new());
     let act = move |a: RoomAction| producer_request(ui, Request::Room(a), false);
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
@@ -39,6 +40,17 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                 <button id="clear-password" on:click=move |_| act(RoomAction::SetPassword(None))>"Clear"</button>
                 " " <button id="regen-link" on:click=move |_| act(RoomAction::RegenerateLink)>"Regenerate link"</button>
             </p>
+            <p>
+                "Recording profile: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
+                " " <button id="record-video" on:click=move |_| act(RoomAction::SetRecordVideo(!record_video()))>
+                    {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
+                " (from the next take)"
+            </p>
+            <ul id="profile-warnings">
+                <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
+                    <li style="color: #a40">{w}</li>
+                </For>
+            </ul>
             <p>"Call link: " <code id="call-link">{move || room().and_then(|r| r.link).unwrap_or_else(|| "(LAN only)".into())}</code></p>
             <p>"Connected guests: " <span id="guest-count">{move || rows().len()}</span></p>
             <ul id="guests">
@@ -97,6 +109,8 @@ pub(super) fn App() -> impl IntoView {
         // `?camera=off` joins with the camera off.
         camera: RwSignal::new(query_param("camera").as_deref() != Some("off")),
         camera_state: RwSignal::new(String::new()),
+        video_rec: RwSignal::new(String::new()),
+        profile_warnings: RwSignal::new(Vec::new()),
     };
     if bad_link {
         ui.warning
@@ -169,7 +183,8 @@ pub(super) fn App() -> impl IntoView {
         <p>"Connection: " <span id="state">{move || ui.connection.get()}</span>
            " | Participant: " <span id="participant">{move || ui.participant.get()}</span></p>
         <p>"Recording: " <span id="recording">{move || if is_recording() { "REC " } else { "" }}
-            {move || ui.recording.get()}</span></p>
+            {move || ui.recording.get()}</span>
+            " | Video: " <span id="video-recording">{move || ui.video_rec.get()}</span></p>
         <p>"Mic (raw) level: "
             <meter id="level" min="0" max="60" value=move || (ui.level.get().max(1e-5).log10() * 20.0 + 60.0).clamp(0.0, 60.0)></meter>
             " " <span id="level-db">{move || db(ui.level.get())}</span></p>

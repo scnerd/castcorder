@@ -12,7 +12,8 @@
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
-//! [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]`
+//! [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]
+//! [--record-video true|false]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
@@ -25,6 +26,10 @@
 //! `--bandwidth-cap KBPS` caps the bandwidth the video allocation assumes
 //! toward each guest (castcorder-transport `HostConfig::bandwidth_cap_kbps`):
 //! for a thin uplink, and for testing the low layer. It shapes no traffic.
+//!
+//! `--record-video true|false` sets whether the call's takes record video
+//! (browser guests' webcams; saved in `room.json`, default false). A producer
+//! can change it in the call; it applies from the next take start.
 //!
 //! `--relay-only` (for testing the relay path) offers guests only the TURN
 //! relayed candidate from the rendezvous: no host or server-reflexive ones.
@@ -63,7 +68,8 @@ use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] \
-[--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open]";
+[--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open] \
+[--record-video true|false]";
 
 struct Args {
     dist: PathBuf,
@@ -87,6 +93,9 @@ struct Args {
     align: Option<castcorder_align::AlignConfig>,
     /// `--open`: make the call always open (saved with the call).
     open: bool,
+    /// `--record-video true|false`: set the call's recording profile to
+    /// record video or not (saved with the call; `None`: leave it).
+    record_video: Option<bool>,
 }
 
 fn fail(msg: &str) -> ! {
@@ -124,6 +133,7 @@ fn parse_args() -> Args {
         keep_wav: true,
         align: Some(castcorder_align::AlignConfig::default()),
         open: false,
+        record_video: None,
     };
     let mut args = std::env::args().skip(1).peekable();
     while let Some(flag) = args.next() {
@@ -158,6 +168,13 @@ fn parse_args() -> Args {
                 )
             }
             "--open" => a.open = true,
+            "--record-video" => {
+                a.record_video = Some(match value().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => fail("--record-video is true or false"),
+                })
+            }
             "--participate" => {
                 if !cfg!(feature = "native-capture") {
                     fail("--participate needs a build with the native-capture feature (task host)");
@@ -400,6 +417,9 @@ fn main() {
     };
     if args.open {
         room.set_open(true);
+    }
+    if let Some(on) = args.record_video {
+        room.set_record_video(on);
     }
     call = call.with_room(
         room,

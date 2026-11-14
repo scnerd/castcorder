@@ -273,6 +273,7 @@ mod tests {
         server
             .emit(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(1),
+                video: false,
             }))
             .unwrap();
         client.poll().unwrap();
@@ -280,7 +281,8 @@ mod tests {
         assert_eq!(
             client.next_event(),
             Some(Event::TakeStatusChanged(TakeStatus::Recording {
-                take: TakeId(1)
+                take: TakeId(1),
+                video: false
             }))
         );
         assert_eq!(client.next_event(), None);

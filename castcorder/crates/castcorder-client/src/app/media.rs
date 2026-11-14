@@ -109,6 +109,10 @@ pub(super) async fn camera_on(ui: Ui, epoch: u32) {
                 .unwrap_or_default();
             info!(call = %ctx.call, device = %ctx.device, settings = %settings, "camera on");
             ui.camera_state.set("on".into());
+            // Mid-take, with video recorded this take: a new video track.
+            if let Some(take) = with_engine(|e| e.video_take) {
+                start_video(ui, take);
+            }
         }
         Err(e) => {
             warn!(call = %ctx.call, device = %ctx.device, error = %describe(&e), "camera unavailable; audio only");
@@ -121,6 +125,8 @@ pub(super) async fn camera_on(ui: Ui, epoch: u32) {
 
 /// Turn the camera off: the sender sends nothing, the device is released.
 pub(super) fn camera_off(ui: Ui) {
+    // The video track being recorded (if any) ends with the camera.
+    stop_video();
     let (cam, sender, ctx) =
         with_engine(|e| (e.camera.take(), e.video_sender.clone(), e.ctx.clone()));
     if let Some(s) = sender {

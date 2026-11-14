@@ -461,6 +461,7 @@ dependencies = [
  "castcorder-port-disk",
  "castcorder-port-net",
  "castcorder-protocol",
+ "castcorder-testalloc",
  "castcorder-transfer",
  "serde",
  "serde_json",

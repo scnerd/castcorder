@@ -355,6 +355,10 @@ pub(super) fn leave(ui: Ui) {
     if engine.recording.is_some() {
         post_worker(&worker_cmd("stop"), None);
     }
+    if let Some(v) = &engine.video {
+        // Its last chunk and `stop` still reach the worker, which closes it.
+        stop_recorder(v);
+    }
     post_worker(&worker_cmd("close-source"), None);
     // Last: close this session's log file so it can be offered at the next join.
     flush_logs(true);

@@ -80,7 +80,9 @@ tasks:
       producer, and over HTTPS to guest B; A is fed a deterministic WAV, both join,
       B must receive A's audio, each must decode the other's simulcast video
       (camera off and on again without renegotiating), and A's take must come
-      back out of OPFS bit-exact.
+      back out of OPFS bit-exact. Take 3 records video: the producer turns
+      it on, webcams are recorded as WebM and sync after the audio (checked
+      with ffprobe when installed; CI installs it).
       Then the recording fallbacks: `fallback` (Chromium with
       MediaStreamTrackProcessor deleted from window) and `firefox` (two headless
       Firefox guests, AudioWorklet capture; the host binds 0.0.0.0 and advertises

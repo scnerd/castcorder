@@ -622,3 +622,30 @@ fn producers_see_the_room() {
     assert_eq!(room.device_of(3), Some("dev-c"));
     assert_eq!(room.conns_of("dev-b"), vec![2]);
 }
+
+#[test]
+fn producers_set_whether_video_is_recorded_and_it_persists() {
+    let mut room = Room::new(true);
+    // Default off, also for a room.json from before the setting existed.
+    assert!(!room.record_video());
+    assert!(!Room::from_json("{}").unwrap().record_video());
+    let h = host_page(&mut room);
+    enter(&mut room, 2, "dev-b", false, None).unwrap();
+    assert!(
+        room.apply(2, &RoomAction::SetRecordVideo(true), SALT)
+            .is_err(),
+        "a guest must not change the recording profile"
+    );
+    assert!(!room.record_video());
+    room.take_dirty();
+    room.apply(h, &RoomAction::SetRecordVideo(true), SALT)
+        .unwrap();
+    assert!(room.record_video() && room.state(None).record_video);
+    assert!(room.take_dirty());
+    let again = Room::from_json(&room.to_json()).unwrap();
+    assert!(again.record_video());
+    // The command line sets it too (`--record-video false`).
+    let mut again = again;
+    again.set_record_video(false);
+    assert!(!again.record_video() && again.take_dirty());
+}

@@ -87,9 +87,10 @@ fn device_now_us() -> f64 {
 }
 
 /// What the device time is, for timing metadata headers.
-const DEVICE_CLOCK: &str = "performance.timeOrigin + performance.now(), us (page and worker)";
+pub(crate) const DEVICE_CLOCK: &str =
+    "performance.timeOrigin + performance.now(), us (page and worker)";
 /// What the host time is, for timing metadata headers.
-const HOST_CLOCK: &str =
+pub(crate) const HOST_CLOCK: &str =
     "host timeline: wall clock at host start + monotonic, us since the Unix epoch";
 
 pub(crate) fn post(msg: &JsValue) {
@@ -171,7 +172,7 @@ pub(crate) fn read_all(h: &FileSystemSyncAccessHandle) -> Result<Vec<u8>, JsValu
     Ok(buf)
 }
 
-fn write_text(h: &FileSystemSyncAccessHandle, text: &str) -> Result<(), JsValue> {
+pub(crate) fn write_text(h: &FileSystemSyncAccessHandle, text: &str) -> Result<(), JsValue> {
     h.truncate_with_f64(0.0)?;
     h.write_with_u8_array_and_options(text.as_bytes(), &at(0.0))?;
     h.flush()
@@ -457,6 +458,25 @@ struct ClockState {
     accepted: u32,
 }
 
+/// The host timeline's id and the clock exchanges in the estimator's window
+/// (for a new track's timing metadata).
+pub(crate) fn clock_snapshot() -> (u64, Vec<ClockSample>) {
+    CLOCK.with(|c| {
+        let c = c.borrow();
+        (c.timeline, c.est.samples().copied().collect())
+    })
+}
+
+/// Device time `device_us` on the host timeline, by the estimate as it stands.
+pub(crate) fn host_us_of(device_us: i64) -> Option<i64> {
+    CLOCK.with(|c| {
+        c.borrow()
+            .est
+            .estimate()
+            .map(|e| e.host_us(device_us).round() as i64)
+    })
+}
+
 /// `clock-sample {t0, t1, t2, t3, timeline}`: one ping exchange from the page.
 fn clock_sample(msg: &JsValue) {
     let s = ClockSample {
@@ -506,6 +526,7 @@ fn clock_sample(msg: &JsValue) {
                 a.timing_line(&TimingLine::Sync(s));
             }
         });
+        crate::video::on_sync(&TimingLine::Sync(s));
     }
 }
 
@@ -854,9 +875,10 @@ pub(crate) fn post_transfer(msg: &JsValue, transfer: &Array) -> Result<(), JsVal
     scope().post_message_with_transfer(msg, transfer)
 }
 
-/// Whether a track is recording or about to (the outbox does not hash then).
+/// Whether a track (audio or video) is recording or about to (the outbox
+/// does not hash then).
 pub(crate) fn is_busy() -> bool {
-    STARTING.get() || ACTIVE.with(|a| a.borrow().is_some())
+    STARTING.get() || ACTIVE.with(|a| a.borrow().is_some()) || crate::video::is_busy()
 }
 
 fn close_source() {
@@ -1186,6 +1208,11 @@ pub fn main() {
                 },
                 "start" => start(msg).await,
                 "stop" => stop().await,
+                "vstart" => crate::video::start(msg).await,
+                "vstarted" | "vchunk" | "vstop" => {
+                    crate::video::handle(msg);
+                    Ok(())
+                }
                 "clock-sample" => {
                     clock_sample(&msg);
                     Ok(())

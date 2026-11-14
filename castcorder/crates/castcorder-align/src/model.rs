@@ -104,7 +104,10 @@ pub(crate) fn parse_lines(lines: &[TimingLine]) -> ParsedTiming {
                 });
             }
             TimingLine::End { .. } => p.ended = true,
-            TimingLine::Unknown => {}
+            TimingLine::Unknown
+            | TimingLine::VideoStart(_)
+            | TimingLine::Chunk(_)
+            | TimingLine::VideoEnd { .. } => {}
         }
     }
     p
