@@ -32,8 +32,8 @@ use web_sys::FileSystemSyncAccessHandle;
 
 use crate::js::{describe, get, num, object, set, string};
 use crate::worker::{
-    Opened, at, entry_names, is_busy, list, named_dir, open_existing, open_sync, post, read_all,
-    tracks_dir,
+    Opened, at, entry_names, is_busy, list_locked, named_dir, open_existing, open_sync, post,
+    read_all, scan_lock, tracks_dir,
 };
 
 /// An OPFS sync access handle as a [`StorageFile`]. JS handles are not `Send`,
@@ -159,9 +159,38 @@ pub async fn prepare_current() -> Result<(), JsValue> {
     r
 }
 
+/// How many prepare passes in a row may hold video back because an audio
+/// track was in use elsewhere (one second apart). After that the video is
+/// offered anyway: the audio belongs to another tab, which syncs it itself.
+const VIDEO_HOLDS: u32 = 8;
+
+thread_local! {
+    static HOLDS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Prepare again in a second (an audio track was in use elsewhere).
+fn prepare_later() {
+    let again = Closure::once_into_js(|| {
+        wasm_bindgen_futures::spawn_local(async {
+            if let Err(e) = prepare_current().await {
+                warn!(error = %describe(&e), "outbox prepare after a busy track failed");
+            }
+        });
+    });
+    let _ = crate::js::call(
+        &js_sys::global(),
+        "setTimeout",
+        &[&again, &JsValue::from(1000)],
+    );
+}
+
 async fn prepare_inner(call: &str) -> Result<(), JsValue> {
-    list().await?;
+    // One scan at a time (see `ScanGuard`): a `list` interleaving with this
+    // pass would make a finished audio track look busy here.
+    let _scan = scan_lock().await;
+    list_locked().await?;
     let dir = tracks_dir().await?;
+    let mut audio_busy = false;
     OUTBOX.with(|o| {
         o.borrow_mut()
             .get_or_insert_with(|| GuestOutbox::new(call, SyncConfig::default()));
@@ -176,8 +205,14 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             continue;
         }
         let json = format!("{track}.json");
-        let Ok(h) = open_sync(&dir, &json, false).await else {
-            continue;
+        let h = match open_existing(&dir, &json).await {
+            Opened::Open(h) => h,
+            Opened::Missing => continue,
+            Opened::Busy(_) => {
+                audio_busy = true;
+                info!(track = %track, "track in use elsewhere; not offered this pass");
+                continue;
+            }
         };
         let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
         let meta = JSON::parse(&text).unwrap_or_else(|_| object());
@@ -191,6 +226,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             Opened::Open(w) => w,
             Opened::Missing | Opened::Busy(_) => {
                 h.close();
+                audio_busy = true;
                 info!(track = %track, "track in use elsewhere; not offered this pass");
                 continue;
             }
@@ -218,6 +254,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             Opened::Busy(_) => {
                 h.close();
                 wav.close();
+                audio_busy = true;
                 info!(track = %track, "track in use elsewhere; not offered this pass");
                 continue;
             }
@@ -246,7 +283,20 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             warn!(track = %track, error = %e, "track not added to outbox");
         }
     }
-    add_video_tracks(&dir, call).await?;
+    // Audio before video: while an audio track is in use elsewhere, no video
+    // is offered (the host pulls what it is offered first), for a bounded
+    // number of passes.
+    if !audio_busy || HOLDS.get() >= VIDEO_HOLDS {
+        HOLDS.set(0);
+        add_video_tracks(&dir, call).await?;
+    } else {
+        HOLDS.set(HOLDS.get() + 1);
+        info!(
+            passes = HOLDS.get(),
+            "an audio track is in use elsewhere; video held back this pass"
+        );
+        prepare_later();
+    }
     add_log_files().await?;
     let offers = Array::new();
     OUTBOX.with(|o| {
@@ -303,6 +353,8 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
     if confirmed.is_empty() {
         return Ok(());
     }
+    // Not while a scan has the files open (see `ScanGuard`).
+    let scan = scan_lock().await;
     for c in confirmed {
         let log = c.kind == SourceKind::Log;
         let dir = if log {
@@ -327,7 +379,9 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
         set(&o, "name", c.name.as_str());
         post(&o);
     }
-    list().await
+    list_locked().await?;
+    drop(scan);
+    Ok(())
 }
 
 /// Add every finished video track of `call` not yet in the outbox: the
