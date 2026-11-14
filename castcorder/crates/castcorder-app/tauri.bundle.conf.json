@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "shortDescription": "Castcorder podcast recorder",
+    "longDescription": "Record podcasts with remote guests: the host runs in the app, guests join from a browser.",
+    "category": "Music",
+    "licenseFile": "../../../LICENSE-MIT",
+    "resources": {
+      "client": "client"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

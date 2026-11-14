@@ -12,7 +12,7 @@
 pub mod deeplink;
 pub mod host_control;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use castcorder_host::Config;
 
@@ -37,16 +37,33 @@ pub struct AppArgs {
     pub link: Option<String>,
 }
 
-/// Where the app finds the client build: `CASTCORDER_DIST`, else `client`
-/// beside the executable.
+/// Where the app finds the client build: `CASTCORDER_DIST`, else the first of
+/// the places an installer puts the bundled `client` resource (beside the
+/// executable on Windows, `../lib/Castcorder/` for Linux packages and
+/// AppImage, `../Resources/` in a macOS bundle) that holds an `index.html`.
 pub fn default_dist() -> PathBuf {
     if let Some(d) = std::env::var_os("CASTCORDER_DIST") {
         return PathBuf::from(d);
     }
-    std::env::current_exe()
+    let Some(dir) = std::env::current_exe()
         .ok()
-        .and_then(|e| e.parent().map(|p| p.join("client")))
-        .unwrap_or_else(|| PathBuf::from("client"))
+        .and_then(|e| e.parent().map(PathBuf::from))
+    else {
+        return PathBuf::from("client");
+    };
+    dist_candidates(&dir)
+        .into_iter()
+        .find(|c| c.join("index.html").exists())
+        .unwrap_or_else(|| dir.join("client"))
+}
+
+/// The client locations to try for an executable in `exe_dir`.
+fn dist_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        exe_dir.join("client"),
+        exe_dir.join("../lib/Castcorder/client"),
+        exe_dir.join("../Resources/client"),
+    ]
 }
 
 impl AppArgs {
@@ -118,5 +135,13 @@ mod tests {
             (0, 0, 0)
         );
         assert!(a.config.bind.is_loopback());
+    }
+
+    #[test]
+    fn dist_candidates_cover_each_installer_layout() {
+        let c = dist_candidates(Path::new("bin"));
+        assert_eq!(c[0], Path::new("bin/client"));
+        assert!(c.iter().any(|p| p.ends_with("lib/Castcorder/client")));
+        assert!(c.iter().any(|p| p.ends_with("Resources/client")));
     }
 }
