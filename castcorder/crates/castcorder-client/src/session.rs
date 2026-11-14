@@ -70,13 +70,11 @@ pub fn video_bitrate(width: u32, height: u32, frame_rate: f64) -> u64 {
     (bits as u64).clamp(4_000_000, 60_000_000)
 }
 
-/// A display name as the host accepts it: ASCII letters, digits and '-', at
-/// most 16 characters (it travels unencoded in `?name=` and into file names).
+/// A display name as typed: spaces and any letters kept, control characters
+/// dropped, at most 32 characters. It travels percent-encoded; file names use
+/// a separate slug the host derives.
 pub fn clean_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(16)
-        .collect()
+    castcorder_core::names::display_name(name)
 }
 
 /// The display name of a guest who typed none: distinct per browser profile,
@@ -303,7 +301,8 @@ mod tests {
         );
         assert_ne!(default_name("3f2a-x"), default_name("77b1-x"));
         assert_eq!(default_name("xyz"), "Guest");
-        assert_eq!(clean_name("Ann Lee/<x>"), "AnnLeex");
+        assert_eq!(clean_name(" Ann  Lee/<x> "), "Ann Lee/<x>");
+        assert_eq!(clean_name("Zo\u{eb} Ba\u{df}"), "Zo\u{eb} Ba\u{df}");
         assert_eq!(clean_name("Guest-3F2A"), "Guest-3F2A");
     }
 

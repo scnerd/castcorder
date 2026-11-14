@@ -682,7 +682,7 @@ mod tests {
                 at_host,
                 reply,
             } => {
-                assert_eq!((name.as_str(), offer_sdp.as_str()), ("B", "v=0"));
+                assert_eq!((name.as_str(), offer_sdp.as_str()), ("B!", "v=0"));
                 // The proof reaches the host thread, for this host id.
                 assert_eq!(audience, key_id.encode());
                 assert!(proof.is_some_and(|p| {

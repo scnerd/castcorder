@@ -683,12 +683,7 @@ impl<S: Storage + 'static> Drop for SafetyWriter<S> {
 }
 
 fn clean(who: &str) -> String {
-    let c: String = who
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-        .take(24)
-        .collect();
-    if c.is_empty() { "guest".into() } else { c }
+    crate::names::file_slug(who, 32, "guest")
 }
 
 /// A stable stream serial number from the file name (FNV-1a).
@@ -895,14 +890,17 @@ mod tests {
 
         let dir = disk.subdir(DIR).expect("subdir");
         let names = dir.list().expect("list");
+        let slug = crate::names::file_slug("Alice B!", 32, "guest");
         assert_eq!(
             names,
             vec![
-                "take01_AliceB_safety.opus".to_string(),
-                "take01_AliceB_safety.timing.jsonl".to_string()
+                format!("take01_{slug}_safety.opus"),
+                format!("take01_{slug}_safety.timing.jsonl")
             ]
         );
-        let mut f = dir.open("take01_AliceB_safety.opus").expect("open");
+        let mut f = dir
+            .open(&format!("take01_{slug}_safety.opus"))
+            .expect("open");
         let mut buf = vec![0u8; f.len().expect("len") as usize];
         castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf).expect("read");
         let ogg = read_ogg_opus(&buf).expect("parses, checksums valid");
@@ -925,7 +923,9 @@ mod tests {
         assert!(after_gap.granule >= 111 * 960, "{gs:?}");
         assert_eq!(ogg.samples(), 160 * 960);
         // The timing sidecar says it is a safety track and places RTP on host time.
-        let mut t = dir.open("take01_AliceB_safety.timing.jsonl").expect("open");
+        let mut t = dir
+            .open(&format!("take01_{slug}_safety.timing.jsonl"))
+            .expect("open");
         let mut tb = vec![0u8; t.len().expect("len") as usize];
         castcorder_transfer::io::read_exact_at(&mut t, 0, &mut tb).expect("read");
         let lines = crate::timing::parse(std::str::from_utf8(&tb).expect("utf8")).expect("timing");

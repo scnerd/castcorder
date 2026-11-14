@@ -25,6 +25,7 @@
 pub mod clocksync;
 pub mod library;
 pub mod logging;
+pub mod names;
 pub mod outbox;
 pub mod safety;
 pub mod sync;
