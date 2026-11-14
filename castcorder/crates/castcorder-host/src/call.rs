@@ -96,6 +96,9 @@ pub enum Command {
         /// The take.
         take: TakeId,
     },
+    /// End the call's thread (after `Shutdown`): the host and its sockets
+    /// are dropped.
+    Stop,
     /// The host is exiting (Ctrl+C): finish every safety track and stop
     /// their writer thread.
     Shutdown {
@@ -754,14 +757,14 @@ impl Call {
         pongs
     }
 
-    /// Drive `host` and this call forever on a new thread, taking commands
+    /// Drive `host` and this call on a new thread until `Command::Stop`, taking commands
     /// from `rx`.
     pub fn spawn(
         mut self,
         mut host: Host<UdpDatagramSocket, SystemClock>,
         clock: SystemClock,
         rx: mpsc::Receiver<Command>,
-    ) {
+    ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name("host".into())
             .spawn(move || {
@@ -772,6 +775,10 @@ impl Call {
                 host.set_guest_audio_tap(true);
                 loop {
                     while let Ok(c) = rx.try_recv() {
+                        if matches!(c, Command::Stop) {
+                            info!("host stopping: leaving the call loop");
+                            return;
+                        }
                         self.command(&mut host, c);
                     }
                     let deadline = host.poll();
@@ -820,7 +827,7 @@ impl Call {
                     thread::sleep(wait.clamp(Duration::from_micros(200), Duration::from_millis(2)));
                 }
             })
-            .expect("spawn host thread");
+            .expect("spawn host thread")
     }
 
     fn command(&mut self, host: &mut Host<UdpDatagramSocket, SystemClock>, c: Command) {
@@ -925,6 +932,7 @@ impl Call {
                 self.local_busy.remove(&take.0);
                 self.align_completed(vec![take]);
             }
+            Command::Stop => {}
             Command::Shutdown { done } => {
                 info!("host exiting: finishing safety tracks");
                 self.safety.close();

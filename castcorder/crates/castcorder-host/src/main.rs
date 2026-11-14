@@ -45,501 +45,75 @@
 //! verified (both are kept by default). At startup, host-mic WAVs a previous
 //! run left unfinalised are recovered (see `local`). See `native`.
 
-mod call;
-mod http;
-mod local;
-#[cfg(feature = "native-capture")]
-mod native;
-mod rendezvous;
-mod room;
-mod tls;
-
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
-
-use castcorder_core::library::Library;
-use castcorder_core::logging::utc_compact;
-use castcorder_core::sync::SyncConfig;
-use castcorder_port_clock::SystemClock;
-use castcorder_port_disk::FsStorage;
-use castcorder_port_net::UdpDatagramSocket;
-use castcorder_transport::{Host, HostConfig};
-
-const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] \
-[--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open] \
-[--record-video true|false]";
-
-struct Args {
-    dist: PathBuf,
-    library: PathBuf,
-    call: String,
-    bind: IpAddr,
-    https_port: u16,
-    http_port: u16,
-    udp_port: u16,
-    advertise: Vec<IpAddr>,
-    rendezvous: Option<String>,
-    relay_only: bool,
-    /// `--bandwidth-cap KBPS`: the most the video allocation assumes per guest.
-    bandwidth_cap: Option<u64>,
-    /// `--participate`: `Some(None)` is the default input.
-    participate: Option<Option<String>>,
-    name: String,
-    /// `--keep-wav`: keep each host-mic WAV after its FLAC is verified (default).
-    keep_wav: bool,
-    /// Aligned tracks (`None`: `--align off`).
-    align: Option<castcorder_align::AlignConfig>,
-    /// `--open`: make the call always open (saved with the call).
-    open: bool,
-    /// `--record-video true|false`: set the call's recording profile to
-    /// record video or not (saved with the call; `None`: leave it).
-    record_video: Option<bool>,
-}
+use castcorder_host::Config;
 
 fn fail(msg: &str) -> ! {
     eprintln!("castcorder-host: {msg}");
-    eprintln!("{USAGE}");
+    eprintln!("usage: castcorder-host {}", castcorder_host::USAGE);
     std::process::exit(2);
 }
 
-fn wall_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn parse_args() -> Args {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let mut a = Args {
-        dist: PathBuf::new(),
-        library: home.join("Castcorder"),
-        call: format!("call-{}", utc_compact(wall_ms())),
-        bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        https_port: 47800,
-        http_port: 47801,
-        udp_port: 47802,
-        advertise: vec![],
-        rendezvous: None,
-        relay_only: false,
-        bandwidth_cap: None,
-        participate: None,
-        name: "host".into(),
-        keep_wav: true,
-        align: Some(castcorder_align::AlignConfig::default()),
-        open: false,
-        record_video: None,
-    };
-    let mut args = std::env::args().skip(1).peekable();
-    while let Some(flag) = args.next() {
-        let mut value = || {
-            args.next()
-                .unwrap_or_else(|| fail(&format!("{flag} needs a value")))
-        };
-        let port = |v: String| -> u16 { v.parse().unwrap_or_else(|_| fail("bad port")) };
-        let ip = |v: String| -> IpAddr { v.parse().unwrap_or_else(|_| fail("bad IP address")) };
-        match flag.as_str() {
-            "--dist" => a.dist = PathBuf::from(value()),
-            "--library" => a.library = PathBuf::from(value()),
-            "--call" => a.call = value(),
-            "--bind" => a.bind = ip(value()),
-            "--port" => a.https_port = port(value()),
-            "--http-port" => a.http_port = port(value()),
-            "--udp-port" => a.udp_port = port(value()),
-            "--advertise" => a.advertise.push(ip(value())),
-            "--rendezvous" => {
-                let url = value();
-                if let Err(e) = rendezvous::validate(&url) {
-                    fail(&e);
-                }
-                a.rendezvous = Some(url.trim_end_matches('/').to_string());
-            }
-            "--relay-only" => a.relay_only = true,
-            "--bandwidth-cap" => {
-                a.bandwidth_cap = Some(
-                    value()
-                        .parse()
-                        .unwrap_or_else(|_| fail("bad --bandwidth-cap (kbps)")),
-                )
-            }
-            "--open" => a.open = true,
-            "--record-video" => {
-                a.record_video = Some(match value().as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => fail("--record-video is true or false"),
-                })
-            }
-            "--participate" => {
-                if !cfg!(feature = "native-capture") {
-                    fail("--participate needs a build with the native-capture feature (task host)");
-                }
-                let device = args.next_if(|v| !v.starts_with("--"));
-                a.participate = Some(device);
-            }
-            "--name" => {
-                let n: String = value()
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
-                    .take(32)
-                    .collect();
-                if n.is_empty() {
-                    fail("--name needs letters, digits or '-'");
-                }
-                a.name = n;
-            }
-            "--align" => {
-                let mode = match value().as_str() {
-                    "resample" => Some(castcorder_align::Mode::Resample),
-                    "offset-only" => Some(castcorder_align::Mode::OffsetOnly),
-                    "off" => None,
-                    _ => fail("--align is resample, offset-only or off"),
-                };
-                a.align = mode.map(|mode| castcorder_align::AlignConfig {
-                    mode,
-                    ..a.align.unwrap_or_default()
-                });
-            }
-            "--keep-wav" => {
-                a.keep_wav = match value().as_str() {
-                    "true" => true,
-                    "false" => false,
-                    _ => fail("--keep-wav is true or false"),
-                };
-            }
-            "--aligned-format" => {
-                let format = match value().as_str() {
-                    "flac" => castcorder_align::OutputFormat::Flac,
-                    "wav" => castcorder_align::OutputFormat::Wav,
-                    _ => fail("--aligned-format is flac or wav"),
-                };
-                if let Some(c) = &mut a.align {
-                    c.format = format;
-                }
-            }
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                std::process::exit(0);
-            }
-            other => fail(&format!("unknown argument {other}")),
+fn parse_args() -> Config {
+    let mut a = Config::new(std::path::PathBuf::new());
+    a.log = true;
+    let rest = a
+        .apply_args(std::env::args().skip(1))
+        .unwrap_or_else(|e| fail(&e));
+    if let Some(flag) = rest.first() {
+        if flag == "-h" || flag == "--help" {
+            println!("usage: castcorder-host {}", castcorder_host::USAGE);
+            std::process::exit(0);
         }
-    }
-    if !a.dist.join("index.html").exists() {
-        fail(&format!(
-            "no client build at {} (build it with trunk, or use `task host`)",
-            a.dist.display()
-        ));
+        fail(&format!("unknown argument {flag}"));
     }
     a
 }
 
-/// The address this machine uses toward the internet, which on a home network
-/// is its LAN address. Connecting a UDP socket sends nothing.
-fn primary_ipv4() -> Option<IpAddr> {
-    let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9))
-        .or_else(|_| s.connect((Ipv4Addr::new(8, 8, 8, 8), 53)))
-        .ok()?;
-    let ip = s.local_addr().ok()?.ip();
-    match ip {
-        IpAddr::V4(v4) if !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local() => {
-            Some(ip)
-        }
-        _ => None,
-    }
-}
-
-/// The take numbers already in the call's directory, ascending: the last one
-/// is where a restarted host continues (it never reuses one), and each is
-/// scanned for host microphone tracks to recover.
-fn take_numbers(call_dir: &Path) -> Vec<u32> {
-    let mut v: Vec<u32> = std::fs::read_dir(call_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.strip_prefix("take")?.parse().ok())
-        .collect();
-    v.sort_unstable();
-    v
-}
-
 fn main() {
-    let args = parse_args();
-    std::fs::create_dir_all(&args.library).unwrap_or_else(|e| {
-        fail(&format!(
-            "cannot create library {}: {e}",
-            args.library.display()
-        ))
-    });
-    let root = FsStorage::new(&args.library).expect("library directory");
-    let mut library =
-        Library::open(&root, &args.call, SyncConfig::default()).expect("open library");
-    let call_name = library.call().to_string();
-    let call_dir = args.library.join(&call_name);
-    init_logging(&args.library, &call_name);
-    // The host's own device id: its microphone tracks are items of its own
-    // device in the take manifests, like a guest's.
-    let host_key =
-        rendezvous::host_key(&args.library).unwrap_or_else(|e| fail(&format!("host key: {e}")));
-    // What device key proofs are signed for, on the LAN listener as through
-    // a rendezvous (LAN pages read it from `GET /role`).
-    let host_id = host_key.id().encode();
-    let host_device = format!("host-{}", host_key.id());
-    // A take the host never finalised (Ctrl+C, a crash) is recovered first.
-    let takes = take_numbers(&call_dir);
-    let recovered = local::recover_takes(&mut library, &takes, &host_device, args.keep_wav);
-
-    let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
-        if args.advertise.is_empty() {
-            primary_ipv4().into_iter().collect()
-        } else {
-            args.advertise.clone()
-        }
-    } else {
-        vec![args.bind]
-    };
-    let advertise_ips = if lan.is_empty() {
-        tracing::warn!("no LAN address found; only this machine can join");
-        vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]
-    } else {
-        lan.clone()
-    };
-
-    let socket = UdpDatagramSocket::bind(SocketAddr::new(args.bind, args.udp_port))
-        .unwrap_or_else(|e| fail(&format!("cannot bind UDP port {}: {e}", args.udp_port)));
-    let udp = castcorder_port_net::DatagramSocket::local_addr(&socket);
-    let clock = SystemClock::new();
-    // The call's shared timeline: clock pongs, take times, timing metadata.
-    let timeline = castcorder_core::clocksync::HostTimeline::new(clock.clone());
-    tracing::info!(timeline = timeline.id(), "host timeline anchored");
-    let mut host = Host::new(
-        socket,
-        clock.clone(),
-        HostConfig {
-            call: call_name.clone(),
-            advertise: advertise_ips
-                .iter()
-                .map(|ip| SocketAddr::new(*ip, udp.port()))
-                .collect(),
-            relay_only: args.relay_only,
-            bandwidth_cap_kbps: args.bandwidth_cap,
-            ..HostConfig::default()
-        },
-    );
-    // A second socket lets relay credentials renew without dropping relayed calls
-    // (the renewed TURN allocation needs its own 5-tuple).
-    match UdpDatagramSocket::bind(SocketAddr::new(args.bind, 0)) {
-        Ok(spare) => host.set_spare_socket(spare),
-        Err(e) => {
-            tracing::warn!(error = %e, "no spare UDP socket: renewing relay credentials will drop relayed calls")
-        }
-    }
-    let (tx, rx) = mpsc::channel();
-    let mut call = call::Call::new(
-        library,
-        takes.last().copied().unwrap_or(0),
-        timeline.clone(),
-    );
-    if let Some(cfg) = args.align {
-        call = call.with_alignment(cfg);
-        call.align_recovered(recovered.iter().map(|r| r.take).collect());
-    }
-    // The host's own recorder, told to finalise on Ctrl+C.
-    #[cfg_attr(not(feature = "native-capture"), allow(unused_mut))]
-    let mut local_takes: Option<mpsc::Sender<call::TakeCtl>> = None;
-    #[cfg(feature = "native-capture")]
-    if let Some(device) = args.participate.clone() {
-        let cfg = native::Config {
-            device,
-            name: args.name.clone(),
-            call: call_name.clone(),
-            timeline: timeline.clone(),
-            device_id: host_device.clone(),
-            keep_wav: args.keep_wav,
-        };
-        let participant = native::start(cfg, tx.clone());
-        local_takes = Some(participant.takes.clone());
-        call = call.with_participant(participant);
-    }
+    let running = castcorder_host::start(parse_args(), |link| {
+        println!();
+        println!("  Guests anywhere open this call link (share it only with them):");
+        println!("    {link}");
+        println!();
+        println!("CALL_LINK {link}");
+    })
+    .unwrap_or_else(|e| fail(&e));
     // Ctrl+C: finalise an in-progress take of the host microphone (WAV,
     // timing, manifest, FLAC) and finish the safety tracks before exiting;
-    // what is not finished is recovered at the next start (safety tracks are
-    // synced once a second, so a valid prefix survives anyway).
-    let shutdown = tx.clone();
+    // what is not finished is recovered at the next start.
+    let finisher = running.finisher();
     if let Err(e) = ctrlc::set_handler(move || {
-        if let Some(takes) = &local_takes {
-            let (done, finished) = mpsc::channel();
-            if takes.send(call::TakeCtl::Stop { done: Some(done) }).is_ok() {
-                match finished.recv_timeout(std::time::Duration::from_secs(60)) {
-                    Ok(files) => {
-                        tracing::info!(files = ?files, "Ctrl+C: host microphone take finalised")
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "Ctrl+C: finalising took too long; recovery runs at the next start"
-                        )
-                    }
-                }
-            }
-        }
-        let (done, finished) = mpsc::channel();
-        if shutdown.send(call::Command::Shutdown { done }).is_ok() {
-            match finished.recv_timeout(std::time::Duration::from_secs(30)) {
-                Ok(()) => tracing::info!("Ctrl+C: safety tracks finished"),
-                Err(_) => tracing::warn!(
-                    "Ctrl+C: safety tracks not finished in time; their synced prefix stays readable"
-                ),
-            }
-        }
+        finisher.finish();
         std::process::exit(0);
     }) {
         tracing::warn!(error = %e, "Ctrl+C handler not installed; an interrupted take is recovered at the next start");
     }
-    let secret: rendezvous::SharedSecret = Arc::new(Mutex::new(
-        rendezvous::call_secret(&call_dir).unwrap_or_else(|e| fail(&format!("call secret: {e}"))),
-    ));
-    let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
-        base: base.clone(),
-        key: host_key,
-        secret: secret.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    });
-    // Room security: devices and settings persist in <call>/room.json.
-    let mut room = match std::fs::read_to_string(call_dir.join("room.json")) {
-        Ok(text) => room::Room::from_json(&text)
-            .unwrap_or_else(|e| fail(&format!("{}: {e}", call_dir.join("room.json").display()))),
-        Err(_) => room::Room::new(false),
-    };
-    if args.open {
-        room.set_open(true);
-    }
-    if let Some(on) = args.record_video {
-        room.set_record_video(on);
-    }
-    call = call.with_room(
-        room,
-        call_dir.clone(),
-        secret,
-        rendezvous.as_ref().map(rendezvous::Config::link_base),
-    );
-    call.spawn(host, clock, rx);
-    let rendezvous_tx = tx.clone();
-
-    let tls = tls::server_config(&args.library, &lan)
-        .unwrap_or_else(|e| fail(&format!("certificate: {e}")));
-    let app = Arc::new(http::App {
-        tx: Mutex::new(tx),
-        dist: args.dist.clone(),
-        host_id,
-    });
-    let https = TcpListener::bind(SocketAddr::new(args.bind, args.https_port))
-        .unwrap_or_else(|e| fail(&format!("cannot bind HTTPS port {}: {e}", args.https_port)));
-    let https_port = https.local_addr().expect("https addr").port();
-    let local = TcpListener::bind((Ipv4Addr::LOCALHOST, args.http_port))
-        .unwrap_or_else(|e| fail(&format!("cannot bind HTTP port {}: {e}", args.http_port)));
-    let http_port = local.local_addr().expect("http addr").port();
-    http::serve(https, app.clone(), Some(tls), false);
-    http::serve(local, app, None, true);
-
-    let links: Vec<String> = if args.bind.is_unspecified() || args.bind.is_loopback() {
-        advertise_ips.clone()
-    } else {
-        vec![args.bind]
-    }
-    .iter()
-    .map(|ip| format!("https://{ip}:{https_port}/"))
-    .collect();
-    tracing::info!(call = %call_name, links = ?links, udp = %udp, "host ready");
+    let links = running.lan_links();
     println!();
     println!("Castcorder host is running. Press Ctrl+C to stop.");
     println!();
-    println!("  Call:      {call_name}");
-    println!("  Library:   {}", call_dir.display());
-    println!("  Logs:      {}", call_dir.join("logs").display());
+    println!("  Call:      {}", running.call());
+    println!("  Library:   {}", running.call_dir().display());
+    println!("  Logs:      {}", running.call_dir().join("logs").display());
     println!();
     println!("  On THIS machine, open (producer controls, and join to be heard):");
-    println!("    http://localhost:{http_port}/");
+    println!("    {}", running.producer_url());
     println!();
     println!("  Guests on the same network open (accept the certificate warning once):");
-    for l in &links {
+    for l in links {
         println!("    {l}");
     }
     println!();
     println!(
-        "HOST_READY http=http://127.0.0.1:{http_port} https={} udp={udp}",
+        "HOST_READY http=http://127.0.0.1:{} https={} udp={}",
+        running.http_addr().port(),
         links
             .first()
             .map(|l| l.trim_end_matches('/'))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        running.udp_addr()
     );
-    if let Some(cfg) = rendezvous {
-        tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
-        rendezvous::spawn(cfg, rendezvous_tx, |link| {
-            println!();
-            println!("  Guests anywhere open this call link (share it only with them):");
-            println!("    {link}");
-            println!();
-            println!("CALL_LINK {link}");
-        });
-    }
     loop {
         std::thread::park();
     }
-}
-
-/// A readable console log on stderr, and JSON lines in
-/// `<library>/<call>/logs/host-<start>.jsonl` (rotated at 10 MB), in the shape
-/// every machine in the call logs (castcorder_core::logging).
-fn init_logging(library: &Path, call: &str) {
-    use castcorder_core::logging::{JsonLayer, LogContext, RotatingLog, Stamp};
-    use castcorder_port_disk::Storage;
-    use std::time::Instant;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        tracing_subscriber::EnvFilter::new(
-            "castcorder_transport=info,castcorder_core=info,castcorder_host=info,castcorder_capture_gst=info",
-        )
-    });
-    let console = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .with_writer(std::io::stderr);
-    let logs = FsStorage::new(library)
-        .and_then(|r| r.subdir(call))
-        .and_then(|r| r.subdir("logs"))
-        .expect("logs directory");
-    let file = Mutex::new(RotatingLog::new(
-        logs,
-        format!("host-{}", utc_compact(wall_ms())),
-        10 * 1024 * 1024,
-    ));
-    let context = LogContext::new();
-    context.set("call", call);
-    context.set("device", "host");
-    context.set("realm", "host");
-    let start = Instant::now();
-    let json = JsonLayer::new(
-        tracing::Level::INFO,
-        context,
-        move || Stamp {
-            wall_ms: wall_ms(),
-            mono_ms: start.elapsed().as_secs_f64() * 1000.0,
-        },
-        move |line| {
-            if let Ok(mut f) = file.lock() {
-                let _ = f.write_line(&line);
-            }
-        },
-    );
-    tracing_subscriber::registry()
-        .with(console)
-        .with(json)
-        .with(filter)
-        .init();
 }

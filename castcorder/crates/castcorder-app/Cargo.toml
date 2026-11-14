@@ -10,3 +10,48 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+# The library (host control, call link mapping) is plain Rust and runs in
+# `task check`. The Tauri shell is the `desktop` feature: it needs the system
+# webview (webkit2gtk on Linux), so `task app` and the CI app job build it.
+[[bin]]
+name = "castcorder-app"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+desktop = [
+  "dep:tauri",
+  "dep:tauri-build",
+  "dep:tauri-plugin-autostart",
+  "dep:tauri-plugin-deep-link",
+  "dep:tauri-plugin-single-instance",
+  # generate_context! expands to serde_json paths.
+  "dep:serde_json",
+]
+# The host participant's microphone through GStreamer (`--participate`).
+native-capture = ["castcorder-host/native-capture"]
+
+[dependencies]
+castcorder-host = { path = "../castcorder-host" }
+castcorder-link.workspace = true
+tracing.workspace = true
+serde_json = { workspace = true, optional = true }
+tauri = { version = "2", optional = true, features = ["tray-icon"] }
+tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+# Windows and Linux deliver a deep link by starting a second process; this
+# hands it to the running app instead of starting a second host.
+tauri-plugin-single-instance = { version = "2", optional = true, features = [
+  "deep-link",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true, features = [] }
+
+[dev-dependencies]
+castcorder-port-clock.workspace = true
+castcorder-port-net.workspace = true
+castcorder-transport.workspace = true
+serde_json.workspace = true
+str0m.workspace = true

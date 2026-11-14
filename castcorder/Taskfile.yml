@@ -19,6 +19,7 @@ tasks:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
       - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
+      # The Tauri shell (castcorder-app --features desktop) needs the system webview: `task app:check`.
       - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer -p castcorder-link --lib --target wasm32-unknown-unknown --locked -- -D warnings
       # The Browser Guest: its UI and worker binaries only exist on wasm32.
       - cargo clippy -p castcorder-client --lib --bins --target wasm32-unknown-unknown --locked -- -D warnings
@@ -130,3 +131,37 @@ tasks:
     cmds:
       - cd crates/castcorder-client && trunk build --release
       - cargo run --release --locked -p castcorder-host --features native-capture -- --dist crates/castcorder-client/dist {{.CLI_ARGS}}
+
+  app:
+    desc: Run the desktop app (Tauri) on this machine - the host in-process, its producer page in the window, closes to the tray
+    summary: |
+      Builds the Browser Guest with trunk (release) and runs castcorder-app,
+      which starts the host in its own process (same flags as castcorder-host,
+      pass them after --) and shows the producer page; join the call from the
+      window. Closing the window keeps hosting from the tray; Quit in the tray
+      menu finishes the take and stops. Start at login is a tray toggle, off by
+      default. The app registers castcorder:// links for this executable unless
+      given --no-register. Built with native-capture (needs GStreamer, as
+      test:gst), so --participate works as in `task host`.
+      Linux needs the Tauri prerequisites (webkit2gtk-4.1, libsoup-3,
+      libayatana-appindicator, librsvg). Other build dirs:
+      CARGO_TARGET_DIR=... task app CLIENT_DIST=dist-agent
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
+    cmds:
+      - cd crates/castcorder-client && trunk build --release --dist {{.CLIENT_DIST}}
+      - cargo run --release --locked -p castcorder-app --features desktop,native-capture -- {{.CLI_ARGS}}
+
+  app:check:
+    desc: Clippy, tests and a headless smoke run of the desktop app (needs the system webview; CI runs it under xvfb on Linux)
+    summary: |
+      Clippy with the Tauri shell (feature desktop), the app's tests, then
+      `castcorder-app --smoke`: the host starts on OS-picked loopback ports in a
+      throwaway library, the hidden window loads its producer page, the app
+      prints APP_READY, stops the host and exits. Registers nothing with the OS.
+    cmds:
+      - cargo clippy -p castcorder-app --features desktop --all-targets --locked -- -D warnings
+      - cargo test -p castcorder-app --features desktop --locked
+      - cargo run -p castcorder-app --features desktop --locked -- --smoke

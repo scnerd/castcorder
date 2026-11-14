@@ -77,6 +77,44 @@ jobs:
       - name: Unit and simulation tests
         run: task check
 
+  # The desktop app's Tauri shell (castcorder-app --features desktop): clippy, its
+  # tests, and a smoke run under a virtual display. Kept out of `task check`
+  # because it needs the system webview.
+  app:
+    name: app
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      # The Tauri 2 Linux prerequisites, plus a virtual display for the smoke run.
+      - name: Install webview and tray libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: app
+
+      - name: Clippy, tests and smoke run
+        # WebKitGTK under xvfb: no DMA-BUF renderer.
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+        run: xvfb-run -a task app:check
+
   # Tier 4: Playwright against headless Chromium and Firefox. No Docker: the host, the
   # transport example and the client build all run as plain processes on the runner.
   browser:
