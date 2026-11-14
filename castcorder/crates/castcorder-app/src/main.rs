@@ -97,7 +97,17 @@ fn main() {
                 && payload.event() == PageLoadEvent::Finished
                 && webview.state::<Shell>().smoke
             {
-                println!("APP_READY url={}", payload.url());
+                // Ready only once the window shows the running host's page.
+                let host = webview.state::<Shell>().host.status();
+                let url = payload.url();
+                let ours = host.is_some_and(|h| {
+                    url.scheme() == "http" && url.port() == Some(h.http_addr.port())
+                });
+                if !ours {
+                    eprintln!("castcorder-app: smoke run loaded {url}, not the host's page");
+                    std::process::exit(1);
+                }
+                println!("APP_READY url={url}");
                 quit(webview.app_handle());
             }
         })
@@ -149,6 +159,9 @@ fn setup(app: &AppHandle, args: &AppArgs) {
         }
         Err(e) => {
             eprintln!("castcorder-app: the host could not start: {e}");
+            if args.smoke {
+                std::process::exit(1);
+            }
             WebviewUrl::App(format!("index.html?error={}", query_escape(&e)).into())
         }
     };
