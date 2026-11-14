@@ -51,6 +51,7 @@ mod data;
 mod join;
 mod lifecycle;
 mod media;
+mod native;
 mod recvideo;
 mod rpc;
 mod view;

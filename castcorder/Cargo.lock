@@ -757,6 +757,7 @@ version = "0.0.0"
 dependencies = [
  "castcorder-host",
  "castcorder-link",
+ "castcorder-port-capture",
  "castcorder-port-clock",
  "castcorder-port-net",
  "castcorder-transport",

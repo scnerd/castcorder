@@ -36,7 +36,8 @@
 //! Offers are refused until the relay is allocated.
 //!
 //! `--participate [DEVICE]` (builds with the `native-capture` feature only)
-//! makes the person at this machine a participant without a browser: the
+//! makes the person at this machine a participant without a browser (the
+//! producer page can also join and leave natively at runtime): the
 //! named input (default: the default microphone) is heard by every guest and
 //! recorded into each take as `takeNN_<name>_mic.wav` (then FLAC), and the
 //! guests are played on the default output. `--name NAME` is their display

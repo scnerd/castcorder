@@ -1,6 +1,8 @@
-//! The host's own participant (`--participate`, feature `native-capture`): the
-//! microphone of the host machine, captured with GStreamer, heard by every
-//! guest and recorded into the library; the call played on this machine.
+//! The host's own participant (feature `native-capture`): the microphone of
+//! the host machine, captured with GStreamer, heard by every guest and
+//! recorded into the library; the call played on this machine. It joins and
+//! leaves at runtime (`NativeCtl`: `--participate` at start, the producer
+//! page's native microphone controls, the app's host control).
 //!
 //! Threads:
 //!
@@ -51,6 +53,7 @@ use castcorder_protocol::TakeId;
 use castcorder_recorder::{WavWriter, WriterOptions};
 use tracing::{error, info, warn};
 
+use crate::NativeInput;
 use crate::call::{Command, Heard, Participant, TakeCtl};
 use crate::local;
 
@@ -59,11 +62,11 @@ const ECHO_PROBE: &str = "castcorder_far_end";
 /// Wait between attempts to open (or reopen) the microphone.
 const REOPEN: Duration = Duration::from_secs(1);
 
-/// What `--participate` asked for.
+/// What the host's own participant captures and how it is recorded.
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Input device display name; `None` is the default input.
-    pub device: Option<String>,
+    /// The microphone (or, for tests, a WAV file played once).
+    pub input: NativeInput,
     /// Display name, `[A-Za-z0-9-]`.
     pub name: String,
     /// The call (timing metadata header).
@@ -76,13 +79,24 @@ pub struct Config {
     pub keep_wav: bool,
 }
 
-/// Start playback and the recorder; returns the participant for the call.
-pub fn start(cfg: Config, commands: mpsc::Sender<Command>) -> Participant {
-    let (heard_tx, heard_rx) = mpsc::channel::<Heard>();
-    let (ready_tx, ready_rx) = mpsc::channel::<bool>();
-    thread::Builder::new()
-        .name("playback".into())
-        .spawn(move || {
+/// A participant about to join: playback runs (a device input only), the
+/// recorder starts with [`Prepared::start`] once the call has the
+/// participant, so a take already recording reaches it before any audio.
+pub struct Prepared {
+    cfg: Config,
+    takes: mpsc::Receiver<TakeCtl>,
+    echo: Option<String>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+
+/// Start playback (for a device input) and make the participant for the call.
+pub fn prepare(cfg: Config) -> (Participant, Prepared) {
+    let mut threads = vec![];
+    let mut heard = None;
+    if matches!(cfg.input, NativeInput::Device(_)) {
+        let (heard_tx, heard_rx) = mpsc::channel::<Heard>();
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
+        let spawned = thread::Builder::new().name("playback".into()).spawn(move || {
             let mut pb = match Playback::new(Some(ECHO_PROBE)) {
                 Ok(p) => p,
                 Err(e) => {
@@ -98,22 +112,54 @@ pub fn start(cfg: Config, commands: mpsc::Sender<Command>) -> Participant {
                     Heard::Gone(g) => pb.remove(g.0),
                 }
             }
-        })
-        .expect("spawn playback thread");
-    let playing = ready_rx.recv().unwrap_or(false);
-
+        });
+        match spawned {
+            Ok(t) => {
+                threads.push(t);
+                if ready_rx.recv().unwrap_or(false) {
+                    heard = Some(heard_tx);
+                }
+            }
+            Err(e) => warn!(error = %e, "playback thread not started"),
+        }
+    }
     let (takes_tx, takes_rx) = mpsc::channel();
-    let echo = playing.then(|| ECHO_PROBE.to_string());
-    let rec_cfg = cfg.clone();
-    thread::Builder::new()
-        .name("participant-rec".into())
-        .spawn(move || run(rec_cfg, takes_rx, commands, echo))
-        .expect("spawn participant thread");
-    info!(name = %cfg.name, device = ?cfg.device, playing, "host participant started");
-    Participant {
-        name: cfg.name,
+    let echo = heard.is_some().then(|| ECHO_PROBE.to_string());
+    let participant = Participant {
+        name: cfg.name.clone(),
         takes: takes_tx,
-        heard: playing.then_some(heard_tx),
+        heard,
+    };
+    (
+        participant,
+        Prepared {
+            cfg,
+            takes: takes_rx,
+            echo,
+            threads,
+        },
+    )
+}
+
+impl Prepared {
+    /// Start the recorder; returns every thread of this participant (they
+    /// end after [`TakeCtl::Quit`] and once the call drops the participant).
+    pub fn start(self, commands: mpsc::Sender<Command>) -> Vec<thread::JoinHandle<()>> {
+        let Prepared {
+            cfg,
+            takes,
+            echo,
+            mut threads,
+        } = self;
+        info!(name = %cfg.name, input = ?cfg.input, playing = echo.is_some(), "host participant started");
+        match thread::Builder::new()
+            .name("participant-rec".into())
+            .spawn(move || run(cfg, takes, commands, echo))
+        {
+            Ok(t) => threads.push(t),
+            Err(e) => error!(error = %e, "participant thread not started"),
+        }
+        threads
     }
 }
 
@@ -169,8 +215,9 @@ struct Rec {
 }
 
 impl Rec {
-    /// Apply a take command.
-    fn control(&mut self, c: TakeCtl) {
+    /// Apply a take command; true for [`TakeCtl::Quit`] (the take, if any,
+    /// is finished first).
+    fn control(&mut self, c: TakeCtl) -> bool {
         match c {
             TakeCtl::Start { take, dir } => {
                 self.stop(None);
@@ -179,7 +226,12 @@ impl Rec {
                 self.segment = 0;
             }
             TakeCtl::Stop { done } => self.stop(done),
+            TakeCtl::Quit => {
+                self.stop(None);
+                return true;
+            }
         }
+        false
     }
 
     /// End the take: finalise, then convert to FLAC off this thread.
@@ -456,16 +508,22 @@ fn run(
         files: vec![],
     };
     loop {
-        let (mut cap, live) = match GstCapture::open_device_with_live(
-            cfg.device.as_deref(),
-            Watchdog::default(),
-            &opts,
-        ) {
+        let opened = match &cfg.input {
+            NativeInput::Device(device) => {
+                GstCapture::open_device_with_live(device.as_deref(), Watchdog::default(), &opts)
+            }
+            NativeInput::File(path) => GstCapture::open_file_with_live(path, &opts),
+        };
+        let (mut cap, live) = match opened {
             Ok(c) => c,
             Err(e) => {
-                warn!(device = ?cfg.device, error = %e, "host microphone not available; retrying");
+                warn!(input = ?cfg.input, error = %e, "host microphone not available; retrying");
                 match takes.recv_timeout(REOPEN) {
-                    Ok(c) => rec.control(c),
+                    Ok(c) => {
+                        if rec.control(c) {
+                            return;
+                        }
+                    }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => {
                         rec.stop(None);
@@ -493,7 +551,11 @@ fn run(
         let quit = 'capture: loop {
             loop {
                 match takes.try_recv() {
-                    Ok(c) => rec.control(c),
+                    Ok(c) => {
+                        if rec.control(c) {
+                            break 'capture true;
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => break 'capture true,
                 }
@@ -530,6 +592,23 @@ fn run(
         if quit {
             rec.stop(None);
             return;
+        }
+        if matches!(cfg.input, NativeInput::File(_)) {
+            // A file plays once: then only take commands, until quit.
+            info!("host microphone file played to its end");
+            loop {
+                match takes.recv() {
+                    Ok(c) => {
+                        if rec.control(c) {
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        rec.stop(None);
+                        return;
+                    }
+                }
+            }
         }
         thread::sleep(REOPEN);
     }
@@ -590,7 +669,7 @@ mod tests {
         let (take_tx, take_rx) = mpsc::channel();
         let timeline = HostTimeline::new(SystemClock::new());
         let cfg = Config {
-            device: None,
+            input: NativeInput::Device(None),
             name: "host".into(),
             call: "call".into(),
             timeline: timeline.clone(),

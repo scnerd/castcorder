@@ -56,6 +56,10 @@ tasks:
       # the full path into a library take; skips without an input device.
       - cargo clippy -p castcorder-host --features native-capture --all-targets -- -D warnings
       - cargo test -p castcorder-host --features native-capture -- --nocapture
+      # The app's host control joins and leaves natively at runtime: a WAV file
+      # through the capture port into two takes, bit-exact.
+      - cargo clippy -p castcorder-app --features native-capture --all-targets -- -D warnings
+      - cargo test -p castcorder-app --features native-capture -- --nocapture
 
   test:browser:transport:
     desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)

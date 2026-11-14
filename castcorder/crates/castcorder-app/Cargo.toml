@@ -29,7 +29,8 @@ desktop = [
   # generate_context! expands to serde_json paths.
   "dep:serde_json",
 ]
-# The host participant's microphone through GStreamer (`--participate`).
+# The host participant's microphone through GStreamer (`--participate`, and
+# joining and leaving from the window at runtime).
 native-capture = ["castcorder-host/native-capture"]
 
 [dependencies]
@@ -50,6 +51,7 @@ tauri-plugin-single-instance = { version = "2", optional = true, features = [
 tauri-build = { version = "2", optional = true, features = [] }
 
 [dev-dependencies]
+castcorder-port-capture.workspace = true
 castcorder-port-clock.workspace = true
 castcorder-port-net.workspace = true
 castcorder-transport.workspace = true

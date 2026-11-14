@@ -105,7 +105,24 @@ pub enum Command {
         /// Told once the safety tracks are finished.
         done: mpsc::Sender<()>,
     },
-    /// One Opus frame of the host's own participant (`--participate`).
+    /// The host's own participant joins: its audio goes to every guest and
+    /// its recorder records each take, from the one recording now (sent to
+    /// it before the reply).
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    JoinNative {
+        /// The participant.
+        participant: Participant,
+        /// Joined, or why not.
+        reply: mpsc::Sender<Result<(), String>>,
+    },
+    /// The host's own participant leaves. The reply carries, while a take
+    /// records, where the recorder says its files of that take are final.
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    LeaveNative {
+        /// What to wait for, or "not in the call".
+        reply: mpsc::Sender<Result<Option<mpsc::Receiver<Vec<String>>>, String>>,
+    },
+    /// One Opus frame of the host's own participant.
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     LocalAudio {
         /// Its RTP time in 48 kHz ticks.
@@ -130,6 +147,8 @@ pub enum TakeCtl {
         /// Told the files written once they are finalised and converted.
         done: Option<mpsc::Sender<Vec<String>>>,
     },
+    /// The participant left: finish any take, close the input, end.
+    Quit,
 }
 
 /// What the host's own participant hears.
@@ -479,14 +498,61 @@ impl Call {
         }
     }
 
-    /// Add the host's own participant: its audio goes to every guest and its
-    /// recorder records each take.
-    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
-    pub fn with_participant(mut self, p: Participant) -> Self {
+    /// Add the host's own participant (`Command::JoinNative`).
+    fn join_native(
+        &mut self,
+        host: &mut Host<UdpDatagramSocket, SystemClock>,
+        p: Participant,
+    ) -> Result<(), String> {
+        if self.participant.is_some() {
+            return Err("the host microphone is already in the call".into());
+        }
+        if let TakeStatus::Recording { take, .. } = self.status {
+            match self.library.take_dir(take) {
+                Ok(dir) => {
+                    let _ = p.takes.send(TakeCtl::Start {
+                        take,
+                        dir: dir.clone(),
+                    });
+                }
+                Err(e) => {
+                    warn!(take = take.0, error = %e, "no take directory; host microphone not recorded")
+                }
+            }
+        }
+        self.local = Some(host.add_local_audio(&p.name));
+        info!(name = %p.name, "host microphone joined the call");
         self.participant = Some(p);
-        // Whoever is at the host is a producer, always in the call.
+        // Whoever is at the host is a producer, in the call while joined.
         self.room.set_native_producer(true);
-        self
+        self.broadcast_room();
+        Ok(())
+    }
+
+    /// Remove the host's own participant (`Command::LeaveNative`).
+    fn leave_native(
+        &mut self,
+        host: &mut Host<UdpDatagramSocket, SystemClock>,
+    ) -> Result<Option<mpsc::Receiver<Vec<String>>>, String> {
+        let Some(p) = self.participant.take() else {
+            return Err("the host microphone is not in the call".into());
+        };
+        let mut finished = None;
+        if let TakeStatus::Recording { take, .. } = self.status {
+            let (done, rx) = mpsc::channel();
+            if p.takes.send(TakeCtl::Stop { done: Some(done) }).is_ok() {
+                // Aligned once the recorder has finalised and recorded its files.
+                self.local_busy.insert(take.0);
+                finished = Some(rx);
+            }
+        }
+        if let Some(local) = self.local.take() {
+            host.remove_local_audio(local);
+        }
+        info!(name = %p.name, "host microphone left the call");
+        self.room.set_native_producer(false);
+        self.broadcast_room();
+        Ok(finished)
     }
 
     /// Pass guest audio to the host's own participant's playback.
@@ -768,9 +834,6 @@ impl Call {
         thread::Builder::new()
             .name("host".into())
             .spawn(move || {
-                if let Some(p) = &self.participant {
-                    self.local = Some(host.add_local_audio(&p.name));
-                }
                 // Always on: the safety tracks keep every guest's frames.
                 host.set_guest_audio_tap(true);
                 loop {
@@ -937,6 +1000,12 @@ impl Call {
                 info!("host exiting: finishing safety tracks");
                 self.safety.close();
                 let _ = done.send(());
+            }
+            Command::JoinNative { participant, reply } => {
+                let _ = reply.send(self.join_native(host, participant));
+            }
+            Command::LeaveNative { reply } => {
+                let _ = reply.send(self.leave_native(host));
             }
             Command::LocalAudio { rtp_time, data } => {
                 if let Some(local) = &self.local {
