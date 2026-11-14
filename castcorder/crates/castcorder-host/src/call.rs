@@ -15,8 +15,8 @@ use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
-    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ProfileIssue, Request, Response, RoomAction,
-    SourceKind, TakeId, TakeStatus, TrackOffer,
+    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue, Request,
+    Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer,
 };
 use std::path::PathBuf;
 
@@ -156,6 +156,8 @@ pub struct Call {
     rpc: BTreeMap<GuestId, RpcServer<GuestChannel>>,
     data: BTreeMap<GuestId, GuestChannel>,
     names: BTreeMap<GuestId, String>,
+    /// The participant list last sent to everyone ([`Event::Participants`]).
+    names_sent: Vec<ParticipantName>,
     library: Library<FsStorage>,
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
     participant: Option<Participant>,
@@ -245,6 +247,7 @@ impl Call {
             rpc: BTreeMap::new(),
             data: BTreeMap::new(),
             names: BTreeMap::new(),
+            names_sent: Vec::new(),
             library,
             pullers: BTreeMap::new(),
             participant: None,
@@ -298,7 +301,8 @@ impl Call {
         Some(self.link.as_ref()?.link(&secret))
     }
 
-    /// Tell every producer the room state.
+    /// Tell every producer the room state, and everyone who is in the call
+    /// when that changed (display names for their video tiles).
     fn broadcast_room(&mut self) {
         let state = self.room.state(self.current_link());
         for id in self.room.producers() {
@@ -308,6 +312,28 @@ impl Call {
                 warn!(guest = id, "room state not sent: channel closed");
             }
         }
+        let names: Vec<ParticipantName> = state
+            .participants
+            .iter()
+            .map(|p| ParticipantName {
+                participant: p.participant,
+                name: p.name.clone(),
+            })
+            .collect();
+        if names == self.names_sent {
+            return;
+        }
+        for p in &names {
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(p.participant.0))
+                && rpc.emit(Event::Participants(names.clone())).is_err()
+            {
+                warn!(
+                    guest = p.participant.0,
+                    "participant names not sent: channel closed"
+                );
+            }
+        }
+        self.names_sent = names;
     }
 
     /// A device cannot meet the recording profile: warn, and tell every

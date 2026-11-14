@@ -40,7 +40,8 @@
 //! on swaps the sender's track (`replaceTrack`, null when off) and stops or
 //! reopens the device, so it never renegotiates: only the host offers.
 //!
-//! Each remote participant gets a tile (their forwarded stream id) holding
+//! Each remote participant gets a tile (keyed by their forwarded stream id,
+//! named by their display name from the host's participant list) holding
 //! their `<video>` and `<audio>`; this guest's own camera shows in a muted
 //! preview tile. JS handles live in a thread-local [`Engine`]; Leptos signals
 //! hold only plain values.
@@ -169,6 +170,9 @@ struct Engine {
     /// Interval timers of this join (the 1 s tick).
     timers: Vec<i32>,
     mid_origin: Vec<(String, String)>,
+    /// Display names by participant id, from the host's
+    /// `Event::Participants`: video tiles are named by them.
+    names: Vec<(u64, String)>,
     /// The host's last take status (survives a dropped connection).
     status: Option<TakeStatus>,
     /// When the current connection attempt started and when the host was last

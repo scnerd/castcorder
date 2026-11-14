@@ -11,7 +11,9 @@ const FIREFOX_PREFS = {
   'media.volume_scale': '0.0',
 };
 
-export async function openGuest(name, extraArgs, base, setup) {
+// `display`: the display name joined with (default `name`); the host's
+// stream ids carry it with only letters and digits kept.
+export async function openGuest(name, extraArgs, base, setup, display = name) {
   const { MODE, BASE_ARGS, host, logs, browsers, chromium, firefox } = run;
   logs[name] = logs[name] || [];
   let browser, ctx;
@@ -63,7 +65,7 @@ export async function openGuest(name, extraArgs, base, setup) {
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
-  await page.goto(base + '/?name=' + name);
+  await page.goto(base + '/?name=' + encodeURIComponent(display));
   await page.waitForSelector('#join');
   return page;
 }
