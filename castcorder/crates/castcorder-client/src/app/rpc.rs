@@ -85,6 +85,7 @@ pub(super) fn candidates(sdp: &str) -> (usize, usize) {
 /// Drain the protocol client: responses we wait for and events.
 pub(super) fn pump_rpc(ui: Ui) {
     let mut samples = Vec::new();
+    let mut relabel = false;
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -213,11 +214,21 @@ pub(super) fn pump_rpc(ui: Ui) {
                         ))
                     });
                 }
+                Event::Participants(list) => {
+                    e.names = list
+                        .into_iter()
+                        .map(|p| (p.participant.0, p.name))
+                        .collect();
+                    relabel = true;
+                }
                 Event::Meters(_) => {}
             }
         }
         (statuses, ctx)
     });
+    if relabel {
+        relabel_tiles();
+    }
     for o in samples {
         post_worker(&o, None);
     }
@@ -434,13 +445,47 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     let tile = doc.create_element("div").ok()?;
     tile.set_class_name("tile");
     let _ = tile.set_attribute("data-origin", origin);
-    let name = origin.rsplit_once('-').map_or(origin, |(n, _)| n);
     let label = doc.create_element("div").ok()?;
     label.set_class_name("tile-name");
-    label.set_text_content(Some(name));
+    label.set_text_content(Some(&tile_name(origin)));
     let _ = tile.append_child(&label);
     let _ = remote.append_child(&tile);
     Some(tile)
+}
+
+/// The name shown on a remote tile: the participant's display name (the
+/// stream id `<name>-<participant id>` ends in their id), else until the
+/// host has sent the names, the name in the stream id (letters and digits
+/// only).
+fn tile_name(origin: &str) -> String {
+    let (short, id) = origin.rsplit_once('-').unwrap_or((origin, ""));
+    let id = id.parse::<u64>().ok();
+    with_engine(|e| {
+        e.names
+            .iter()
+            .find(|(p, _)| Some(*p) == id)
+            .map(|(_, n)| n.clone())
+    })
+    .unwrap_or_else(|| short.to_string())
+}
+
+/// Name every remote tile again (the names arrived or changed).
+fn relabel_tiles() {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i)
+            && let Some(origin) = t.get_attribute("data-origin")
+            && let Ok(Some(label)) = t.query_selector(".tile-name")
+        {
+            label.set_text_content(Some(&tile_name(&origin)));
+        }
+    }
 }
 
 /// Every second: refresh inbound counters per origin and kind (for the UI

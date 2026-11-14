@@ -4,6 +4,14 @@
 //!
 //! Pure logic: the guest connection measures layer rates and the estimate and
 //! applies the result.
+//!
+//! Smoothing (so a receiver near a threshold does not flap between layers):
+//! layer rates are an exponentially weighted average starting from a nominal
+//! prior per layer ([`prior_kbps`]), stepping up needs [`UPGRADE_MARGIN`] to
+//! spare, and an upgrade is taken only once it has stayed admitted for
+//! [`UPGRADE_HOLD`] ([`Hold`]). Stepping down is immediate.
+
+use std::time::Duration;
 
 /// One forwarded video track as the allocator sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +44,58 @@ pub(crate) const OVERHEAD: f64 = 1.1;
 /// A layer not forwarded now must fit with this much to spare (hysteresis:
 /// stepping down is immediate, stepping up needs room).
 pub(crate) const UPGRADE_MARGIN: f64 = 1.25;
+
+/// How long an upgrade must stay admitted, allocation after allocation,
+/// before it is taken.
+pub(crate) const UPGRADE_HOLD: Duration = Duration::from_secs(3);
+
+/// The rate assumed for a layer before it is measured, from the encodings
+/// castcorder-client asks for (`l` at most 150 kbit/s, `h` at most 800):
+/// low for `l`, so video starts at once on a tight link, and high for `h`,
+/// so it is not taken early and dropped again. Also orders the layers, so a
+/// high layer still ramping up is never mistaken for the low one.
+pub(crate) fn prior_kbps(rid: Option<&str>) -> u64 {
+    match rid {
+        Some("l") => 100,
+        Some("h") => 800,
+        _ => 300,
+    }
+}
+
+/// One forwarded track's pending upgrade, per receiver.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hold {
+    /// Since when the allocation has kept proposing an upgrade.
+    since: Option<Duration>,
+}
+
+impl Hold {
+    /// The layer to forward, given the one chosen last time (`chosen`, `None`:
+    /// no video), the allocation's proposal and the time `now`. A downgrade
+    /// (or no change) is taken at once; an upgrade once proposed continuously
+    /// for [`UPGRADE_HOLD`]. `fresh`: nothing to hold on to (the source just
+    /// started sending, or the chosen layer is no longer sent), so the
+    /// proposal is taken at once: video starts without waiting.
+    pub(crate) fn settle(
+        &mut self,
+        chosen: Option<usize>,
+        proposed: Option<usize>,
+        fresh: bool,
+        now: Duration,
+    ) -> Option<usize> {
+        if fresh || proposed <= chosen {
+            self.since = None;
+            return proposed;
+        }
+        let since = *self.since.get_or_insert(now);
+        if now.saturating_sub(since) >= UPGRADE_HOLD {
+            self.since = None;
+            proposed
+        } else {
+            chosen
+        }
+    }
+}
 
 fn cost(kbps: u64) -> f64 {
     kbps as f64 * OVERHEAD
@@ -142,6 +202,60 @@ mod tests {
     }
 
     const SIMULCAST: [u64; 2] = [150, 800];
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn an_upgrade_is_held_until_it_stays_admitted() {
+        let mut h = Hold::default();
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(10.0)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(12.9)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(13.0)), Some(1));
+        // From no video too.
+        let mut h = Hold::default();
+        assert_eq!(h.settle(None, Some(0), false, secs(0.0)), None);
+        assert_eq!(h.settle(None, Some(0), false, secs(3.0)), Some(0));
+    }
+
+    #[test]
+    fn an_interrupted_upgrade_starts_its_hold_again() {
+        let mut h = Hold::default();
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(0.0)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(0), false, secs(2.0)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(2.5)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(5.0)), Some(0));
+        assert_eq!(h.settle(Some(0), Some(1), false, secs(5.5)), Some(1));
+    }
+
+    #[test]
+    fn a_downgrade_is_immediate() {
+        let mut h = Hold::default();
+        assert_eq!(h.settle(Some(1), Some(0), false, secs(0.0)), Some(0));
+        assert_eq!(h.settle(Some(0), None, false, secs(0.1)), None);
+    }
+
+    #[test]
+    fn the_first_layer_of_a_fresh_source_is_not_held() {
+        let mut h = Hold::default();
+        assert_eq!(h.settle(None, Some(1), true, secs(0.0)), Some(1));
+        // Nor a replacement for a layer no longer sent.
+        assert_eq!(h.settle(None, Some(0), true, secs(0.2)), Some(0));
+    }
+
+    #[test]
+    fn the_priors_order_the_layers_and_admit_the_low_one_on_a_tight_link() {
+        let (l, h) = (prior_kbps(Some("l")), prior_kbps(Some("h")));
+        assert!(l < h);
+        // A 250 kbit/s cap: audio 44, then about 181 for video. The prior
+        // admits "l" at once; a first window holding a keyframe (say 10 kB in
+        // 100 ms: 800 kbit/s) would not.
+        let a = allocate(Some(250), 40, &[t(&[l, h], None)]);
+        assert_eq!(a.choices, vec![Some(0)]);
+        let a = allocate(Some(250), 40, &[t(&[800, h], None)]);
+        assert_eq!(a.choices, vec![None]);
+    }
 
     #[test]
     fn plenty_of_bandwidth_forwards_every_best_layer() {

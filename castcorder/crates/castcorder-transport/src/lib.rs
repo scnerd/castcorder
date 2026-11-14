@@ -49,8 +49,10 @@
 //! receiver: reserve the forwarded audio's measured rate, then give every
 //! video track its lowest live layer while it fits the receiver's bandwidth
 //! estimate (TWCC), then upgrade tracks one step at a time while they fit
-//! (stepping up needs 25 % to spare, stepping down is immediate; see
-//! `alloc.rs`). A layer with no frame for 2 s counts as not sent. A newly
+//! (stepping up needs 25 % to spare and must stay admitted for 3 s, stepping
+//! down is immediate; layer rates are smoothed from a nominal prior per
+//! layer, so video starts at once; see `alloc.rs`). A layer with no frame for
+//! 2 s counts as not sent. A newly
 //! chosen layer is asked for a keyframe and replaces the old one from that
 //! keyframe on, with its RTP times shifted to continue the outgoing stream.
 //! The estimator is told to sustain the rate the next upgrade needs and probe

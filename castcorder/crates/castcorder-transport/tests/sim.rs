@@ -496,6 +496,19 @@ fn simulcast_source(
     frame: &mut u64,
     asked: &mut Vec<String>,
 ) {
+    simulcast_source_sized(w, src, d, 4000, frame, asked);
+}
+
+/// [`simulcast_source`] with `h_bytes` per high-layer frame (4000: about
+/// 800 kbit/s).
+fn simulcast_source_sized(
+    w: &mut World,
+    src: usize,
+    d: Duration,
+    h_bytes: usize,
+    frame: &mut u64,
+    asked: &mut Vec<String>,
+) {
     let end = w.time.now() + d;
     while w.time.now() < end {
         let wanted: Vec<_> = std::mem::take(&mut w.g(src).keyframe_layers);
@@ -508,7 +521,7 @@ fn simulcast_source(
         let key_l = *frame == 0 || wanted.iter().any(|r| r.as_deref() == Some("l"));
         w.g(src).send_audio(&[0xa5; 80]);
         if frame.is_multiple_of(2) {
-            w.g(src).send_video_layer("h", key_h, b'h', 4000);
+            w.g(src).send_video_layer("h", key_h, b'h', h_bytes);
             w.g(src).send_video_layer("l", key_l, b'l', 500);
         }
         *frame += 1;
@@ -633,4 +646,75 @@ fn simulcast_layers_follow_each_receivers_bandwidth() {
         asked.iter().any(|r| r == "h") && asked.iter().any(|r| r == "l"),
         "keyframe requests name their layer: {asked:?}"
     );
+}
+
+/// Receivers whose downlinks sit near the high layer's threshold (1250 and
+/// 1350 kbit/s) while the source's high layer swings between about 600 and
+/// 1000 kbit/s every 2 s, as a real encoder's does: without smoothing they
+/// switched layers 25-30 times a minute; now rarely, and never lose video
+/// (cast-djm).
+#[test]
+fn a_receiver_near_a_threshold_does_not_flap() {
+    use castcorder_port_net::Bottleneck;
+    let mut w = World::new(HostConfig::default());
+    w.join_with("A", true);
+    let caps = [1250u32, 1350];
+    for d in ["B", "C"] {
+        w.join(d);
+    }
+    for (i, kbps) in caps.iter().enumerate() {
+        w.net.set_bottleneck(
+            ip(1),
+            ip(i as u8 + 3),
+            Some(Bottleneck {
+                kbps: *kbps,
+                max_queue: Duration::from_millis(250),
+            }),
+        );
+    }
+    let ids: Vec<GuestId> = (0..3).map(|i| w.id(i)).collect();
+    w.run_until(Duration::from_secs(10), |w| {
+        ids[1..]
+            .iter()
+            .all(|id| w.host.stats(*id).unwrap().tracks_out_open == 4)
+    });
+    let mut frame = 0;
+    let mut asked = vec![];
+    for sec in 0..60u64 {
+        let h_bytes = if (sec / 2).is_multiple_of(2) {
+            3000
+        } else {
+            5000
+        };
+        simulcast_source_sized(
+            &mut w,
+            0,
+            Duration::from_secs(1),
+            h_bytes,
+            &mut frame,
+            &mut asked,
+        );
+        let row: Vec<String> = ids[1..]
+            .iter()
+            .map(|id| {
+                let s = w.host.stats(*id).unwrap();
+                let v = s.video_out.iter().find(|v| v.origin == ids[0]).cloned();
+                let target = v.and_then(|v| v.target);
+                assert!(
+                    sec < 2 || target.is_some(),
+                    "t={:?}: a receiver near the threshold keeps video",
+                    w.time.now()
+                );
+                format!(
+                    "bwe {:?} {target:?} changes {}",
+                    s.bwe_kbps, s.layer_changes
+                )
+            })
+            .collect();
+        println!("t={:?} {}", w.time.now(), row.join(" | "));
+    }
+    for id in &ids[1..] {
+        let changes = w.host.stats(*id).unwrap().layer_changes;
+        assert!(changes <= 5, "{id:?}: {changes} layer changes in a minute");
+    }
 }

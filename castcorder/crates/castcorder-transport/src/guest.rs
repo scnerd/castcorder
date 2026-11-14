@@ -44,25 +44,15 @@ struct LayerRate {
     layer: Layer,
     window_start: Instant,
     bytes: u64,
-    kbps: Option<u64>,
+    /// The smoothed rate: starts at the layer's prior (`alloc::prior_kbps`)
+    /// and moves a quarter of the way to each window's rate, so neither a
+    /// first keyframe nor an encoder's swings flip the allocation.
+    kbps: u64,
     last: Instant,
 }
 
-impl LayerRate {
-    /// The best rate known: the smoothed one, else what the current window
-    /// shows once it is long enough to mean something.
-    fn kbps(&self) -> u64 {
-        if let Some(k) = self.kbps {
-            return k;
-        }
-        let ms = self
-            .last
-            .saturating_duration_since(self.window_start)
-            .as_millis() as u64;
-        // Over at least 100 ms: a first keyframe alone reads as a high rate, so
-        // a layer not measured yet is chosen cautiously, never as free.
-        self.bytes * 8 / ms.max(100)
-    }
+fn prior(layer: Layer) -> u64 {
+    alloc::prior_kbps(layer.as_deref())
 }
 
 #[derive(Debug)]
@@ -95,16 +85,22 @@ impl TrackIn {
                     layer,
                     window_start: now,
                     bytes: 0,
-                    kbps: None,
+                    kbps: prior(layer),
                     last: now,
                 });
                 rates.last_mut().expect("just pushed")
             }
         };
+        if now.saturating_duration_since(r.last) >= RATE_WINDOW {
+            // A gap (camera off, layer paused): what is left of the window
+            // says nothing about the rate; start a new one.
+            r.window_start = now;
+            r.bytes = 0;
+        }
         let span = now.saturating_duration_since(r.window_start);
         if span >= RATE_WINDOW {
             let rate = r.bytes * 8 / (span.as_millis() as u64).max(1);
-            r.kbps = Some(r.kbps.map_or(rate, |old| (old + rate) / 2));
+            r.kbps = (r.kbps * 3 + rate) / 4;
             r.window_start = now;
             r.bytes = 0;
         }
@@ -112,15 +108,16 @@ impl TrackIn {
         r.last = now;
     }
 
-    /// The layers being sent now with their rates in kbps, lowest rate first.
+    /// The layers being sent now with their rates in kbps, lowest first (by
+    /// prior, then rate).
     fn layers(&self, now: Instant) -> Vec<(Layer, u64)> {
         let rates = self.rates.lock().unwrap_or_else(|p| p.into_inner());
         let mut v: Vec<(Layer, u64)> = rates
             .iter()
             .filter(|r| now.saturating_duration_since(r.last) < LAYER_STALE)
-            .map(|r| (r.layer, r.kbps()))
+            .map(|r| (r.layer, r.kbps))
             .collect();
-        v.sort_by_key(|(l, k)| (*k, l.map(|r| r.to_string())));
+        v.sort_by_key(|(l, k)| (prior(*l), *k, l.map(|r| r.to_string())));
         v
     }
 }
@@ -144,6 +141,10 @@ struct Forward {
     /// The last RTP time written toward the receiver.
     last_out: Option<u64>,
     frames: u64,
+    /// The pending upgrade, if any.
+    hold: alloc::Hold,
+    /// The source sent some layer at the last allocation.
+    had_layers: bool,
 }
 
 fn is_keyframe(d: &MediaData) -> bool {
@@ -415,11 +416,18 @@ impl Guest {
                 .fwd
                 .current
                 .and_then(|c| layers.iter().position(|(l, _)| *l == c));
+            let chosen = t
+                .fwd
+                .target
+                .and_then(|c| layers.iter().position(|(l, _)| *l == c));
+            // Nothing to hold on to: the source just started sending, or the
+            // chosen layer is no longer sent.
+            let fresh = !t.fwd.had_layers || (t.fwd.target.is_some() && chosen.is_none());
             tracks.push(alloc::Track {
                 layers: layers.iter().map(|l| l.1).collect(),
                 current,
             });
-            which.push((i, layers));
+            which.push((i, layers, chosen, fresh));
         }
         let estimate = self
             .bwe_initial
@@ -429,7 +437,13 @@ impl Guest {
             (e, c) => e.or(c),
         };
         let a = alloc::allocate(estimate, audio, &tracks);
-        for ((i, layers), choice) in which.into_iter().zip(a.choices) {
+        let now_d = now.saturating_duration_since(self.base);
+        for ((i, layers, chosen, fresh), proposed) in which.into_iter().zip(a.choices) {
+            // Taking an upgrade later only lowers the cost; the estimator
+            // still probes for the proposal (`next_kbps`, `desired_kbps`).
+            let fwd = &mut self.tracks_out[i].fwd;
+            let choice = fwd.hold.settle(chosen, proposed, fresh, now_d);
+            fwd.had_layers = !layers.is_empty();
             let rates: Vec<String> = layers
                 .iter()
                 .map(|(l, k)| format!("{}={k}", layer_name(&Some(*l))))

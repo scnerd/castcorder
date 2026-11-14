@@ -354,6 +354,19 @@ pub enum Event {
         /// What and why.
         issue: ProfileIssue,
     },
+    /// Who is in the call, for everyone (after joining, and whenever someone
+    /// joins or leaves): each participant's display name, so a forwarded
+    /// stream (whose id ends in `-<participant id>`) can be shown by name.
+    Participants(Vec<ParticipantName>),
+}
+
+/// One participant's display name.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticipantName {
+    /// The participant.
+    pub participant: ParticipantId,
+    /// Display name, as they gave it.
+    pub name: String,
 }
 
 /// Everything a client sends to a core.
@@ -512,6 +525,10 @@ mod tests {
                     reason: "no codec".into(),
                 },
             }),
+            CoreMessage::Event(Event::Participants(vec![ParticipantName {
+                participant: ParticipantId(2),
+                name: "Bea Smith".into(),
+            }])),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,
@@ -703,6 +720,13 @@ mod tests {
                 issue
             }),
             vec![4, 4, 0, 2, 0, 1, 0]
+        );
+        assert_eq!(
+            encode(&Event::Participants(vec![ParticipantName {
+                participant: ParticipantId(5),
+                name: "A".into(),
+            }])),
+            vec![5, 1, 5, 1, b'A']
         );
     }
 
