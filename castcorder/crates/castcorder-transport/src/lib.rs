@@ -173,6 +173,11 @@ pub struct HostConfig {
     /// [`Host::accept`] refuses offers until the allocation exists. For
     /// testing the relay path.
     pub relay_only: bool,
+    /// The most bandwidth the video allocation assumes toward any one guest,
+    /// in kbps, whatever the estimate says (it still applies without
+    /// estimation). `None`: the estimate alone. A configured cap, for a host
+    /// on a thin uplink and for tests; it shapes nothing on the network.
+    pub bandwidth_cap_kbps: Option<u64>,
 }
 
 impl Default for HostConfig {
@@ -186,6 +191,7 @@ impl Default for HostConfig {
             send_buffer: 1024 * 1024,
             advertise: Vec::new(),
             relay_only: false,
+            bandwidth_cap_kbps: None,
         }
     }
 }
@@ -724,6 +730,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.base,
             now_d,
             self.config.initial_bandwidth_estimate_kbps,
+            self.config.bandwidth_cap_kbps,
         );
         // Renegotiate on join: the newcomer gets every existing track.
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {

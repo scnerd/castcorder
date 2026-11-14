@@ -261,6 +261,8 @@ pub(crate) struct Guest {
     ice_restart: bool,
     /// The initial bandwidth estimate, or `None` without estimation.
     bwe_initial: Option<u64>,
+    /// The configured cap on the estimate the allocation uses.
+    bwe_cap: Option<u64>,
     /// When the video allocation is next due; `allocate_now` brings it forward.
     next_alloc: Duration,
     allocate_now: bool,
@@ -270,6 +272,7 @@ pub(crate) struct Guest {
 }
 
 impl Guest {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         id: GuestId,
         device: String,
@@ -278,6 +281,7 @@ impl Guest {
         base: Instant,
         now: Duration,
         bwe_initial: Option<u64>,
+        bwe_cap: Option<u64>,
     ) -> Self {
         Self {
             id,
@@ -301,6 +305,7 @@ impl Guest {
             last_pair: None,
             ice_restart: false,
             bwe_initial,
+            bwe_cap,
             next_alloc: now,
             allocate_now: false,
             bwe_asked: None,
@@ -419,9 +424,17 @@ impl Guest {
         let estimate = self
             .bwe_initial
             .map(|initial| self.stats.bwe_kbps.unwrap_or(initial));
+        let estimate = match (estimate, self.bwe_cap) {
+            (Some(e), Some(c)) => Some(e.min(c)),
+            (e, c) => e.or(c),
+        };
         let a = alloc::allocate(estimate, audio, &tracks);
         for ((i, layers), choice) in which.into_iter().zip(a.choices) {
-            self.set_target(i, choice.map(|c| layers[c].0));
+            let rates: Vec<String> = layers
+                .iter()
+                .map(|(l, k)| format!("{}={k}", layer_name(&Some(*l))))
+                .collect();
+            self.set_target(i, choice.map(|c| layers[c].0), &rates.join(","));
         }
         if self.bwe_initial.is_some() {
             // Sustain the next layer's rate and probe for the best one; never
@@ -453,7 +466,7 @@ impl Guest {
 
     /// Point track `i` at `target`; a new layer is forwarded from its next
     /// keyframe, asked for now (and again each allocation until it comes).
-    fn set_target(&mut self, i: usize, target: Option<Layer>) {
+    fn set_target(&mut self, i: usize, target: Option<Layer>, rates: &str) {
         let Some(ti) = self.tracks_out[i].track_in.upgrade() else {
             return;
         };
@@ -464,6 +477,7 @@ impl Guest {
                 from = %layer_name(&fwd.target),
                 to = %layer_name(&target),
                 bwe_kbps = ?self.stats.bwe_kbps,
+                layer_kbps = %rates,
                 "video layer chosen"
             );
             fwd.target = target;
