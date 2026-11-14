@@ -94,7 +94,7 @@ jobs:
         run: |
           deb=$(ls castcorder/target/release/bundle/deb/*.deb)
           pkg=$(dpkg-deb -f "$deb" Package)
-          sudo apt-get install -y "$deb"
+          sudo apt-get install -y "./$deb"
           dpkg -L "$pkg" | grep -E 'bin/|client/index.html'
           dpkg -L "$pkg" | grep -q 'client/index.html'
           xvfb-run -a castcorder-app --smoke 2>&1 | tee smoke.log
