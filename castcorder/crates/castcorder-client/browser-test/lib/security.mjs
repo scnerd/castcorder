@@ -67,6 +67,16 @@ export async function securityChecks() {
   await waitFor(async () => (await text(C, '#take-status')).startsWith('idle'), 'C stopped take 1', 10000);
   check(true, 'producer C (granted by the host machine) started and stopped take 1');
 
+  // Gated or always open: only the host machine's page has the toggle; the
+  // change shows on every producer's panel.
+  check((await text(C, '#room-open')) === 'producer-gated', 'the call starts producer-gated');
+  check((await C.locator('#open-toggle').count()) === 0, 'granted producer C has no gated/open toggle');
+  await H.click('#open-toggle');
+  await waitFor(async () => (await text(C, '#room-open')) === 'always open' && (await text(H, '#room-open')) === 'always open', 'call made always open for everyone', 10000);
+  await H.click('#open-toggle');
+  await waitFor(async () => (await text(C, '#room-open')) === 'producer-gated' && (await text(H, '#room-open')) === 'producer-gated', 'call made producer-gated again', 10000);
+  check(true, 'host machine flipped open and gated; producer C saw both and has no toggle');
+
   // Lock: a new, untrusted device is refused.
   await H.click('#lock');
   await waitFor(async () => (await text(H, '#room-locked')) === 'locked', 'call locked', 10000);

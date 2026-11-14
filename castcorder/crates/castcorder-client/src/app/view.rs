@@ -14,6 +14,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let room = move || ui.room.get();
     let locked = move || room().is_some_and(|r| r.locked);
     let record_video = move || room().is_some_and(|r| r.record_video);
+    let open = move || room().is_some_and(|r| r.open);
     let new_password = RwSignal::new(String::new());
     let act = move |a: RoomAction| producer_request(ui, Request::Room(a), false);
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
@@ -30,7 +31,12 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
             <p>
                 "Room: " <span id="room-locked">{move || if locked() { "locked" } else { "unlocked" }}</span>
                 ", " <span id="room-password">{move || if room().is_some_and(|r| r.password) { "password set" } else { "no password" }}</span>
-                ", " <span id="room-open">{move || if room().is_some_and(|r| r.open) { "always open" } else { "producer-gated" }}</span>
+                ", " <span id="room-open">{move || if open() { "always open" } else { "producer-gated" }}</span>
+                // Only the host machine may change whether the call is gated.
+                <Show when=move || ui.role.get().host_machine>
+                    " " <button id="open-toggle" on:click=move |_| act(RoomAction::SetOpen(!open()))>
+                        {move || if open() { "Require a producer" } else { "Always open" }}</button>
+                </Show>
                 " "
                 <button id="lock" on:click=move |_| act(RoomAction::Lock(!locked()))>
                     {move || if locked() { "Unlock" } else { "Lock" }}</button>
