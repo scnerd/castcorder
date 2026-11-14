@@ -15,6 +15,7 @@ mod http;
 mod local;
 #[cfg(feature = "native-capture")]
 mod native;
+mod participant;
 mod rendezvous;
 mod room;
 mod tls;
@@ -120,7 +121,50 @@ pub fn default_library() -> PathBuf {
 /// ([`Config::participate`]).
 pub const NATIVE_CAPTURE: bool = cfg!(feature = "native-capture");
 
+/// Why a build without `native-capture` cannot join natively.
+#[cfg_attr(feature = "native-capture", allow(dead_code))]
+const NO_NATIVE: &str =
+    "this build has no native capture (it needs the native-capture feature and GStreamer)";
+
+/// One GStreamer element the native microphone uses, as this process finds it.
+#[derive(Clone, Debug)]
+pub struct GstElement {
+    /// The element factory's name.
+    pub name: String,
+    /// The plugin file it loads from; `None`: missing.
+    pub plugin: Option<PathBuf>,
+    /// Without it native capture does not work (else it degrades).
+    pub required: bool,
+}
+
+/// Initialise GStreamer as native capture does and find each element it
+/// uses (installer smoke runs). Errors if GStreamer does not initialise or the
+/// build has no native capture.
+pub fn native_capture_check() -> Result<Vec<GstElement>, String> {
+    #[cfg(not(feature = "native-capture"))]
+    {
+        Err(NO_NATIVE.into())
+    }
+    #[cfg(feature = "native-capture")]
+    {
+        use castcorder_capture_gst as cg;
+        let required = cg::required_elements();
+        let mut names = required.clone();
+        names.extend_from_slice(cg::OPTIONAL_ELEMENTS);
+        let found = cg::element_plugins(&names).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .map(|(name, plugin)| GstElement {
+                required: required.contains(&name.as_str()),
+                name,
+                plugin,
+            })
+            .collect())
+    }
+}
+
 pub use args::USAGE;
+pub use participant::{NativeDevice, NativeInput, NativeState};
 
 fn wall_ms() -> u64 {
     std::time::SystemTime::now()
@@ -167,14 +211,16 @@ fn take_numbers(call_dir: &Path) -> Vec<u32> {
 #[derive(Clone)]
 pub struct Finisher {
     tx: mpsc::Sender<call::Command>,
-    local_takes: Option<mpsc::Sender<call::TakeCtl>>,
+    /// The joined host microphone's take control, if joined.
+    local_takes: Arc<Mutex<Option<mpsc::Sender<call::TakeCtl>>>>,
 }
 
 impl Finisher {
     /// Finish, waiting at most a minute for the host microphone take and 30
     /// seconds for the safety tracks. The host keeps running.
     pub fn finish(&self) {
-        if let Some(takes) = &self.local_takes {
+        let local = self.local_takes.lock().ok().and_then(|t| t.clone());
+        if let Some(takes) = &local {
             let (done, finished) = mpsc::channel();
             if takes.send(call::TakeCtl::Stop { done: Some(done) }).is_ok() {
                 match finished.recv_timeout(Duration::from_secs(60)) {
@@ -209,11 +255,32 @@ pub struct Running {
     udp: SocketAddr,
     call_link: Arc<Mutex<Option<String>>>,
     finisher: Finisher,
+    native: Arc<participant::NativeCtl>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
 
 impl Running {
+    /// Join the call as the person at the host with `input`, captured
+    /// natively (a build with `native-capture`). A take recording now is
+    /// recorded from the join on. Errors are a sentence for that person.
+    pub fn join_native(&self, input: NativeInput) -> Result<(), String> {
+        self.native.join(input)
+    }
+
+    /// Leave the call with the native input: the take recording now gets its
+    /// microphone files finished first, and the input is closed when this
+    /// returns. False if it was not in the call.
+    pub fn leave_native(&self) -> Result<bool, String> {
+        self.native.leave()
+    }
+
+    /// Whether this host can join natively, with which inputs, and whether
+    /// it is joined.
+    pub fn native_state(&self) -> NativeState {
+        self.native.state()
+    }
+
     /// The call's name.
     pub fn call(&self) -> &str {
         &self.call
@@ -263,6 +330,9 @@ impl Running {
     /// the listeners, the rendezvous connection and the call's thread end and
     /// their ports are released before this returns.
     pub fn stop(self) {
+        if let Err(e) = self.native.leave() {
+            tracing::warn!(error = %e, "host microphone not left cleanly");
+        }
         self.finisher.finish();
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.finisher.tx.send(call::Command::Stop);
@@ -390,23 +460,20 @@ pub fn start(
         call = call.with_alignment(cfg);
         call.align_recovered(recovered.iter().map(|r| r.take).collect());
     }
-    // The host's own recorder, told to finalise when the host finishes.
-    #[cfg_attr(not(feature = "native-capture"), allow(unused_mut))]
-    let mut local_takes: Option<mpsc::Sender<call::TakeCtl>> = None;
-    #[cfg(feature = "native-capture")]
-    if let Some(device) = args.participate.clone() {
-        let cfg = native::Config {
-            device,
+    // The host's own participant, joined and left at runtime; its recorder
+    // is told to finalise when the host finishes.
+    let local_takes = Arc::new(Mutex::new(None));
+    let native = Arc::new(participant::NativeCtl::new(
+        tx.clone(),
+        local_takes.clone(),
+        participant::NativeBase {
             name: args.name.clone(),
             call: call_name.clone(),
             timeline: timeline.clone(),
             device_id: host_device.clone(),
             keep_wav: args.keep_wav,
-        };
-        let participant = native::start(cfg, tx.clone());
-        local_takes = Some(participant.takes.clone());
-        call = call.with_participant(participant);
-    }
+        },
+    ));
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
         base: base.clone(),
         key: host_key,
@@ -437,6 +504,7 @@ pub fn start(
         tx: Mutex::new(tx),
         dist: args.dist.clone(),
         host_id: host_id.clone(),
+        native: native.clone(),
     });
     threads.push(http::serve(
         https,
@@ -472,6 +540,12 @@ pub fn start(
             stop.clone(),
         ));
     }
+    // `--participate`: joined from the start, as from the page later.
+    if let Some(device) = args.participate.clone()
+        && let Err(e) = native.join(NativeInput::Device(device))
+    {
+        tracing::warn!(error = %e, "the host microphone did not join");
+    }
     Ok(Running {
         call: call_name,
         call_dir,
@@ -481,6 +555,7 @@ pub fn start(
         udp,
         call_link,
         finisher,
+        native,
         stop,
         threads,
     })

@@ -85,8 +85,64 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
+/// The directory beside the executable that holds a bundled GStreamer's
+/// plugins (the Windows installer; its libraries sit beside the executable).
+pub const BUNDLED_PLUGINS: &str = "gstreamer-1.0";
+
 fn init() -> io::Result<()> {
-    gst::init().map_err(|e| err(format!("gstreamer init failed: {e}")))
+    gst::init().map_err(|e| err(format!("gstreamer init failed: {e}")))?;
+    static BUNDLED: std::sync::Once = std::sync::Once::new();
+    BUNDLED.call_once(|| {
+        let dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.join(BUNDLED_PLUGINS)));
+        if let Some(dir) = dir.filter(|d| d.is_dir()) {
+            let added = gst::Registry::get().scan_path(&dir);
+            tracing::info!(dir = %dir.display(), added, "bundled GStreamer plugins");
+        }
+    });
+    Ok(())
+}
+
+/// The elements the capture, live and playback pipelines need: the
+/// platform's microphone source first.
+pub fn required_elements() -> Vec<&'static str> {
+    vec![
+        platform_source_factory(),
+        "tee",
+        "queue",
+        "appsink",
+        "appsrc",
+        "filesrc",
+        "wavparse",
+        "audioconvert",
+        "audioresample",
+        "audiotestsrc",
+        "audiomixer",
+        "opusenc",
+        "opusdec",
+        "autoaudiosink",
+    ]
+}
+
+/// Elements used when present: echo cancellation and noise suppression.
+pub const OPTIONAL_ELEMENTS: &[&str] = &["webrtcdsp", "webrtcechoprobe"];
+
+/// Initialise GStreamer (with the bundled plugins, if any) and find each
+/// element: its plugin's file, or `None` if the element is missing.
+pub fn element_plugins(names: &[&str]) -> io::Result<Vec<(String, Option<std::path::PathBuf>)>> {
+    init()?;
+    Ok(names
+        .iter()
+        .map(|n| {
+            let file = gst::ElementFactory::find(n).map(|f| {
+                f.plugin()
+                    .and_then(|p| p.filename())
+                    .unwrap_or_else(|| "(built in)".into())
+            });
+            (n.to_string(), file)
+        })
+        .collect())
 }
 
 /// The platform's microphone element.

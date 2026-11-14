@@ -19,17 +19,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Native capture (GStreamer): bundled on Windows (a trimmed, LGPL-only copy,
+        # task app:gst:stage), the distro's packages on Linux (the .deb depends on
+        # them; 24.04 for GStreamer 1.24). macOS stays on the webview microphone.
         include:
           - name: windows
             os: windows-latest
             bundles: nsis,msi
+            features: desktop,native-capture
+            extra_config: --config tauri.gst.conf.json
           - name: macos
             os: macos-latest
             bundles: app,dmg
+            features: desktop
+            extra_config: ""
           - name: linux
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             bundles: deb,appimage
+            features: desktop,native-capture
+            extra_config: --config tauri.gst-deb.conf.json
     env:
+      GST_VERSION: 1.28.8
+      GST_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
       # AppImage tooling runs without FUSE on the runner.
       APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
@@ -51,7 +62,44 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-good gstreamer1.0-pulseaudio
+          pkg-config --modversion gstreamer-1.0
+
+      - name: Cache the GStreamer installer
+        if: matrix.name == 'windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-installer
+          key: gstreamer-msvc-x86_64-${{ env.GST_VERSION }}
+
+      # The official MSVC runtime and development files (one Inno Setup installer):
+      # the build links against it and task app:gst:stage copies the trimmed set.
+      - name: Install GStreamer (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'gstreamer-installer'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $exe = Join-Path $dir "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+          if (-not (Test-Path $exe)) {
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -UseBasicParsing -OutFile $exe -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+          }
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $env:GST_SHA256) { throw 'GStreamer installer checksum mismatch' }
+          Start-Process -Wait $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TYPE=full', '/DIR=C:\gstreamer'
+          $pc = Get-ChildItem C:\gstreamer -Recurse -Filter gstreamer-1.0.pc | Select-Object -First 1
+          if (-not $pc) { Get-ChildItem C:\gstreamer -Depth 3 | Select-Object -First 30 FullName; throw 'no GStreamer development files' }
+          $root = $pc.Directory.Parent.Parent.FullName
+          Write-Host "GStreamer at $root"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root\" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$root\bin" >> $env:GITHUB_PATH
+
+      - name: Install uv
+        if: matrix.name == 'windows'
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
@@ -68,12 +116,20 @@ jobs:
       - name: Install tauri-cli
         run: cargo binstall tauri-cli --version "^2" --no-confirm --locked
 
-      # The client is built with trunk and bundled as the app's `client` resource. No
-      # native-capture: GStreamer is not bundled, so installed apps record through the
-      # webview microphone only.
-      - name: Build installers
-        run: task app:bundle -- --bundles ${{ matrix.bundles }}
+      - name: Stage the bundled GStreamer (Windows)
+        if: matrix.name == 'windows'
+        run: task app:gst:stage
 
+      # The client is built with trunk and bundled as the app's `client` resource.
+      - name: Build installers
+        run: task app:bundle FEATURES=${{ matrix.features }} EXTRA_CONFIG="${{ matrix.extra_config }}" -- --bundles ${{ matrix.bundles }}
+
+      - name: Installer sizes
+        shell: bash
+        run: find castcorder/target/release/bundle -maxdepth 2 -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -exec ls -l {} \;
+
+      # Without the build's GStreamer on PATH or in the environment, so only the
+      # installed copy can satisfy the app.
       - name: Smoke test the installed app (Windows)
         if: matrix.name == 'windows'
         shell: pwsh
@@ -82,6 +138,15 @@ jobs:
           $setup = Get-ChildItem castcorder/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Start-Process -Wait $setup.FullName -ArgumentList '/S', "/D=$dir"
           if (-not (Test-Path "$dir/client/index.html")) { throw 'client not installed' }
+          if (-not (Test-Path "$dir/gstreamer-1.0-0.dll")) { throw 'GStreamer not installed' }
+          if (-not (Test-Path "$dir/licenses/gstreamer/NOTICE.txt")) { throw 'GStreamer notice not installed' }
+          $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'gstreamer' }) -join ';'
+          Get-ChildItem env: | Where-Object { $_.Name -match '^GST' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
+          $gst = & "$dir/castcorder-app.exe" --smoke-gst 2>&1 | Out-String
+          Write-Host $gst
+          if ($gst -notmatch 'GST_OK') { throw 'GStreamer did not initialise with every element' }
+          $outside = $gst -split "`n" | Where-Object { $_ -match '^GST_ELEMENT \S+ (.+)$' -and -not $Matches[1].Trim().StartsWith($dir, [StringComparison]::OrdinalIgnoreCase) }
+          if ($outside) { throw "plugins loaded from outside the install: $outside" }
           $out = & "$dir/castcorder-app.exe" --smoke 2>&1 | Out-String
           Write-Host $out
           if ($out -notmatch 'APP_READY') { throw 'smoke run did not reach APP_READY' }
@@ -94,9 +159,14 @@ jobs:
         run: |
           deb=$(ls castcorder/target/release/bundle/deb/*.deb)
           pkg=$(dpkg-deb -f "$deb" Package)
+          dpkg-deb -f "$deb" Depends
+          dpkg-deb -f "$deb" Depends | grep -q 'libgstreamer1.0-0 (>= 1.24)'
+          dpkg-deb -f "$deb" Depends | grep -q 'gstreamer1.0-pulseaudio'
           sudo apt-get install -y "./$deb"
           dpkg -L "$pkg" | grep -E 'bin/|client/index.html'
           dpkg -L "$pkg" | grep -q 'client/index.html'
+          castcorder-app --smoke-gst 2>&1 | tee smoke-gst.log
+          grep -q GST_OK smoke-gst.log
           xvfb-run -a castcorder-app --smoke 2>&1 | tee smoke.log
           grep -q APP_READY smoke.log
 

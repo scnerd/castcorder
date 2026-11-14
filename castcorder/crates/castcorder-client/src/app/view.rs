@@ -172,6 +172,7 @@ pub(super) fn App() -> impl IntoView {
             }}</span>
         </p>
         <Producer ui=ui/>
+        <native::NativeMic/>
         <p hidden>
             // Debug: send StartTake whatever the role (the host must refuse a
             // non-producer on the control channel).

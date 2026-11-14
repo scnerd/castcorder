@@ -56,6 +56,10 @@ tasks:
       # the full path into a library take; skips without an input device.
       - cargo clippy -p castcorder-host --features native-capture --all-targets -- -D warnings
       - cargo test -p castcorder-host --features native-capture -- --nocapture
+      # The app's host control joins and leaves natively at runtime: a WAV file
+      # through the capture port into two takes, bit-exact.
+      - cargo clippy -p castcorder-app --features native-capture --all-targets -- -D warnings
+      - cargo test -p castcorder-app --features native-capture -- --nocapture
 
   test:browser:transport:
     desc: castcorder-transport against 3 headless Chromium guests (installs Playwright and Chromium locally on first run)
@@ -162,12 +166,34 @@ tasks:
       host serves it from beside the executable or the platform's resource
       directory), then runs `cargo tauri build` (tauri-cli 2: `cargo binstall
       tauri-cli --version "^2"`). Installers land in
-      <target dir>/release/bundle/. Built without native-capture: GStreamer is not
-      bundled, so the installed app records through the webview microphone only.
-      Pass bundles after --, e.g. task app:bundle -- --bundles nsis
+      <target dir>/release/bundle/. By default built without native-capture
+      (the webview microphone only). With native capture on Windows, stage the
+      trimmed GStreamer first and add its config (what release.yml does):
+      task app:gst:stage
+      task app:bundle FEATURES=desktop,native-capture EXTRA_CONFIG="--config tauri.gst.conf.json"
+      On Linux add EXTRA_CONFIG="--config tauri.gst-deb.conf.json" instead: the
+      .deb depends on the distro's GStreamer (1.24 or newer). Pass bundles after --, e.g.
+      task app:bundle -- --bundles nsis
+    vars:
+      FEATURES: '{{.FEATURES | default "desktop"}}'
+      EXTRA_CONFIG: '{{.EXTRA_CONFIG | default ""}}'
     cmds:
       - cd crates/castcorder-client && trunk build --release --dist ../castcorder-app/client
-      - cd crates/castcorder-app && cargo tauri build --config tauri.bundle.conf.json --features desktop {{.CLI_ARGS}}
+      - cd crates/castcorder-app && cargo tauri build --config tauri.bundle.conf.json {{.EXTRA_CONFIG}} --features {{.FEATURES}} {{.CLI_ARGS}}
+
+  app:gst:stage:
+    desc: Stage the trimmed, LGPL-only GStreamer the Windows installer bundles (crates/castcorder-app/gstreamer)
+    summary: |
+      Copies the plugins native capture uses and the DLLs they import from the
+      MSVC GStreamer install (GSTREAMER_1_0_ROOT_MSVC_X86_64, or GST_ROOT=...)
+      with their licences; refuses GPL or patent-encumbered libraries. The app
+      loads the libraries from beside its executable and scans the plugins in
+      gstreamer-1.0 there (castcorder-capture-gst). See scripts/gst_bundle.py.
+    platforms: [windows]
+    vars:
+      GST_ROOT: "{{.GST_ROOT | default .GSTREAMER_1_0_ROOT_MSVC_X86_64}}"
+    cmds:
+      - uv run ../scripts/gst_bundle.py '{{.GST_ROOT}}' crates/castcorder-app/gstreamer
 
   app:check:
     desc: Clippy, tests and a headless smoke run of the desktop app (needs the system webview; CI runs it under xvfb on Linux)

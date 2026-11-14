@@ -20,6 +20,13 @@
 //!   answer `{"take":N,"hostUs":T}` (T: when, on the host timeline, in us)
 //!   or 409; `GET /status` answers
 //!   `{"take":"...","guests":["name (guest N)",...]}`.
+//! - The host machine's own participant, for the producer page on the host
+//!   machine only: the localhost listener, a loopback `Host` header and the
+//!   `X-Castcorder-Native` header (else 403). `GET /native` answers
+//!   [`crate::NativeState`] as JSON (`available`, `joined`, `devices`,
+//!   `error`); `POST /native/join` takes `{"device":NAME|null}` (null: the
+//!   default input) and `POST /native/leave` leaves; both answer the state,
+//!   or 409 with the reason.
 //! - Any other `GET` serves a file from the client build (flat directory;
 //!   `/` is `index.html`).
 
@@ -49,13 +56,38 @@ pub struct App {
     /// This host's id (castcorder-link `HostId`, encoded): the audience
     /// offers are signed for.
     pub host_id: String,
+    /// The host's own participant (`/native`).
+    pub native: Arc<crate::participant::NativeCtl>,
 }
+
+/// The header a `/native` request must carry. A page on another origin
+/// cannot add it without a CORS preflight, which this server never grants.
+const NATIVE_HEADER: &str = "x-castcorder-native";
 
 struct Request {
     method: String,
     path: String,
     query: String,
     body: Vec<u8>,
+    /// The `Host` header's host, without the port.
+    host: String,
+    /// It carried [`NATIVE_HEADER`].
+    native_header: bool,
+}
+
+/// The `/native` guard: the localhost listener, a loopback `Host` (no DNS
+/// rebinding), and [`NATIVE_HEADER`] (no cross-site requests).
+fn native_allowed(req: &Request, producer: bool) -> bool {
+    producer
+        && req.native_header
+        && matches!(req.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+}
+
+#[derive(serde::Deserialize)]
+struct NativeJoin {
+    /// The input's display name; absent or null: the default input.
+    #[serde(default)]
+    device: Option<String>,
 }
 
 struct Response {
@@ -185,6 +217,8 @@ fn read_request(stream: impl Read) -> io::Result<Request> {
     };
     let (method, target) = (method.to_string(), target.to_string());
     let mut length = 0usize;
+    let mut host = String::new();
+    let mut native_header = false;
     let mut head = line.len();
     loop {
         line.clear();
@@ -199,10 +233,15 @@ fn read_request(stream: impl Read) -> io::Result<Request> {
         if l.is_empty() {
             break;
         }
-        if let Some((k, v)) = l.split_once(':')
-            && k.trim().eq_ignore_ascii_case("content-length")
-        {
-            length = v.trim().parse().unwrap_or(0);
+        if let Some((k, v)) = l.split_once(':') {
+            let (k, v) = (k.trim(), v.trim());
+            if k.eq_ignore_ascii_case("content-length") {
+                length = v.parse().unwrap_or(0);
+            } else if k.eq_ignore_ascii_case("host") {
+                host = host_without_port(v).to_ascii_lowercase();
+            } else if k.eq_ignore_ascii_case(NATIVE_HEADER) {
+                native_header = true;
+            }
         }
     }
     if length > MAX_BODY {
@@ -216,7 +255,17 @@ fn read_request(stream: impl Read) -> io::Result<Request> {
         path: path.to_string(),
         query: query.to_string(),
         body,
+        host,
+        native_header,
     })
+}
+
+/// `localhost:47801` -> `localhost`, `[::1]:1` -> `[::1]`.
+fn host_without_port(v: &str) -> &str {
+    if v.starts_with('[') {
+        return v.find(']').map(|i| &v[..=i]).unwrap_or(v);
+    }
+    v.rsplit_once(':').map(|(h, _)| h).unwrap_or(v)
 }
 
 #[derive(serde::Deserialize)]
@@ -327,6 +376,42 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             Some(s) => json(200, s),
             None => gone(),
         },
+        ("GET", "/native") | ("POST", "/native/join" | "/native/leave")
+            if !native_allowed(req, producer) =>
+        {
+            text(
+                403,
+                "the native microphone is only available to the host machine's own page",
+            )
+        }
+        ("GET", "/native") => json(
+            200,
+            serde_json::to_string(&app.native.state()).unwrap_or_default(),
+        ),
+        ("POST", "/native/join") => {
+            let device = if req.body.iter().all(u8::is_ascii_whitespace) {
+                None
+            } else {
+                match serde_json::from_slice::<NativeJoin>(&req.body) {
+                    Ok(j) => j.device,
+                    Err(e) => return text(400, format!("bad join json: {e}")),
+                }
+            };
+            match app.native.join(crate::NativeInput::Device(device)) {
+                Ok(()) => json(
+                    200,
+                    serde_json::to_string(&app.native.state()).unwrap_or_default(),
+                ),
+                Err(e) => text(409, e),
+            }
+        }
+        ("POST", "/native/leave") => match app.native.leave() {
+            Ok(_) => json(
+                200,
+                serde_json::to_string(&app.native.state()).unwrap_or_default(),
+            ),
+            Err(e) => text(409, e),
+        },
         ("GET", path) => serve_file(&app.dist, path),
         _ => text(404, "not found"),
     }
@@ -383,6 +468,69 @@ mod tests {
         (status, body)
     }
 
+    /// One request with extra header lines; the status and body.
+    fn request_with(addr: std::net::SocketAddr, path: &str, headers: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "GET {path} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        let status = out[9..12].parse().unwrap();
+        let body = out.split_once("\r\n\r\n").unwrap().1.to_string();
+        (status, body)
+    }
+
+    /// `/native` answers only the host machine's own page: the localhost
+    /// listener, a loopback Host header and the native header; anything
+    /// else (another site, DNS rebinding, the LAN listener) is refused.
+    #[test]
+    fn native_controls_answer_only_the_host_machines_own_page() {
+        let (tx, _rx) = mpsc::channel();
+        let app = Arc::new(App {
+            tx: Mutex::new(tx.clone()),
+            dist: std::env::temp_dir(),
+            host_id: "h".into(),
+            native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+        });
+        let local = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lan = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (local_addr, lan_addr) = (local.local_addr().unwrap(), lan.local_addr().unwrap());
+        let stop: Arc<AtomicBool> = Default::default();
+        serve(local, app.clone(), None, true, stop.clone());
+        serve(lan, app, None, false, stop.clone());
+        let ok = "Host: localhost:1\r\nX-Castcorder-Native: 1\r\n";
+        let (status, body) = request_with(local_addr, "/native", ok);
+        assert_eq!(status, 200, "{body}");
+        let state: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(state["available"], crate::NATIVE_CAPTURE, "{body}");
+        assert_eq!(state["joined"], serde_json::Value::Null, "{body}");
+        let (status, _) = request_with(
+            local_addr,
+            "/native",
+            "Host: [::1]:1\r\nX-Castcorder-Native: 1\r\n",
+        );
+        assert_eq!(status, 200);
+        for (addr, headers) in [
+            (local_addr, "Host: localhost:1\r\n"),
+            (
+                local_addr,
+                "Host: evil.example:1\r\nX-Castcorder-Native: 1\r\n",
+            ),
+            (
+                local_addr,
+                "Host: localhost.evil.example\r\nX-Castcorder-Native: 1\r\n",
+            ),
+            (lan_addr, ok),
+        ] {
+            let (status, body) = request_with(addr, "/native", headers);
+            assert_eq!(status, 403, "{headers}: {body}");
+        }
+        stop.store(true, Ordering::SeqCst);
+    }
+
     /// A LAN page learns the host id from `GET /role` and signs its offer
     /// for it; the offer reaches the host thread with that audience, and a
     /// proof signed for anything else (the old constant `lan`) is refused.
@@ -391,9 +539,10 @@ mod tests {
         let host_id = castcorder_link::HostKey::from_secret([7; 32]).id().encode();
         let (tx, rx) = mpsc::channel();
         let app = Arc::new(App {
-            tx: Mutex::new(tx),
+            tx: Mutex::new(tx.clone()),
             dist: std::env::temp_dir(),
             host_id: host_id.clone(),
+            native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
