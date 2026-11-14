@@ -20,7 +20,8 @@ vocabulary (use its terms exactly), and [docs/adr/](docs/adr/) holds the decisio
 - **Undo a local commit with `git reset --soft`.** `--hard` discards other sessions' uncommitted
   work in a shared tree.
 - **Keep context lean; it is what costs quota.** Grep before reading, read large files by range
-  (client `app.rs`, `e2e.mjs` and transport `lib.rs` are 40-60k characters each), and filter
+  (transport `lib.rs` and client `worker.rs` are 40-45k characters, host `room.rs`
+  is 30k; the client `app/` and `browser-test/lib/` submodules are 3-18k each), and filter
   build and test output to the lines that matter (`| tail`, `| grep`).
 - **Beads (`bd`) is the issue tracker.** Run `bd prime` once per session for the command
   reference and the session-close protocol. Run `bd dolt push` right after closing beads.
