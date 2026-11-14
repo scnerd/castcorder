@@ -23,6 +23,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -244,14 +245,15 @@ fn connect(t: &Target) -> io::Result<Box<dyn Stream>> {
 }
 
 fn read_msg(ws: &mut WebSocket<Box<dyn Stream>>) -> Result<ServerMsg, String> {
-    read_msg_until(ws, None)?.ok_or_else(|| "no message".into())
+    read_msg_until(ws, None, None)?.ok_or_else(|| "no message".into())
 }
-
 /// The next text frame, or `None` once `until` has passed with nothing to
-/// read. Silence for [`READ_TIMEOUT`] is a dead connection (the server pings).
+/// read. Silence for [`READ_TIMEOUT`] is a dead connection (the server pings);
+/// `stop` being set ends the wait with an error.
 fn read_msg_until(
     ws: &mut WebSocket<Box<dyn Stream>>,
     until: Option<Instant>,
+    stop: Option<&AtomicBool>,
 ) -> Result<Option<ServerMsg>, String> {
     let mut quiet = Instant::now();
     loop {
@@ -269,6 +271,9 @@ fn read_msg_until(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
+                if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+                    return Err("stopping".into());
+                }
                 if until.is_some_and(|u| Instant::now() >= u) {
                     return Ok(None);
                 }
@@ -286,27 +291,37 @@ fn send(ws: &mut WebSocket<Box<dyn Stream>>, m: &ClientMsg) -> Result<(), String
         .map_err(|e| e.to_string())
 }
 
-/// Hold the rendezvous connection forever on a new thread. `on_link` runs
-/// once, after the first successful registration.
-pub fn spawn(cfg: Config, tx: mpsc::Sender<Command>, on_link: impl FnOnce(&str) + Send + 'static) {
+/// Hold the rendezvous connection on a new thread until `stop` is set.
+/// `on_link` runs once, after the first successful registration.
+pub fn spawn(
+    cfg: Config,
+    tx: mpsc::Sender<Command>,
+    on_link: impl FnOnce(&str) + Send + 'static,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("rendezvous".into())
         .spawn(move || {
             let mut on_link = Some(on_link);
             let mut turn_user: Option<String> = None;
             let mut backoff = Duration::from_secs(1);
-            loop {
-                match session(&cfg, &tx, &mut on_link, &mut turn_user) {
+            while !stop.load(Ordering::SeqCst) {
+                match session(&cfg, &tx, &mut on_link, &mut turn_user, &stop) {
                     Ok(()) => backoff = Duration::from_secs(1),
+                    Err(_) if stop.load(Ordering::SeqCst) => break,
                     Err(e) => {
                         warn!(rendezvous = %cfg.base, error = %e, retry_s = backoff.as_secs(), "rendezvous connection lost; retrying");
                     }
                 }
-                thread::sleep(backoff);
+                let until = Instant::now() + backoff;
+                while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(50));
+                }
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
+            info!("rendezvous connection closed: the host is stopping");
         })
-        .expect("spawn rendezvous thread");
+        .expect("spawn rendezvous thread")
 }
 
 fn session(
@@ -314,6 +329,7 @@ fn session(
     tx: &mpsc::Sender<Command>,
     on_link: &mut Option<impl FnOnce(&str) + Send>,
     turn_user: &mut Option<String>,
+    stop: &AtomicBool,
 ) -> Result<(), String> {
     let t = target(&cfg.base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
@@ -391,7 +407,7 @@ fn session(
         f(&cfg.link());
     }
     loop {
-        let Some(msg) = read_msg_until(&mut ws, renew_at)? else {
+        let Some(msg) = read_msg_until(&mut ws, renew_at, Some(stop))? else {
             info!("renewing relay credentials: reconnecting to the rendezvous");
             return Ok(());
         };

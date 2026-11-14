@@ -26,6 +26,7 @@
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -36,6 +37,8 @@ use crate::call::Command;
 
 const MAX_HEAD: usize = 64 * 1024;
 const MAX_BODY: usize = 1024 * 1024;
+/// How often a listener checks whether the host is stopping.
+const ACCEPT_POLL: Duration = Duration::from_millis(20);
 
 /// What every listener shares.
 pub struct App {
@@ -77,19 +80,36 @@ fn json(status: u16, body: String) -> Response {
     }
 }
 
-/// Serve `listener` forever on a new thread. `tls` makes it HTTPS; `producer`
-/// marks requests as coming from the host machine's own browser.
+/// Serve `listener` on a new thread until `stop` is set; the listener is
+/// closed when the thread ends. `tls` makes it HTTPS; `producer` marks
+/// requests as coming from the host machine's own browser.
 pub fn serve(
     listener: TcpListener,
     app: Arc<App>,
     tls: Option<Arc<rustls::ServerConfig>>,
     producer: bool,
-) {
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
+    // Non-blocking accepts, so the thread sees `stop` within a poll.
+    if let Err(e) = listener.set_nonblocking(true) {
+        warn!(error = %e, "listener stays blocking: stopping the host waits for one more connection");
+    }
     thread::Builder::new()
         .name(if producer { "http-local" } else { "https" }.into())
         .spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { continue };
+            while !stop.load(Ordering::SeqCst) {
+                let stream = match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(ACCEPT_POLL);
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+                // Accepted sockets may inherit non-blocking mode (Windows).
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
                 let app = app.clone();
                 let tls = tls.clone();
                 let _ = thread::Builder::new().name("conn".into()).spawn(move || {
@@ -103,7 +123,7 @@ pub fn serve(
                 });
             }
         })
-        .expect("spawn http thread");
+        .expect("spawn http thread")
 }
 
 fn connection(
@@ -377,7 +397,7 @@ mod tests {
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        serve(listener, app, None, false);
+        serve(listener, app, None, false, Default::default());
         // The host thread: the real room checks each offer's proof.
         thread::spawn(move || {
             let mut room = crate::room::Room::new(true);
