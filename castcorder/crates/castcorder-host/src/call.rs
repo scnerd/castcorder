@@ -752,6 +752,8 @@ impl Call {
                         message: format!("host speaks protocol {PROTOCOL_VERSION}"),
                     },
                     Request::Join { display_name, .. } => {
+                        // The client is not trusted to have cleaned it.
+                        let display_name = crate::http::clean_name(&display_name);
                         match self.room.join(id.0, &display_name) {
                             Err(refusal) => {
                                 self.remove.push(id);
@@ -921,9 +923,9 @@ impl Call {
                 }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
-                    Ok(Admission::Enter) => {
-                        host.accept(&name, &offer_sdp).map_err(|e| e.to_string())
-                    }
+                    Ok(Admission::Enter) => host
+                        .accept(&crate::http::stream_name(&name), &offer_sdp)
+                        .map_err(|e| e.to_string()),
                 };
                 let r = r.map(|(id, answer)| {
                     // Admitted and accepted: only now may it take over an

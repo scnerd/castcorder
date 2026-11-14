@@ -300,10 +300,23 @@ fn ask<T>(app: &App, make: impl FnOnce(mpsc::Sender<T>) -> Command) -> Option<T>
     rx.recv_timeout(Duration::from_secs(10)).ok()
 }
 
-/// A guest's name as logs and stream ids use it: ASCII letters and digits,
-/// at most 16, `guest` if none are left.
+/// A guest's display name as the host keeps it (tiles, `room.json`, logs):
+/// any text, cleaned by [`castcorder_core::names::display_name`]; `guest` if
+/// nothing is left. Not a file name: those use `file_slug`.
 pub fn clean_name(raw: &str) -> String {
-    let name: String = raw
+    let name = castcorder_core::names::display_name(raw);
+    if name.is_empty() {
+        "guest".into()
+    } else {
+        name
+    }
+}
+
+/// A guest's name as stream ids and logs-by-stream use it: ASCII letters and
+/// digits only (`-` separates the id's parts), at most 16, `guest` if none
+/// are left. Not unique; the id carries a guest number.
+pub fn stream_name(display: &str) -> String {
+    let name: String = display
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .take(16)
@@ -315,6 +328,42 @@ pub fn clean_name(raw: &str) -> String {
     }
 }
 
+/// The name in a `/offer` query: the `name=` value, percent-decoded.
+fn query_name(query: &str) -> String {
+    clean_name(&percent_decode(
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("name="))
+            .unwrap_or("guest"),
+    ))
+}
+
+/// Percent-decode a URL component (`+` stays a plus). Bytes that are not
+/// valid UTF-8 become U+FFFD; a stray `%` is kept.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        match (
+            b[i],
+            b.get(i + 1).and_then(|c| hex(*c)),
+            b.get(i + 2).and_then(|c| hex(*c)),
+        ) {
+            (b'%', Some(h), Some(l)) => {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn handle(app: &App, req: &Request, producer: bool) -> Response {
     let gone = || text(500, "host thread not answering");
     match (req.method.as_str(), req.path.as_str()) {
@@ -323,12 +372,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             serde_json::json!({ "producer": producer, "host": app.host_id }).to_string(),
         ),
         ("POST", "/offer") => {
-            let name = clean_name(
-                req.query
-                    .split('&')
-                    .find_map(|kv| kv.strip_prefix("name="))
-                    .unwrap_or("guest"),
-            );
+            let name = query_name(&req.query);
             let offer = match serde_json::from_slice::<Sdp>(&req.body) {
                 Ok(o) => o,
                 Err(e) => return text(400, format!("bad offer json: {e}")),
@@ -452,6 +496,18 @@ mod tests {
     use super::*;
     use castcorder_link::identity;
 
+    #[test]
+    fn offer_query_names_are_percent_decoded_display_names() {
+        assert_eq!(
+            query_name("name=Ann%20Lee%20Zo%C3%AB&x=1"),
+            "Ann Lee Zo\u{eb}"
+        );
+        assert_eq!(query_name("name=C%2B%2B"), "C++");
+        assert_eq!(query_name("name=100%"), "100%");
+        assert_eq!(query_name("x=1"), "guest");
+        assert_eq!(query_name("name=%20%20"), "guest");
+        assert_eq!(clean_name("Zo\u{eb} Lee"), "Zo\u{eb} Lee");
+    }
     /// One request over real TCP; the status and body.
     fn request(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
         let mut s = TcpStream::connect(addr).unwrap();

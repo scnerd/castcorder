@@ -328,7 +328,7 @@ impl<S: Storage> Library<S> {
                 "track offered again with different contents",
             ));
         }
-        let who = clean(participant, 32, "guest");
+        let who = crate::names::file_slug(participant, 32, "guest");
         let src = clean(&offer.source.0, 32, "src");
         let ext = clean_ext(&offer.format);
         let mut n = 1;

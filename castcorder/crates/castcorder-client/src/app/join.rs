@@ -436,7 +436,7 @@ pub(super) async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<Stri
     set(&init, "headers", headers);
     set(&init, "body", stringify(&body));
     let sep = if url.contains('?') { '&' } else { '?' };
-    let target = format!("{url}{sep}name={}", ctx.name);
+    let target = format!("{url}{sep}name={}", js_sys::encode_uri_component(&ctx.name));
     let resp = JsFuture::from(Promise::from(call(
         &window(),
         "fetch",
