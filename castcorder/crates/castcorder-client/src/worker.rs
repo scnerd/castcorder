@@ -296,25 +296,46 @@ impl Active {
         });
     }
 
-    /// Check the render clock after a worklet batch.
-    fn watch_clock(&mut self, rate: u32) {
+    /// Append `n` frames that arrived at `at`; after a worklet batch
+    /// (`render_clock`), check the render clock against the arrival time.
+    fn record(
+        &mut self,
+        planes: &[Vec<f32>],
+        n: usize,
+        rate: u32,
+        ts_us: f64,
+        arrived: Arrival,
+        render_clock: bool,
+    ) {
+        self.append(planes, n, rate, ts_us, arrived);
+        if render_clock {
+            self.watch_clock(rate, arrived.ms);
+        }
+    }
+
+    /// Check the render clock after a worklet batch that arrived at `at_ms`.
+    fn watch_clock(&mut self, rate: u32, at_ms: f64) {
         if self.format.is_none() {
             return;
         }
         let frames = self.frames;
         let clock = self.clock.get_or_insert_with(|| ClockWatch::new(rate));
-        if let Some(d) = clock.observe(now_ms(), frames) {
+        if let Some(d) = clock.observe(at_ms, frames) {
             self.discontinuity(d > 0, d.unsigned_abs(), "render clock vs wall clock");
         }
     }
 
-    fn append(&mut self, planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64) {
+    fn append(&mut self, planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64, arrived: Arrival) {
         let channels = planes.len() as u16;
         let (r, ch) = *self.format.get_or_insert_with(|| {
             set(&self.meta, "sampleRate", rate);
             set(&self.meta, "channels", channels);
             set(&self.meta, "firstFrameTimestampUs", ts_us);
-            set(&self.meta, "firstFrameAtMs", js_sys::Date::now());
+            set(
+                &self.meta,
+                "firstFrameAtMs",
+                js_sys::Date::now() - (now_ms() - arrived.ms),
+            );
             (rate, channels)
         });
         if self.refs.is_none() {
@@ -350,7 +371,7 @@ impl Active {
         }
         self.max_write_ms = self.max_write_ms.max(now_ms() - t0);
         self.frames += n as u64;
-        self.observe_timing(n as u64, r, ts_us);
+        self.observe_timing(n as u64, r, ts_us, arrived.device_us);
         if self.frames - self.frames_at_flush >= u64::from(r) {
             self.flush(false);
             let o = object();
@@ -363,8 +384,9 @@ impl Active {
     }
 
     /// After `n` frames were appended: note the AudioData timestamp of a
-    /// reference frame among them, and observe their delivery.
-    fn observe_timing(&mut self, n: u64, rate: u32, ts_us: f64) {
+    /// reference frame among them, and observe their delivery (at device time
+    /// `arrived_us`).
+    fn observe_timing(&mut self, n: u64, rate: u32, ts_us: f64, arrived_us: f64) {
         let start = self.frames - n;
         let every = u64::from(rate.max(1));
         let k = start.div_ceil(every) * every;
@@ -376,8 +398,11 @@ impl Active {
             }
         }
         let frames = self.frames;
-        let now = device_now_us();
-        if let Some(p) = self.refs.as_mut().and_then(|r| r.observe(frames, now)) {
+        if let Some(p) = self
+            .refs
+            .as_mut()
+            .and_then(|r| r.observe(frames, arrived_us))
+        {
             self.reference(p);
         }
     }
@@ -450,8 +475,114 @@ thread_local! {
     static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
     static STARTING: Cell<bool> = const { Cell::new(false) };
     static STOP_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// While `start` opens a track's files: the audio that arrived meanwhile
+    /// and its frame count (see [`Held`]).
+    static HELD: RefCell<Option<(Vec<Held>, u64)>> = const { RefCell::new(None) };
     /// The clock estimate against the host (pings from the page).
     static CLOCK: RefCell<ClockState> = RefCell::new(ClockState::default());
+}
+
+/// When audio reached this worker: device time (us, as in timing metadata)
+/// and `performance.now()` (ms, for the render clock check).
+#[derive(Clone, Copy)]
+struct Arrival {
+    device_us: f64,
+    ms: f64,
+}
+
+impl Arrival {
+    fn now() -> Self {
+        Self {
+            device_us: device_now_us(),
+            ms: now_ms(),
+        }
+    }
+}
+
+/// Audio held while a new track's files open. Opening three OPFS files can
+/// take a while (about 300 ms seen in Firefox on a loaded CI runner); what
+/// arrives meanwhile is written first once they are open, with the time it
+/// arrived, so the take loses no audio at its start and its timing metadata
+/// still places each frame by its delivery.
+enum Held {
+    Frames {
+        planes: Vec<Vec<f32>>,
+        n: usize,
+        rate: u32,
+        ts_us: f64,
+        arrived: Arrival,
+        render_clock: bool,
+    },
+    Discontinuity {
+        inserted: bool,
+        frames: u64,
+        cause: &'static str,
+    },
+}
+
+/// Most audio held while a track opens; beyond it frames are dropped (and
+/// recorded as a discontinuity).
+const MAX_HELD_SECONDS: u64 = 30;
+
+/// Record a discontinuity at the current position of the recording track, or
+/// of the audio held for the one opening. False if nothing is recording yet.
+fn note_discontinuity(inserted: bool, frames: u64, cause: &'static str) -> bool {
+    let recorded = ACTIVE.with(|a| match a.borrow_mut().as_mut() {
+        Some(a) if a.format.is_some() => {
+            a.discontinuity(inserted, frames, cause);
+            true
+        }
+        _ => false,
+    });
+    recorded
+        || hold(Held::Discontinuity {
+            inserted,
+            frames,
+            cause,
+        })
+}
+
+/// Hold `item` for the track being opened, if one is (frames only once
+/// some audio is held, as a recording track needs its format first).
+fn hold(item: Held) -> bool {
+    HELD.with(|h| {
+        let mut h = h.borrow_mut();
+        let Some((items, held)) = h.as_mut() else {
+            return false;
+        };
+        match item {
+            Held::Frames { n, rate, .. }
+                if *held + n as u64 > MAX_HELD_SECONDS * u64::from(rate) =>
+            {
+                let cause = "held too long while the track opened";
+                match items.last_mut() {
+                    Some(Held::Discontinuity {
+                        inserted: false,
+                        frames,
+                        cause: c,
+                    }) if *c == cause => {
+                        *frames += n as u64;
+                    }
+                    _ => items.push(Held::Discontinuity {
+                        inserted: false,
+                        frames: n as u64,
+                        cause,
+                    }),
+                }
+                true
+            }
+            Held::Frames { n, .. } => {
+                *held += n as u64;
+                items.push(item);
+                true
+            }
+            Held::Discontinuity { .. } if *held > 0 => {
+                items.push(item);
+                true
+            }
+            Held::Discontinuity { .. } => false,
+        }
+    })
 }
 
 /// The clock estimator and the host timeline its samples are on.
@@ -560,8 +691,10 @@ fn begin_source(source: Source, path: &str) -> u32 {
     generation
 }
 
-/// Meter `n` frames of raw audio and append them to the active track, if any.
-fn consume(planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64) {
+/// Meter `n` frames of raw audio and append them to the active track, if any
+/// (or hold them for the track being opened). `render_clock`: they came from
+/// the worklet, on the AudioContext's render clock.
+fn consume(planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64, render_clock: bool) {
     let (mut level_peak, mut level_frames) = LEVEL.get();
     level_peak = level_peak.max(peak(planes, n));
     level_frames += n as u64;
@@ -573,11 +706,24 @@ fn consume(planes: &[Vec<f32>], n: usize, rate: u32, ts_us: f64) {
         (level_peak, level_frames) = (0.0, 0);
     }
     LEVEL.set((level_peak, level_frames));
-    ACTIVE.with(|a| {
-        if let Some(a) = a.borrow_mut().as_mut() {
-            a.append(planes, n, rate, ts_us);
+    let arrived = Arrival::now();
+    let written = ACTIVE.with(|a| match a.borrow_mut().as_mut() {
+        Some(a) => {
+            a.record(planes, n, rate, ts_us, arrived, render_clock);
+            true
         }
+        None => false,
     });
+    if !written {
+        hold(Held::Frames {
+            planes: planes.iter().map(|p| p[..n].to_vec()).collect(),
+            n,
+            rate,
+            ts_us,
+            arrived,
+            render_clock,
+        });
+    }
 }
 
 /// The `source`/`source-track` commands: read a MediaStreamTrackProcessor
@@ -626,19 +772,12 @@ pub(crate) fn mstp_init(track: &JsValue) -> JsValue {
 /// one before (negative). Never silent: logged, and written into a recording
 /// track's timing metadata and sidecar as a discontinuity.
 fn timestamp_jump(path: &str, frames: i64, ts_us: f64) {
-    let recorded = ACTIVE.with(|a| match a.borrow_mut().as_mut() {
-        Some(a) if a.format.is_some() => {
-            let cause = if frames > 0 {
-                "audio timestamps skipped: frames lost before the worker read them"
-            } else {
-                "audio timestamps overlapped the previous buffer"
-            };
-            a.discontinuity(frames < 0, frames.unsigned_abs(), cause);
-            true
-        }
-        _ => false,
-    });
-    if !recorded {
+    let cause = if frames > 0 {
+        "audio timestamps skipped: frames lost before the worker read them"
+    } else {
+        "audio timestamps overlapped the previous buffer"
+    };
+    if !note_discontinuity(frames < 0, frames.unsigned_abs(), cause) {
         warn!(
             capture_path = path,
             frames, ts_us, "raw audio timestamps jumped (no track recording)"
@@ -699,7 +838,7 @@ async fn read_source(
             *acked = true;
             ack(id, path, None);
         }
-        consume(&planes, n, rate, ts);
+        consume(&planes, n, rate, ts, false);
     }
     info!(capture_path = path, "raw source ended");
     if SOURCE_GEN.get() != generation {
@@ -753,18 +892,12 @@ fn port_source(msg: &JsValue) -> Result<(), JsValue> {
             // (zeros the graph inserted).
             let lost = seq.saturating_sub(next_seq);
             let empty = silent.saturating_sub(last_silent) * 128;
-            ACTIVE.with(|a| {
-                if let Some(a) = a.borrow_mut().as_mut()
-                    && a.format.is_some()
-                {
-                    if lost > 0 {
-                        a.discontinuity(false, lost, "batch lost between worklet and worker");
-                    }
-                    if empty > 0 {
-                        a.discontinuity(true, empty, "render quanta without input");
-                    }
-                }
-            });
+            if lost > 0 {
+                note_discontinuity(false, lost, "batch lost between worklet and worker");
+            }
+            if empty > 0 {
+                note_discontinuity(true, empty, "render quanta without input");
+            }
         }
         next_seq = seq + n as u64;
         last_silent = silent;
@@ -773,12 +906,8 @@ fn port_source(msg: &JsValue) -> Result<(), JsValue> {
             n,
             rate,
             num(&d, "frame") / f64::from(rate.max(1)) * 1e6,
+            true,
         );
-        ACTIVE.with(|a| {
-            if let Some(a) = a.borrow_mut().as_mut() {
-                a.watch_clock(rate);
-            }
-        });
     });
     port.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
     onmsg.forget();
@@ -792,7 +921,9 @@ async fn start(msg: JsValue) -> Result<(), JsValue> {
     }
     STARTING.set(true);
     STOP_PENDING.set(false);
+    HELD.with(|h| *h.borrow_mut() = Some((Vec::new(), 0)));
     let r = open_track(msg).await;
+    HELD.with(|h| h.borrow_mut().take());
     STARTING.set(false);
     let name = r?;
     let o = object();
@@ -833,6 +964,7 @@ async fn open_track(msg: JsValue) -> Result<String, JsValue> {
     let call = string(&meta, "call");
     let device = string(&meta, "device");
 
+    let open_started = now_ms();
     let dir = tracks_dir().await?;
     let wav = open_sync(&dir, &format!("{name}.wav"), true).await?;
     let sidecar = match open_sync(&dir, &format!("{name}.json"), true).await {
@@ -877,8 +1009,34 @@ async fn open_track(msg: JsValue) -> Result<String, JsValue> {
         refs: None,
         ts_at: VecDeque::new(),
     };
+    // What arrived while the files opened goes first (see `Held`).
+    let open_ms = now_ms() - open_started;
+    let held = HELD.with(|h| h.borrow_mut().take()).map(|(v, _)| v);
+    let mut held_frames = 0u64;
+    for item in held.unwrap_or_default() {
+        match item {
+            Held::Frames {
+                planes,
+                n,
+                rate,
+                ts_us,
+                arrived,
+                render_clock,
+            } => {
+                held_frames += n as u64;
+                active.record(&planes, n, rate, ts_us, arrived, render_clock);
+            }
+            Held::Discontinuity {
+                inserted,
+                frames,
+                cause,
+            } => active.discontinuity(inserted, frames, cause),
+        }
+    }
+    set(&active.meta, "openMs", open_ms.round());
+    set(&active.meta, "heldFrames", held_frames as f64);
     active.flush(false);
-    info!(call = %active.call, device = %active.device, take, track = %name, "track recording");
+    info!(call = %active.call, device = %active.device, take, track = %name, open_ms = open_ms.round(), held_frames, "track recording");
     ACTIVE.with(|a| *a.borrow_mut() = Some(active));
     Ok(name)
 }
@@ -1051,9 +1209,44 @@ fn check_track(
     Ok(())
 }
 
+thread_local! {
+    static SCANNING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Held while a task opens, closes or removes finished tracks' files (the
+/// `list` scan, the outbox's prepare pass, deletes after verified receipt):
+/// OPFS allows one sync handle per file, so two such tasks interleaving at
+/// their awaits would see each other's handles as "in use elsewhere" (a
+/// track skipped, or video offered ahead of its take's audio).
+pub(crate) struct ScanGuard(());
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        SCANNING.with(|s| s.set(false));
+    }
+}
+
+/// Wait for the scan lock (see [`ScanGuard`]).
+pub(crate) async fn scan_lock() -> ScanGuard {
+    while SCANNING.with(|s| s.replace(true)) {
+        let p = Promise::new(&mut |resolve, _| {
+            let r: JsValue = resolve.into();
+            let _ = call(&js_sys::global(), "setTimeout", &[&r, &JsValue::from(5)]);
+        });
+        let _ = JsFuture::from(p).await;
+    }
+    ScanGuard(())
+}
+
 /// List every track, repairing any that a crash left unfinalised. Creates no
 /// file, and skips (lists as `busy`) a track whose files another tab holds.
 pub(crate) async fn list() -> Result<(), JsValue> {
+    let _scan = scan_lock().await;
+    list_locked().await
+}
+
+/// [`list`] for a caller that already holds the scan lock.
+pub(crate) async fn list_locked() -> Result<(), JsValue> {
     let dir = tracks_dir().await?;
     let active = ACTIVE.with(|a| a.borrow().as_ref().map(|a| a.name.clone()));
     let names = entry_names(&dir).await?;

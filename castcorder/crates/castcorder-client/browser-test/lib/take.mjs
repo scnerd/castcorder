@@ -53,6 +53,8 @@ export async function takeChecks(A, B) {
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);
   check(true, 'producer stopped take 1');
+  let take1StopUs = NaN;
+  try { take1StopUs = JSON.parse(await text(A, '#take-result')).hostUs; } catch { /* diagnostic only */ }
   await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take again', 10000);
   check(true, 'idle again: Start take enabled, Stop take disabled');
   const guestsSeen = await text(A, '#guests');
@@ -155,8 +157,20 @@ export async function takeChecks(A, B) {
     const t = parseTiming(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.timing.jsonl'), 'utf8'));
     const start = t.hostUsAt(0);
     const delta = (start - take1StartUs) / 1000;
+    // Diagnostics: where the last frame lands against the host's stop, how
+    // far each reference point strays from a straight line through the
+    // first, and how long the worker took to open the track's files (audio
+    // arriving meanwhile is held and written first: heldFrames).
+    const endMs = t.end !== null ? (t.hostUsAt(t.end) - take1StopUs) / 1000 : NaN;
+    const r0 = t.refs.find((x) => typeof x.host_us === 'number');
+    const resid = t.refs.filter((x) => typeof x.host_us === 'number')
+      .map((x) => ((x.host_us - r0.host_us) - (x.frame - r0.frame) / t.header.sample_rate * 1e6) / 1000);
+    let side = {};
+    try { side = JSON.parse(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.json'), 'utf8')); } catch { /* diagnostic only */ }
     console.log('info ' + n + ' timing: ' + t.refs.length + ' refs, ' + t.sync.length + ' clock samples, last estimate '
-      + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start');
+      + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start; last frame '
+      + endMs.toFixed(1) + ' ms after the take stop; ref residuals ms [' + resid.map((x) => x.toFixed(1)).join(',')
+      + ']; files opened in ' + side.openMs + ' ms, ' + side.heldFrames + ' frames held meanwhile');
     check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
       && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_TOL_MS,
       n + '\x27s timing metadata places frame 0 within ' + FRAME0_TOL_MS + ' ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
