@@ -18,8 +18,10 @@ its own imports to the closure. Fails if anything outside the LGPL allowlist
 would be shipped (no GPL or patent-encumbered plugins or libraries).
 """
 
+import os
 import re
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -42,6 +44,13 @@ PLUGINS = [
 ]
 
 EXE_LINKS = ["gio-2.0-0.dll"]
+
+# The MSVC runtime is not on a clean Windows machine (the UCRT and API sets
+# are, on Windows 10+). It is redistributable app-locally, so it ships beside
+# the exe: always these (castcorder-app.exe, Rust's std and GStreamer's DLLs),
+# plus any other CRT DLL the closure imports.
+CRT_RE = re.compile(r"^(vcruntime|msvcp|concrt|vcomp)\d+(_\d+)?\.dll$", re.IGNORECASE)
+CRT_ALWAYS = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
 
 # Never shipped, whatever imports them: GPL or patent-encumbered code.
 DENY = re.compile(
@@ -80,6 +89,24 @@ binaries are the official MSVC x86_64 runtime release.
 """
 
 
+def crt_dir() -> Path | None:
+    """The x64 CRT redist folder of the newest Visual Studio (or CRT_DIR)."""
+    if os.environ.get("CRT_DIR"):
+        return Path(os.environ["CRT_DIR"])
+    vswhere = Path(os.environ.get("ProgramFiles(x86)", "")) / (
+        "Microsoft Visual Studio/Installer/vswhere.exe"
+    )
+    if not vswhere.exists():
+        return None
+    install = subprocess.run(
+        [str(vswhere), "-latest", "-products", "*", "-property", "installationPath"],
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    found = sorted(Path(install).glob("VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT"))
+    return found[-1] if found else None
+
+
 def imports(path: Path) -> list[str]:
     pe = pefile.PE(str(path), fast_load=True)
     pe.parse_data_directories(
@@ -115,6 +142,7 @@ def main() -> int:
         queue.append(plugin)
 
     shipped: dict[str, Path] = {}
+    crt_needed: set[str] = set(CRT_ALWAYS)
     seen: set[str] = set()
     # castcorder-app.exe links these itself (gstreamer-rs), beyond what the
     # plugins import; checked with the EXE argument.
@@ -130,6 +158,8 @@ def main() -> int:
             seen.add(key)
             # Not in the GStreamer install: the OS or the MSVC runtime.
             if key not in available:
+                if CRT_RE.match(key):
+                    crt_needed.add(key)
                 continue
             if DENY.search(key):
                 print(f"refusing to ship {dep}: not LGPL-clean")
@@ -139,6 +169,16 @@ def main() -> int:
 
     for name, path in sorted(shipped.items()):
         shutil.copy2(path, out / "bin" / path.name)
+    crt = crt_dir()
+    if crt is None:
+        print("no MSVC redist folder: set CRT_DIR to Microsoft.VC*.CRT (x64)")
+        return 1
+    for name in sorted(crt_needed):
+        if not (crt / name).exists():
+            print(f"{name} not in {crt}")
+            return 1
+        shutil.copy2(crt / name, out / "bin" / name)
+    print(f"MSVC runtime from {crt}: {', '.join(sorted(crt_needed))}")
     for lic in LICENSES:
         src = root / "share" / "licenses" / lic
         if src.is_dir():
