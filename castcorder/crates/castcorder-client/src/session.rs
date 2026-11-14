@@ -6,8 +6,9 @@ use castcorder_protocol::{TakeId, TakeStatus};
 /// What the recorder must do in response to a take status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecorderCommand {
-    /// Start recording a track for this take.
-    Start(TakeId),
+    /// Start recording a track for this take, and the webcam too if `video`
+    /// (the call's recording profile when the take started).
+    Start(TakeId, bool),
     /// Stop the track being recorded for this take.
     Stop(TakeId),
 }
@@ -18,11 +19,14 @@ pub enum RecorderCommand {
 pub fn on_take_status(current: Option<TakeId>, status: TakeStatus) -> Vec<RecorderCommand> {
     match (current, status) {
         (None, TakeStatus::Idle) => vec![],
-        (None, TakeStatus::Recording { take }) => vec![RecorderCommand::Start(take)],
+        (None, TakeStatus::Recording { take, video }) => vec![RecorderCommand::Start(take, video)],
         (Some(old), TakeStatus::Idle) => vec![RecorderCommand::Stop(old)],
-        (Some(old), TakeStatus::Recording { take }) if old == take => vec![],
-        (Some(old), TakeStatus::Recording { take }) => {
-            vec![RecorderCommand::Stop(old), RecorderCommand::Start(take)]
+        (Some(old), TakeStatus::Recording { take, .. }) if old == take => vec![],
+        (Some(old), TakeStatus::Recording { take, video }) => {
+            vec![
+                RecorderCommand::Stop(old),
+                RecorderCommand::Start(take, video),
+            ]
         }
     }
 }
@@ -31,6 +35,39 @@ pub fn on_take_status(current: Option<TakeId>, status: TakeStatus) -> Vec<Record
 /// call, so the start time (ms since the Unix epoch) keeps names unique.
 pub fn track_name(take: TakeId, started_ms: u64) -> String {
     format!("take{:04}-{started_ms}-mic", take.0)
+}
+
+/// The OPFS base name of a webcam track (no extension; `.webm`): one per
+/// recorder run, so a camera turned off and on mid-take makes a new one.
+pub fn video_track_name(take: TakeId, started_ms: u64) -> String {
+    format!("take{:04}-{started_ms}-cam", take.0)
+}
+
+/// The MediaRecorder types tried for video recording, best first: WebM
+/// (Matroska) with VP9, then VP8. A browser supporting none cannot meet the
+/// recording profile.
+pub const VIDEO_MIME_TYPES: [&str; 2] = ["video/webm;codecs=vp9", "video/webm;codecs=vp8"];
+
+/// Bits per pixel per frame asked of the video encoder: generous enough to be
+/// visually lossless for a webcam (about 0.1 is a typical streaming rate).
+pub const VIDEO_BITS_PER_PIXEL: f64 = 0.3;
+
+/// The encoder bitrate for a camera of this size and rate (unknown sizes count
+/// as 1280x720 at 30 fps): [`VIDEO_BITS_PER_PIXEL`], at least 4 and at most
+/// 60 Mbit/s.
+pub fn video_bitrate(width: u32, height: u32, frame_rate: f64) -> u64 {
+    let (w, h) = if width == 0 || height == 0 {
+        (1280, 720)
+    } else {
+        (width, height)
+    };
+    let fps = if frame_rate.is_finite() && frame_rate > 0.0 {
+        frame_rate.min(120.0)
+    } else {
+        30.0
+    };
+    let bits = f64::from(w) * f64::from(h) * fps * VIDEO_BITS_PER_PIXEL;
+    (bits as u64).clamp(4_000_000, 60_000_000)
 }
 
 /// A display name as the host accepts it: ASCII letters, digits and '-', at
@@ -170,9 +207,13 @@ mod tests {
 
     #[test]
     fn take_status_drives_the_recorder() {
-        let rec = |n| TakeStatus::Recording { take: TakeId(n) };
+        let rec = |n| TakeStatus::Recording {
+            take: TakeId(n),
+            video: n == 2,
+        };
         assert_eq!(on_take_status(None, TakeStatus::Idle), vec![]);
-        assert_eq!(on_take_status(None, rec(1)), vec![Start(TakeId(1))]);
+        assert_eq!(on_take_status(None, rec(1)), vec![Start(TakeId(1), false)]);
+        assert_eq!(on_take_status(None, rec(2)), vec![Start(TakeId(2), true)]);
         assert_eq!(on_take_status(Some(TakeId(1)), rec(1)), vec![]);
         assert_eq!(
             on_take_status(Some(TakeId(1)), TakeStatus::Idle),
@@ -180,7 +221,7 @@ mod tests {
         );
         assert_eq!(
             on_take_status(Some(TakeId(1)), rec(2)),
-            vec![Stop(TakeId(1)), Start(TakeId(2))]
+            vec![Stop(TakeId(1)), Start(TakeId(2), true)]
         );
     }
 
@@ -209,5 +250,19 @@ mod tests {
             "take0002-1700000000000-mic"
         );
         assert_ne!(track_name(TakeId(1), 1), track_name(TakeId(1), 2));
+        assert_eq!(video_track_name(TakeId(2), 5), "take0002-5-cam");
+    }
+
+    #[test]
+    fn video_bitrate_follows_the_picture_size_within_bounds() {
+        // 1080p30 at 0.3 bit per pixel: about 18.7 Mbit/s.
+        assert_eq!(video_bitrate(1920, 1080, 30.0), 18_662_400);
+        assert_eq!(video_bitrate(1280, 720, 30.0), 8_294_400);
+        // Small pictures get the floor, huge ones the ceiling.
+        assert_eq!(video_bitrate(320, 180, 15.0), 4_000_000);
+        assert_eq!(video_bitrate(7680, 4320, 60.0), 60_000_000);
+        // Unknown size or rate: 720p30.
+        assert_eq!(video_bitrate(0, 0, f64::NAN), 8_294_400);
+        assert!(VIDEO_MIME_TYPES.iter().all(|m| m.starts_with("video/webm")));
     }
 }

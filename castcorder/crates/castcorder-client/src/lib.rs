@@ -49,4 +49,6 @@ mod mailbox;
 #[cfg(target_arch = "wasm32")]
 pub mod outbox;
 #[cfg(target_arch = "wasm32")]
+mod video;
+#[cfg(target_arch = "wasm32")]
 pub mod worker;

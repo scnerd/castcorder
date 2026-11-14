@@ -246,6 +246,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             warn!(track = %track, error = %e, "track not added to outbox");
         }
     }
+    add_video_tracks(&dir, call).await?;
     add_log_files().await?;
     let offers = Array::new();
     OUTBOX.with(|o| {
@@ -327,6 +328,117 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
         post(&o);
     }
     list().await
+}
+
+/// Add every finished video track of `call` not yet in the outbox: the
+/// `.webm`, its sidecar and its timing metadata, all `SourceKind::Video`
+/// (they sync after every audio track). A video track a crash left
+/// unfinalised is finalised here as it is (MediaRecorder WebM has
+/// unknown-size elements, so the written prefix is the track) and marked
+/// `recovered`; one being recorded here, or held by another tab, is skipped.
+async fn add_video_tracks(
+    dir: &web_sys::FileSystemDirectoryHandle,
+    call: &str,
+) -> Result<(), JsValue> {
+    let recording = crate::video::active_name();
+    for n in entry_names(dir)
+        .await?
+        .iter()
+        .filter(|n| n.ends_with(".webm"))
+    {
+        let track = n.trim_end_matches(".webm").to_string();
+        if recording.as_deref() == Some(track.as_str())
+            || OUTBOX.with(|o| o.borrow().as_ref().is_some_and(|o| o.contains(&track)))
+        {
+            continue;
+        }
+        let json = format!("{track}.json");
+        let timing_name = format!("{track}{}", castcorder_core::timing::SUFFIX);
+        let mut opened = Vec::new();
+        let mut busy = false;
+        for f in [n.as_str(), json.as_str(), timing_name.as_str()] {
+            match open_existing(dir, f).await {
+                Opened::Open(h) => opened.push(Some(h)),
+                Opened::Missing => opened.push(None),
+                Opened::Busy(_) => {
+                    busy = true;
+                    break;
+                }
+            }
+        }
+        let close_all = |v: &[Option<FileSystemSyncAccessHandle>]| {
+            for h in v.iter().flatten() {
+                h.close();
+            }
+        };
+        if busy {
+            close_all(&opened);
+            info!(track = %track, "video track in use elsewhere; not offered this pass");
+            continue;
+        }
+        let (Some(webm), Some(h)) = (opened[0].clone(), opened[1].clone()) else {
+            // No sidecar: nothing says which call it belongs to; kept as is.
+            close_all(&opened);
+            continue;
+        };
+        let timing = opened[2].clone();
+        let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
+        let meta = JSON::parse(&text).unwrap_or_else(|_| object());
+        if string(&meta, "call") != call {
+            close_all(&opened);
+            continue;
+        }
+        if !get(&meta, "finalised").is_truthy() {
+            set(&meta, "finalised", true);
+            set(&meta, "recovered", true);
+            set(&meta, "bytes", webm.get_size().unwrap_or(0.0));
+            if let Err(e) = crate::worker::write_text(&h, &String::from(JSON::stringify(&meta)?)) {
+                warn!(track = %track, error = %describe(&e), "video sidecar not repaired; not offered");
+                close_all(&opened);
+                continue;
+            }
+            warn!(track = %track, "video track recovered after an unclean stop");
+        }
+        let base = TrackOffer {
+            device: string(&meta, "device"),
+            take: TakeId(num(&meta, "take") as u32),
+            source: SourceId(string(&meta, "source")),
+            kind: SourceKind::Video,
+            name: track.clone(),
+            size: 0,
+            root: [0; 32],
+            format: "webm".into(),
+        };
+        let sidecar = TrackOffer {
+            name: format!("{track}-sidecar"),
+            format: "json".into(),
+            ..base.clone()
+        };
+        let timing = timing.map(|t| {
+            let offer = TrackOffer {
+                name: format!("{track}-timing"),
+                format: "timing.jsonl".into(),
+                ..base.clone()
+            };
+            (offer, OpfsFile::register(timing_name.clone(), t))
+        });
+        let webm_file = OpfsFile::register(n.clone(), webm);
+        let json_file = OpfsFile::register(json, h);
+        let r = OUTBOX.with(|o| {
+            let mut o = o.borrow_mut();
+            let o = o.as_mut().expect("created by prepare");
+            o.add(base, webm_file)?;
+            o.add(sidecar, json_file)?;
+            match timing {
+                Some((offer, file)) => o.add(offer, file).map(|_| ()),
+                None => Ok(()),
+            }
+        });
+        if let Err(e) = r {
+            warn!(track = %track, error = %e, "video track not added to outbox");
+        }
+    }
+    Ok(())
 }
 
 /// Add every closed log file not yet in the outbox (the current one may still

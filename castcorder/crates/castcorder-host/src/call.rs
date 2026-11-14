@@ -15,8 +15,8 @@ use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
-    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, RoomAction, TakeId,
-    TakeStatus, TrackOffer,
+    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ProfileIssue, Request, Response, RoomAction,
+    SourceKind, TakeId, TakeStatus, TrackOffer,
 };
 use std::path::PathBuf;
 
@@ -310,6 +310,27 @@ impl Call {
         }
     }
 
+    /// A device cannot meet the recording profile: warn, and tell every
+    /// producer. The take goes on.
+    fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
+        let name = self.names.get(&id).cloned().unwrap_or_default();
+        warn!(guest = id.0, name = %name, take = issue.take.0, source = %issue.source.0,
+            kind = ?issue.kind, reason = %issue.reason, "device cannot meet the recording profile");
+        let event = Event::ProfileUnmet {
+            participant: ParticipantId(id.0),
+            name,
+            issue,
+        };
+        for p in self.room.producers() {
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(p))
+                && rpc.emit(event.clone()).is_err()
+            {
+                warn!(guest = p, "profile warning not sent: channel closed");
+            }
+        }
+        Response::Done
+    }
+
     /// Tell these connections their role.
     fn send_roles(&mut self, conns: &[u64]) {
         for id in conns {
@@ -402,7 +423,7 @@ impl Call {
         for take in takes {
             if take.0 == 0
                 || self.local_busy.contains(&take.0)
-                || self.status == (TakeStatus::Recording { take })
+                || matches!(self.status, TakeStatus::Recording { take: t, .. } if t == take)
             {
                 continue;
             }
@@ -464,7 +485,9 @@ impl Call {
                 gone.push(*id);
             }
             for e in p.take_completed() {
-                if !completed.contains(&e.offer.take) {
+                // Only audio is aligned: video (never aligned) and its timing
+                // arriving later must not render the take again.
+                if e.offer.kind == SourceKind::Audio && !completed.contains(&e.offer.take) {
                     completed.push(e.offer.take);
                 }
             }
@@ -512,14 +535,16 @@ impl Call {
     }
 
     fn start_take(&mut self) -> Result<(TakeId, i64), String> {
-        if let TakeStatus::Recording { take } = self.status {
+        if let TakeStatus::Recording { take, .. } = self.status {
             return Err(format!("take {} is already recording", take.0));
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
-        self.status = TakeStatus::Recording { take };
+        // The recording profile as it stands now holds for the whole take.
+        let video = self.room.record_video();
+        self.status = TakeStatus::Recording { take, video };
         let host_us = self.timeline.now_us();
-        info!(call = %self.library.call(), take = take.0, host_us, "take started");
+        info!(call = %self.library.call(), take = take.0, host_us, video, "take started");
         match self.library.take_dir(take) {
             Ok(dir) => {
                 self.safety.start_take(take.0, dir.clone());
@@ -539,7 +564,7 @@ impl Call {
     }
 
     fn stop_take(&mut self) -> Result<(TakeId, i64), String> {
-        let TakeStatus::Recording { take } = self.status else {
+        let TakeStatus::Recording { take, .. } = self.status else {
             return Err("no take is recording".into());
         };
         self.status = TakeStatus::Idle;
@@ -558,7 +583,8 @@ impl Call {
 
     fn status_json(&self) -> String {
         let take = match self.status {
-            TakeStatus::Recording { take } => format!("recording take {}", take.0),
+            TakeStatus::Recording { take, .. } => format!("recording take {}", take.0),
+
             _ => format!("idle ({} takes so far)", self.last_take),
         };
         let guests: Vec<String> = self
@@ -685,6 +711,7 @@ impl Call {
                         }
                     }
                     Request::Room(action) => self.room_action(id, &action),
+                    Request::ProfileUnmet(issue) => self.profile_unmet(id, issue),
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);

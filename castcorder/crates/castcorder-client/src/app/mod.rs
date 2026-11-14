@@ -50,6 +50,7 @@ mod data;
 mod join;
 mod lifecycle;
 mod media;
+mod recvideo;
 mod rpc;
 mod view;
 
@@ -89,6 +90,7 @@ use self::data::*;
 use self::join::*;
 use self::lifecycle::*;
 use self::media::*;
+use self::recvideo::*;
 use self::rpc::*;
 pub use self::view::main;
 
@@ -191,6 +193,12 @@ struct Engine {
     /// Producer requests awaiting their response (the panel shows it), and
     /// whether each came from the debug control.
     producer_requests: Vec<(RequestId, bool)>,
+    /// The take recording video (its status said so), while it records.
+    video_take: Option<TakeId>,
+    /// The camera's recorder, while one runs.
+    video: Option<VideoRec>,
+    /// The take for which "cannot meet profile" was already reported.
+    video_unmet: Option<TakeId>,
 }
 
 thread_local! {
@@ -315,6 +323,11 @@ struct Ui {
     /// ("on", "off", "unavailable: ...").
     camera: RwSignal<bool>,
     camera_state: RwSignal<String>,
+    /// What the webcam recorder is doing ("recording <track>", "stopped
+    /// <track> (<bytes> bytes)", "cannot record video: ...").
+    video_rec: RwSignal<String>,
+    /// Producers: devices that cannot meet the recording profile, as text.
+    profile_warnings: RwSignal<Vec<String>>,
 }
 
 impl Ui {
@@ -402,6 +415,14 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 .recording
                 .set(format!("recording {}", string(&d, "name"))),
             "stopped" => ui.recording.set(format!("stopped {}", string(&d, "name"))),
+            "vrecording" => ui
+                .video_rec
+                .set(format!("recording {}", string(&d, "name"))),
+            "vstopped" => ui.video_rec.set(format!(
+                "stopped {} ({} bytes)",
+                string(&d, "name"),
+                num(&d, "bytes")
+            )),
             "list" => {
                 let arr = get(&d, "tracks");
                 let rows = Array::from(&arr)

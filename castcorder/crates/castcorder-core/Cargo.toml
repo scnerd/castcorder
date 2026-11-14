@@ -23,3 +23,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 castcorder-port-net.workspace = true
+castcorder-testalloc = { path = "../castcorder-testalloc" }

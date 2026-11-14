@@ -126,6 +126,9 @@ struct Saved {
     /// Pre-key device ids bound to the key-derived id that took them over.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     aliases: BTreeMap<String, String>,
+    /// The recording profile records video (webcams). Default off.
+    #[serde(default)]
+    record_video: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -229,7 +232,8 @@ pub fn need(action: &RoomAction) -> Need {
         RoomAction::Lock(_)
         | RoomAction::SetPassword(_)
         | RoomAction::Kick { .. }
-        | RoomAction::RegenerateLink => Need::Producer,
+        | RoomAction::RegenerateLink
+        | RoomAction::SetRecordVideo(_) => Need::Producer,
         RoomAction::SetProducer { .. } | RoomAction::SetOpen(_) => Need::HostMachine,
     }
 }
@@ -249,6 +253,8 @@ pub fn action_name(action: &RoomAction) -> &'static str {
         RoomAction::RegenerateLink => "regenerate link",
         RoomAction::SetOpen(true) => "make always open",
         RoomAction::SetOpen(false) => "make producer-gated",
+        RoomAction::SetRecordVideo(true) => "record video",
+        RoomAction::SetRecordVideo(false) => "stop recording video",
     }
 }
 
@@ -329,6 +335,19 @@ impl Room {
             self.saved.open = open;
             self.dirty = true;
         }
+    }
+
+    /// Record video in the next takes (saved with the call).
+    pub fn set_record_video(&mut self, on: bool) {
+        if self.saved.record_video != on {
+            self.saved.record_video = on;
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the recording profile records video.
+    pub fn record_video(&self) -> bool {
+        self.saved.record_video
     }
 
     /// The host's own native participant is (or is no longer) in the call.
@@ -686,6 +705,10 @@ impl Room {
                 self.set_open(*open);
                 Ok(Effect::Changed)
             }
+            RoomAction::SetRecordVideo(on) => {
+                self.set_record_video(*on);
+                Ok(Effect::Changed)
+            }
             RoomAction::RegenerateLink => Ok(Effect::RegenerateLink),
             RoomAction::Kick { participant } => {
                 let target = self.target(&by, role, name, *participant)?;
@@ -792,6 +815,7 @@ impl Room {
             password: self.saved.password.is_some(),
             open: self.saved.open,
             link,
+            record_video: self.saved.record_video,
             participants: self
                 .conns
                 .iter()

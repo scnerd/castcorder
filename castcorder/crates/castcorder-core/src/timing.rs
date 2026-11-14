@@ -48,6 +48,22 @@
 //! - `end`: the track was finalised with `frames` frames in its last segment.
 //!   Missing after a crash.
 //!
+//! A video track (a browser guest's webcam, `<track>.webm`, offered as
+//! `SourceKind::Video`; host library `takeNN_<who>_cam.webm` beside
+//! `takeNN_<who>_cam.timing.jsonl`) has the same `header` with `sample_rate`
+//! and `channels` 0 and the same `sync` lines, then:
+//!
+//! - `video_start`: the recorder started at `device_us` (`host_us` by the
+//!   live estimate): `mime`, `width`, `height`, `frame_rate`,
+//!   `bits_per_second`.
+//! - `chunk`: bytes `offset..offset+bytes` of the file arrived from the
+//!   recorder at `device_us` (`host_us`), about one per second, with the
+//!   recorder's own `timecode_ms` where it has one.
+//! - `video_end`: the recorder stopped (`chunks`, `bytes`, `device_us`).
+//!   Missing after a crash.
+//!
+//! Video is never aligned: these lines let an editor line it up.
+//!
 //! Readers ignore unknown line types and unknown fields; new ones may be added
 //! (bump [`VERSION`] only for a change in meaning).
 
@@ -93,6 +109,22 @@ pub enum TimingLine {
     End {
         /// Frames in the last segment's file.
         frames: u64,
+    },
+    /// A video recorder started (video tracks only; module docs).
+    VideoStart(VideoStart),
+    /// One chunk of a video track's file was written (video tracks only).
+    Chunk(VideoChunk),
+    /// A video track was finalised.
+    VideoEnd {
+        /// Chunks written.
+        chunks: u64,
+        /// Bytes in the file.
+        bytes: u64,
+        /// Device time the recorder stopped.
+        device_us: i64,
+        /// The same on the host timeline, by the live estimate.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_us: Option<i64>,
     },
     /// A line type this version does not know.
     #[serde(other)]
@@ -149,6 +181,49 @@ pub struct RefPoint {
     /// The audio API's own timestamp of the frame, raw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_ts_us: Option<i64>,
+}
+
+/// The `video_start` line.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoStart {
+    /// Device time the recorder started (its first frame is about here).
+    pub device_us: i64,
+    /// The same on the host timeline, by the live estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_us: Option<i64>,
+    /// The container and codec, as the recorder was asked (e.g.
+    /// `video/webm;codecs=vp9`).
+    pub mime: String,
+    /// The camera's frame size and rate as it reported them.
+    pub width: u32,
+    /// See `width`.
+    pub height: u32,
+    /// See `width`.
+    pub frame_rate: f64,
+    /// The encoder's target bitrate.
+    pub bits_per_second: u64,
+}
+
+/// The `chunk` line: bytes `offset..offset + bytes` of the video file were
+/// delivered by the recorder at `device_us` (each covers about one second of
+/// video, ending about then).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VideoChunk {
+    /// 0-based.
+    pub index: u64,
+    /// Where in the file.
+    pub offset: u64,
+    /// How many bytes.
+    pub bytes: u64,
+    /// Device time the chunk was delivered.
+    pub device_us: i64,
+    /// The same on the host timeline, by the live estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_us: Option<i64>,
+    /// The recorder's own timecode of the chunk (ms; `BlobEvent.timecode`),
+    /// raw, where it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timecode_ms: Option<f64>,
 }
 
 impl RefPoint {
@@ -316,7 +391,11 @@ impl TimingMap {
                 }
                 TimingLine::Sync(s) => m.sync.push(*s),
                 TimingLine::End { frames } => m.end_frames = Some(*frames),
-                TimingLine::Discontinuity { .. } | TimingLine::Unknown => {}
+                TimingLine::Discontinuity { .. }
+                | TimingLine::Unknown
+                | TimingLine::VideoStart(_)
+                | TimingLine::Chunk(_)
+                | TimingLine::VideoEnd { .. } => {}
             }
         }
         m
@@ -409,6 +488,40 @@ mod tests {
         assert_eq!(header(&lines[1].to_line()), None);
         assert_eq!(header(""), None);
         assert_eq!(header("{\"type\":\"head"), None);
+    }
+
+    #[test]
+    fn video_lines_round_trip() {
+        let lines = [
+            TimingLine::VideoStart(VideoStart {
+                device_us: 10,
+                host_us: Some(20),
+                mime: "video/webm;codecs=vp9".into(),
+                width: 640,
+                height: 360,
+                frame_rate: 30.0,
+                bits_per_second: 2_500_000,
+            }),
+            TimingLine::Chunk(VideoChunk {
+                index: 0,
+                offset: 0,
+                bytes: 1234,
+                device_us: 1_000_010,
+                host_us: None,
+                timecode_ms: Some(0.0),
+            }),
+            TimingLine::VideoEnd {
+                chunks: 1,
+                bytes: 1234,
+                device_us: 1_500_000,
+                host_us: Some(1_500_010),
+            },
+        ];
+        let text: String = lines.iter().map(TimingLine::to_line).collect();
+        assert!(text.starts_with(r#"{"type":"video_start","device_us":10,"host_us":20,"#));
+        assert!(text.contains(r#"{"type":"chunk","index":0,"offset":0,"bytes":1234,"#));
+        assert!(text.contains(r#"{"type":"video_end","chunks":1,"#));
+        assert_eq!(parse(&text).unwrap(), lines);
     }
 
     #[test]

@@ -27,6 +27,9 @@
 //    keeps recording into the same file, shows "reconnecting", rejoins, then
 //    its microphone tracks are stopped (as a phone's system may) and it
 //    reopens them and continues in a new segment. Both segments reach the host.
+// 6b. Take 3 (chromium, firefox): the producer turns video recording on;
+//    webcams are recorded as WebM, sync after the audio, and B, made unable
+//    to record video in chromium, reports it: see lib/videorec.mjs.
 // 7. Producer buttons offer only the valid action (start when idle, stop when
 //    recording). After Leave every local MediaStreamTrack is "ended" and every
 //    AudioContext "closed"; leave/rejoin cycles raise no page errors or
@@ -72,6 +75,7 @@ import { ctx } from './lib/ctx.mjs';
 import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check, opfsNames } from './lib/helpers.mjs';
 import { takeChecks } from './lib/take.mjs';
 import { videoChecks } from './lib/video.mjs';
+import { videoRecChecks } from './lib/videorec.mjs';
 import { securityChecks } from './lib/security.mjs';
 import { identityChecks } from './lib/identity.mjs';
 import { capChecks } from './lib/cap.mjs';
@@ -251,6 +255,11 @@ try {
   check(s1 > expect1 - 1.5, 'B\'s first segment (' + s1.toFixed(2) + ' s) spans the connection drop without a gap (expected ~'
     + expect1.toFixed(1) + ' s)');
   check(s2 > 1, 'B\'s second segment holds ' + s2.toFixed(2) + ' s');
+  // Video recording is off by default: takes 1 and 2 have no video track.
+  check(['take01', 'take02'].every((t) => !readdirSync(join(LIBRARY, 'browser-test', t)).some((f) => f.includes('_cam'))),
+    'with video recording off (the default) takes 1 and 2 have no video track');
+  // Take 3 records video (chromium and firefox): see lib/videorec.mjs.
+  if (MODE !== 'fallback') await videoRecChecks(A, B);
 
   // Leave releases every device and audio context; leave/rejoin is clean.
   const unreleased = (p) => p.evaluate(() => ({
