@@ -57,10 +57,16 @@ impl World {
 
     /// Offer, accept, answer: returns the guest's index and the host's answer.
     fn join(&mut self, device: &str) -> (usize, String) {
+        self.join_with(device, false)
+    }
+
+    /// Join a guest (on host `ip(index + 2)`), sending simulcast video or not.
+    fn join_with(&mut self, device: &str, simulcast: bool) -> (usize, String) {
         let n = self.guests.len() as u8 + 2;
-        let (mut g, offer) = Guest::new(
+        let (mut g, offer) = Guest::with_simulcast(
             self.net.bind(ip(n)),
             self.time.clock(SimClockConfig::default()),
+            simulcast,
         );
         let (id, answer) = self.host.accept(device, &offer).unwrap();
         g.accept_answer(&answer);
@@ -478,4 +484,153 @@ fn the_hosts_own_audio_reaches_every_guest_and_guest_audio_is_tapped() {
         w.host.stats(b).unwrap().tracks_out_open == 4
     });
     assert!(w.g(1).offers_received > offers);
+}
+
+/// A simulcasting source, sending like a Chromium guest at 25 fps: layer "h"
+/// at about 800 kbit/s and "l" at about 100 kbit/s, each a keyframe only when
+/// asked for one, plus 20 ms of audio. Returns once `d` of simulated time ran.
+fn simulcast_source(
+    w: &mut World,
+    src: usize,
+    d: Duration,
+    frame: &mut u64,
+    asked: &mut Vec<String>,
+) {
+    let end = w.time.now() + d;
+    while w.time.now() < end {
+        let wanted: Vec<_> = std::mem::take(&mut w.g(src).keyframe_layers);
+        asked.extend(
+            wanted
+                .iter()
+                .map(|r| r.map(|r| r.to_string()).unwrap_or_default()),
+        );
+        let key_h = *frame == 0 || wanted.iter().any(|r| r.as_deref() == Some("h"));
+        let key_l = *frame == 0 || wanted.iter().any(|r| r.as_deref() == Some("l"));
+        w.g(src).send_audio(&[0xa5; 80]);
+        if frame.is_multiple_of(2) {
+            w.g(src).send_video_layer("h", key_h, b'h', 4000);
+            w.g(src).send_video_layer("l", key_l, b'l', 500);
+        }
+        *frame += 1;
+        w.run_for(Duration::from_millis(20));
+    }
+}
+
+/// The layer-selection policy end to end through str0m's real bandwidth
+/// estimation (TWCC) on a simulated network with capacity limits: A sends two
+/// simulcast layers; B's downlink is unlimited, C's holds 500 kbit/s and D's
+/// 120 kbit/s. B gets the high layer, C the low one, D no video at all, and
+/// every receiver keeps getting all of A's audio. Forwarded video keeps
+/// increasing RTP times across layer switches.
+#[test]
+fn simulcast_layers_follow_each_receivers_bandwidth() {
+    use castcorder_port_net::Bottleneck;
+    let mut w = World::new(HostConfig::default());
+    w.join_with("A", true);
+    for d in ["B", "C", "D"] {
+        w.join(d);
+    }
+    let limit = |kbps| {
+        Some(Bottleneck {
+            kbps,
+            max_queue: Duration::from_millis(250),
+        })
+    };
+    w.net.set_bottleneck(ip(1), ip(4), limit(500));
+    w.net.set_bottleneck(ip(1), ip(5), limit(120));
+    let ids: Vec<GuestId> = (0..4).map(|i| w.id(i)).collect();
+    w.run_until(Duration::from_secs(10), |w| {
+        ids[1..]
+            .iter()
+            .all(|id| w.host.stats(*id).unwrap().tracks_out_open == 6)
+    });
+    let mut frame = 0;
+    let mut asked = vec![];
+    for _ in 0..20 {
+        simulcast_source(&mut w, 0, Duration::from_secs(1), &mut frame, &mut asked);
+        let row: Vec<String> = ids[1..]
+            .iter()
+            .map(|id| {
+                let s = w.host.stats(*id).unwrap();
+                let v = s.video_out.iter().find(|v| v.origin == ids[0]).cloned();
+                format!(
+                    "bwe {:?} target {:?} current {:?}",
+                    s.bwe_kbps,
+                    v.as_ref().map(|v| v.target.clone()),
+                    v.as_ref().map(|v| v.current.clone())
+                )
+            })
+            .collect();
+        println!("t={:?} {}", w.time.now(), row.join(" | "));
+    }
+    // The last 5 s.
+    for g in 1..4 {
+        w.g(g).received.clear();
+    }
+    simulcast_source(&mut w, 0, Duration::from_secs(5), &mut frame, &mut asked);
+    let layer = |w: &World, i: usize| {
+        let s = w.host.stats(ids[i]).unwrap();
+        s.video_out
+            .iter()
+            .find(|v| v.origin == ids[0])
+            .map(|v| (v.target.clone(), v.current.clone()))
+    };
+    let tags = |w: &mut World, i: usize| -> Vec<u8> {
+        w.g(i)
+            .received_from("A-", MediaKind::Video)
+            .iter()
+            .map(|r| *r.data.last().unwrap())
+            .collect()
+    };
+    let audio = |w: &mut World, i: usize| w.g(i).received_from("A-", MediaKind::Audio).len();
+    let h = Some(Some(Some("h".to_string())));
+    let l = Some(Some(Some("l".to_string())));
+    assert_eq!(
+        layer(&w, 1).map(|x| Some(x.0)),
+        Some(h.clone()),
+        "B: high layer"
+    );
+    assert_eq!(
+        layer(&w, 2).map(|x| Some(x.0)),
+        Some(l.clone()),
+        "C: low layer"
+    );
+    assert_eq!(layer(&w, 3).map(|x| x.0), Some(None), "D: no video");
+    let (tb, tc, td) = (tags(&mut w, 1), tags(&mut w, 2), tags(&mut w, 3));
+    assert!(
+        tb.len() > 100 && tb.iter().all(|t| *t == b'h'),
+        "B decodes the high layer only: {} frames",
+        tb.len()
+    );
+    assert!(
+        tc.len() > 100 && tc.iter().all(|t| *t == b'l'),
+        "C decodes the low layer only: {} frames",
+        tc.len()
+    );
+    assert!(td.is_empty(), "D gets no video: {} frames", td.len());
+    for g in 1..4 {
+        let a = audio(&mut w, g);
+        assert!(
+            a >= 240,
+            "receiver {g} keeps getting A's audio: {a} of 250 frames"
+        );
+    }
+    for g in 1..3 {
+        let times: Vec<u64> = w
+            .g(g)
+            .received_from("A-", MediaKind::Video)
+            .iter()
+            .map(|r| r.rtp_time)
+            .collect();
+        assert!(
+            times.windows(2).all(|p| p[1] > p[0]),
+            "receiver {g}: video RTP times increase"
+        );
+    }
+    // Keyframes were asked for per layer (a simulcast track has no stream
+    // without a rid).
+    assert!(
+        asked.iter().any(|r| r == "h") && asked.iter().any(|r| r == "l"),
+        "keyframe requests name their layer: {asked:?}"
+    );
 }

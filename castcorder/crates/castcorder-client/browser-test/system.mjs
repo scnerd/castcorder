@@ -98,7 +98,7 @@ async function openGuest(name, url, extraArgs = []) {
 }
 const text = async (page, sel) => (await page.textContent(sel)) || '';
 const json = async (page, sel) => { const t = await text(page, sel); return t ? JSON.parse(t) : null; };
-const audioFrom = (inbound, origin) => (inbound || []).filter((i) => i.origin.startsWith(origin + '-'))
+const audioFrom = (inbound, origin) => (inbound || []).filter((i) => i.kind === 'audio' && i.origin.startsWith(origin + '-'))
   .reduce((a, i) => ({ packets: a.packets + i.packetsReceived, bytes: a.bytes + i.bytesReceived }), { packets: 0, bytes: 0 });
 
 let passed = false;

@@ -38,7 +38,24 @@
 //!   [`HostConfig::guest_timeout`] is declared gone.
 //! - "data" carries bulk binary messages (at most [`MAX_MESSAGE`], 64 KiB advised).
 //! - Forwarded tracks carry the stream id `<device>-<guest id>`.
-//! - One codec per kind per call: Opus and VP8.
+//! - One codec per kind per call: Opus and VP8. Video may be sent as
+//!   simulcast (several rids on the one m-line, e.g. "h" and "l"); a guest
+//!   with no camera, or with it off, sends no video frames.
+//!
+//! # Video allocation (audio first)
+//!
+//! The host never re-encodes, so each receiver gets, per forwarded video
+//! track, one of the source's layers or nothing. A few times a second, per
+//! receiver: reserve the forwarded audio's measured rate, then give every
+//! video track its lowest live layer while it fits the receiver's bandwidth
+//! estimate (TWCC), then upgrade tracks one step at a time while they fit
+//! (stepping up needs 25 % to spare, stepping down is immediate; see
+//! `alloc.rs`). A layer with no frame for 2 s counts as not sent. A newly
+//! chosen layer is asked for a keyframe and replaces the old one from that
+//! keyframe on, with its RTP times shifted to continue the outgoing stream.
+//! The estimator is told to sustain the rate the next upgrade needs and probe
+//! for the best one (`bwe().set_bitrate`). str0m sends audio unpaced, ahead of
+//! queued video. [`GuestStats::video_out`] shows each choice.
 //!
 //! # The host's own participant
 //!
@@ -59,7 +76,9 @@
 //!    datagram nobody accepts is dropped.
 //! 4. Only the host offers after the first exchange; a guest offer is ignored.
 //! 5. When a subscriber's video track opens the host asks its source for a
-//!    keyframe (PLI), and relays subscribers' PLI/FIR to the source.
+//!    keyframe (PLI), and relays subscribers' PLI/FIR to the source, each on
+//!    the simulcast layer that subscriber gets (str0m has no stream without a
+//!    rid on a simulcast track).
 //!
 //! # Time
 //!
@@ -79,7 +98,8 @@
 //!
 //! # Tests
 //!
-//! `tests/sim.rs` runs host and str0m guests on `SimNetwork`; `tests/udp.rs` uses
+//! `tests/sim.rs` runs host and str0m guests on `SimNetwork` (with capacity
+//! limits for the video allocation, through str0m's real estimator); `tests/udp.rs` uses
 //! real loopback sockets. The real-browser test is `task test:browser` from the
 //! repo root (see `browser-test/`).
 
@@ -103,6 +123,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Input, Rtc};
 use tracing::{debug, info, info_span, trace, warn};
 
+mod alloc;
 mod channel;
 mod guest;
 mod relay;
@@ -152,6 +173,11 @@ pub struct HostConfig {
     /// [`Host::accept`] refuses offers until the allocation exists. For
     /// testing the relay path.
     pub relay_only: bool,
+    /// The most bandwidth the video allocation assumes toward any one guest,
+    /// in kbps, whatever the estimate says (it still applies without
+    /// estimation). `None`: the estimate alone. A configured cap, for a host
+    /// on a thin uplink and for tests; it shapes nothing on the network.
+    pub bandwidth_cap_kbps: Option<u64>,
 }
 
 impl Default for HostConfig {
@@ -165,6 +191,7 @@ impl Default for HostConfig {
             send_buffer: 1024 * 1024,
             advertise: Vec::new(),
             relay_only: false,
+            bandwidth_cap_kbps: None,
         }
     }
 }
@@ -230,6 +257,27 @@ pub struct GuestStats {
     pub renegotiations: u64,
     /// The latest send-side bandwidth estimate toward this guest.
     pub bwe_kbps: Option<u64>,
+    /// Every video track forwarded to this guest, with its layer.
+    pub video_out: Vec<VideoOut>,
+    /// How often a forwarded video track's chosen layer changed.
+    pub layer_changes: u64,
+}
+
+/// A video track the host forwards to one guest, and the layer it gets
+/// (updated by the allocation, a few times a second).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VideoOut {
+    /// Whose video.
+    pub origin: GuestId,
+    /// The layer chosen for this guest: `None` is no video (it does not fit,
+    /// or the source sends none); `Some(None)` the source's only stream (no
+    /// simulcast); `Some(Some(rid))` that simulcast layer.
+    pub target: Option<Option<String>>,
+    /// The layer forwarded now; it becomes `target` at that layer's next
+    /// keyframe.
+    pub current: Option<Option<String>>,
+    /// Video frames forwarded on this track.
+    pub frames: u64,
 }
 
 /// Why [`Host::accept`] refused an offer.
@@ -674,7 +722,16 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         self.next_id += 1;
         let span = info_span!("guest", call = %self.config.call, device = %device, guest = id.0);
         span.in_scope(|| info!("guest accepted"));
-        let mut g = Guest::new(id, device.to_string(), span, rtc, self.base, now_d);
+        let mut g = Guest::new(
+            id,
+            device.to_string(),
+            span,
+            rtc,
+            self.base,
+            now_d,
+            self.config.initial_bandwidth_estimate_kbps,
+            self.config.bandwidth_cap_kbps,
+        );
         // Renegotiate on join: the newcomer gets every existing track.
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {
             g.handle_track_open(Arc::downgrade(&t.id));
@@ -947,12 +1004,12 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     pub fn add_local_audio(&mut self, device: &str) -> LocalAudio {
         let origin = GuestId(self.next_id);
         self.next_id += 1;
-        let track = Arc::new(TrackIn {
+        let track = Arc::new(TrackIn::new(
             origin,
-            origin_device: device.to_string(),
-            mid: Mid::from("local"),
-            kind: MediaKind::Audio,
-        });
+            device.to_string(),
+            Mid::from("local"),
+            MediaKind::Audio,
+        ));
         for g in &mut self.guests {
             g.handle_track_open(Arc::downgrade(&track));
         }
@@ -1016,11 +1073,12 @@ fn propagate(p: &Propagated, guests: &mut [Guest], now: Instant) {
         Propagated::KeyframeRequest {
             origin,
             mid_in,
+            layer,
             kind,
         } => {
             if let Some(g) = guests.iter_mut().find(|g| g.id == *origin) {
                 let _e = g.span.clone().entered();
-                g.request_keyframe(*mid_in, *kind, now);
+                g.request_keyframe(*mid_in, *layer, *kind, now);
             }
         }
     }

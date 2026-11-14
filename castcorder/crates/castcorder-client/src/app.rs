@@ -2,8 +2,9 @@
 //!
 //! Join, in order:
 //! 1. Open the microphone raw (echo cancellation, noise suppression and gain
-//!    off, stereo if offered) for the track, then the same device processed,
-//!    plus the camera if there is one, for the live stream.
+//!    off, stereo if offered) for the track, then the same device processed
+//!    for the live stream, then the camera unless it is turned off (a guest
+//!    without one joins with audio only).
 //! 2. Beside the call, hand a clone of the raw track to the storage worker by
 //!    the first capture path that delivers audio (see [`start_capture`] and
 //!    [`crate::worker`]): MediaStreamTrackProcessor on the page, in the worker,
@@ -32,8 +33,17 @@
 //!    continues. A microphone that ended is reopened, the take continuing in a
 //!    new segment. Leave stops every track and closes every audio context.
 //!
-//! Forwarded remote audio plays through `<audio>` elements. JS handles live in
-//! a thread-local [`Engine`]; Leptos signals hold only plain values.
+//! The camera (live video only, never recorded here) is opened by its own
+//! getUserMedia and sent on one video transceiver created at connect with two
+//! simulcast encodings ("h" full size, "l" half size; the host forwards each
+//! receiver the one that fits, see castcorder-transport). Turning it off and
+//! on swaps the sender's track (`replaceTrack`, null when off) and stops or
+//! reopens the device, so it never renegotiates: only the host offers.
+//!
+//! Each remote participant gets a tile (their forwarded stream id) holding
+//! their `<video>` and `<audio>`; this guest's own camera shows in a muted
+//! preview tile. JS handles live in a thread-local [`Engine`]; Leptos signals
+//! hold only plain values.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, VecDeque};
@@ -53,9 +63,9 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     AudioContext, AudioContextOptions, AudioContextState, AudioWorkletNode,
-    AudioWorkletNodeOptions, ChannelCountMode, ChannelInterpretation, HtmlAudioElement,
-    MediaStream, MediaStreamConstraints, MediaStreamTrack, MessageEvent, RtcConfiguration,
-    RtcDataChannel, RtcDataChannelType, RtcIceGatheringState, RtcPeerConnection, RtcSdpType,
+    AudioWorkletNodeOptions, ChannelCountMode, ChannelInterpretation, MediaStream,
+    MediaStreamConstraints, MediaStreamTrack, MessageEvent, RtcConfiguration, RtcDataChannel,
+    RtcDataChannelType, RtcIceGatheringState, RtcPeerConnection, RtcSdpType,
     RtcSessionDescriptionInit, RtcTrackEvent, Worker, WorkerOptions,
 };
 
@@ -110,6 +120,13 @@ struct Engine {
     worker: Option<Worker>,
     raw: Option<MediaStream>,
     live: Option<MediaStream>,
+    /// The camera while it is on (live video only).
+    camera: Option<MediaStream>,
+    /// The video transceiver's RTCRtpSender on the current connection.
+    video_sender: Option<JsValue>,
+    /// The camera is being opened or closed.
+    camera_busy: bool,
+    last_camera_restart: f64,
     /// Clones of the raw track handed to capture attempts (stopped on leave).
     sources: Vec<MediaStreamTrack>,
     /// The worklet path's graph, if that path is in use.
@@ -278,6 +295,10 @@ struct Ui {
     producer_result: RwSignal<String>,
     /// The last debug request's result.
     debug_result: RwSignal<String>,
+    /// Whether this guest wants its camera on, and what it is doing
+    /// ("on", "off", "unavailable: ...").
+    camera: RwSignal<bool>,
+    camera_state: RwSignal<String>,
 }
 
 impl Ui {
@@ -494,7 +515,27 @@ fn first_audio(s: &MediaStream) -> Option<MediaStreamTrack> {
     s.get_audio_tracks().get(0).dyn_into().ok()
 }
 
-/// Open the raw and the processed microphone (and the camera, if any).
+/// Open the camera for the live stream (its own request, so a refused or
+/// missing camera never costs the microphone).
+async fn open_camera() -> Result<MediaStream, JsValue> {
+    let md = window().navigator().media_devices()?;
+    let c = MediaStreamConstraints::new();
+    c.set_audio(&JsValue::FALSE);
+    let video = object();
+    set(&video, "width", 640);
+    set(&video, "height", 360);
+    set(&video, "frameRate", 30);
+    c.set_video(&video);
+    Ok(JsFuture::from(md.get_user_media_with_constraints(&c)?)
+        .await?
+        .unchecked_into())
+}
+
+fn first_video(s: &MediaStream) -> Option<MediaStreamTrack> {
+    s.get_video_tracks().get(0).dyn_into().ok()
+}
+
+/// Open the raw and the processed microphone.
 async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> {
     let raw_c = object();
     set(&raw_c, "echoCancellation", false);
@@ -515,27 +556,120 @@ async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> {
     set(&live_c, "echoCancellation", true);
     set(&live_c, "noiseSuppression", true);
     set(&live_c, "autoGainControl", true);
-    let video = object();
-    set(&video, "width", 640);
-    set(&video, "height", 360);
-    set(&video, "frameRate", 30);
-    let live = match get_user_media(&live_c, Some(&video)).await {
+    let live = match get_user_media(&live_c, None).await {
         Ok(s) => s,
         Err(e) => {
-            warn!(error = %describe(&e), "no camera; joining with audio only");
-            match get_user_media(&live_c, None).await {
-                Ok(s) => s,
-                Err(e) => {
-                    // Some browsers refuse a second, differently processed
-                    // capture of one device: send a clone of the raw track.
-                    warn!(error = %describe(&e), "processed microphone refused; the live stream uses the raw microphone");
-                    let t = call(&raw_track, "clone", &[])?;
-                    MediaStream::new_with_tracks(&Array::of1(&t))?
-                }
-            }
+            // Some browsers refuse a second, differently processed
+            // capture of one device: send a clone of the raw track.
+            warn!(error = %describe(&e), "processed microphone refused; the live stream uses the raw microphone");
+            let t = call(&raw_track, "clone", &[])?;
+            MediaStream::new_with_tracks(&Array::of1(&t))?
         }
     };
     Ok((raw, live))
+}
+
+/// Show (or clear) this guest's own camera in the preview tile.
+fn show_preview(stream: Option<&MediaStream>) {
+    let Some(el) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("self-video"))
+    else {
+        return;
+    };
+    let el: web_sys::HtmlMediaElement = el.unchecked_into();
+    el.set_src_object(stream);
+}
+
+/// Turn the camera on: open it, preview it, and put it on the video sender
+/// (if connected; a later connection picks it up from the engine).
+async fn camera_on(ui: Ui, epoch: u32) {
+    if with_engine(|e| std::mem::replace(&mut e.camera_busy, true)) {
+        return;
+    }
+    ui.camera_state.set("starting".into());
+    let r = open_camera().await;
+    with_engine(|e| e.camera_busy = false);
+    let ctx = with_engine(|e| e.ctx.clone());
+    match r {
+        Ok(s) if stale(epoch) || !ui.camera.get_untracked() => stop_tracks(&[Some(s)], &[]),
+        Ok(s) => {
+            let old = with_engine(|e| e.camera.replace(handle(&s)));
+            stop_tracks(&[old], &[]);
+            show_preview(Some(&s));
+            put_camera_on_sender();
+            let settings = first_video(&s)
+                .map(|t| stringify(&t.get_settings()))
+                .unwrap_or_default();
+            info!(call = %ctx.call, device = %ctx.device, settings = %settings, "camera on");
+            ui.camera_state.set("on".into());
+        }
+        Err(e) => {
+            warn!(call = %ctx.call, device = %ctx.device, error = %describe(&e), "camera unavailable; audio only");
+            ui.camera.set(false);
+            ui.camera_state
+                .set(format!("unavailable ({})", describe(&e)));
+        }
+    }
+}
+
+/// Turn the camera off: the sender sends nothing, the device is released.
+fn camera_off(ui: Ui) {
+    let (cam, sender, ctx) =
+        with_engine(|e| (e.camera.take(), e.video_sender.clone(), e.ctx.clone()));
+    if let Some(s) = sender {
+        quiet(call(&s, "replaceTrack", &[&JsValue::NULL]), "replaceTrack");
+    }
+    stop_tracks(&[cam], &[]);
+    show_preview(None);
+    info!(call = %ctx.call, device = %ctx.device, "camera off");
+    ui.camera_state.set("off".into());
+}
+
+/// Put the current camera track (or nothing) on the connection's video sender.
+fn put_camera_on_sender() {
+    let (cam, sender) = with_engine(|e| (e.camera.clone(), e.video_sender.clone()));
+    if let Some(s) = sender {
+        let track: JsValue = cam
+            .as_ref()
+            .and_then(first_video)
+            .map(JsValue::from)
+            .unwrap_or(JsValue::NULL);
+        quiet(call(&s, "replaceTrack", &[&track]), "replaceTrack");
+    }
+}
+
+/// The camera button.
+fn toggle_camera(ui: Ui) {
+    let on = !ui.camera.get_untracked();
+    ui.camera.set(on);
+    if !ui.joined.get_untracked() {
+        ui.camera_state
+            .set(if on { "on at join" } else { "off" }.into());
+        return;
+    }
+    if on {
+        spawn_local(camera_on(ui, join_epoch()));
+    } else {
+        camera_off(ui);
+    }
+}
+
+/// The two simulcast encodings of the live video: full size up to 800 kbit/s
+/// and half size up to 150 kbit/s (`?simulcast=0`: one encoding).
+fn send_encodings() -> Option<Array> {
+    if query_param("simulcast").as_deref() == Some("0") {
+        return None;
+    }
+    let h = object();
+    set(&h, "rid", "h");
+    set(&h, "maxBitrate", 800_000);
+    set(&h, "scaleResolutionDownBy", 1);
+    let l = object();
+    set(&l, "rid", "l");
+    set(&l, "maxBitrate", 150_000);
+    set(&l, "scaleResolutionDownBy", 2);
+    Some(Array::of2(&h, &l))
 }
 
 /// A JS clone() of `track`: a second track on the same source, stopped
@@ -1133,61 +1267,111 @@ fn on_track(ev: RtcTrackEvent) {
         e.ctx.clone()
     });
     info!(call = %ctx.call, device = %ctx.device, origin = %origin, mid = %mid, kind = %track.kind(), "remote track");
-    if track.kind() != "audio" {
-        return;
-    }
-    let Ok(el) = window()
-        .document()
-        .expect("document")
-        .create_element("audio")
-    else {
+    let Some(tile) = remote_tile(&origin) else {
         return;
     };
-    let el: HtmlAudioElement = el.unchecked_into();
+    let doc = window().document().expect("document");
+    let video = track.kind() == "video";
+    let Ok(el) = doc.create_element(if video { "video" } else { "audio" }) else {
+        return;
+    };
+    let el: web_sys::HtmlMediaElement = el.unchecked_into();
     el.set_autoplay(true);
-    el.set_class_name("remote-audio");
+    if video {
+        // Its sound plays through the participant's <audio>.
+        el.set_muted(true);
+        let _ = el.set_attribute("playsinline", "");
+        el.set_class_name("remote-video");
+        let _ = el.set_attribute("width", "320");
+        let _ = el.set_attribute("height", "180");
+        // A camera turned off sends nothing: the browser mutes the track.
+        let tile2 = tile.clone();
+        let on_mute = Closure::<dyn FnMut()>::new(move || {
+            let _ = tile2.class_list().add_1("camera-off");
+        });
+        let tile3 = tile.clone();
+        let on_unmute = Closure::<dyn FnMut()>::new(move || {
+            let _ = tile3.class_list().remove_1("camera-off");
+        });
+        track.set_onmute(Some(on_mute.as_ref().unchecked_ref()));
+        track.set_onunmute(Some(on_unmute.as_ref().unchecked_ref()));
+        on_mute.forget();
+        on_unmute.forget();
+    } else {
+        el.set_class_name("remote-audio");
+    }
     let stream = MediaStream::new_with_tracks(&Array::of1(&track));
     if let Ok(s) = stream {
         el.set_src_object(Some(&s));
     }
-    if let Some(remote) = window()
-        .document()
-        .and_then(|d| d.get_element_by_id("remote"))
+    // A renegotiated track for the same origin replaces the old element.
+    let class = el.class_name();
+    if let Ok(old) = tile.query_selector(&format!(".{class}"))
+        && let Some(old) = old
     {
-        let _ = remote.append_child(&el);
+        old.remove();
     }
+    let _ = tile.append_child(&el);
 }
 
-/// Every second: refresh inbound audio counters per origin (for the UI and tests).
+/// The tile of one remote participant (by forwarded stream id
+/// `<name>-<id>`), created on first use.
+fn remote_tile(origin: &str) -> Option<web_sys::Element> {
+    let doc = window().document()?;
+    let remote = doc.get_element_by_id("remote")?;
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i)
+            && t.get_attribute("data-origin").as_deref() == Some(origin)
+        {
+            return Some(t);
+        }
+    }
+    let tile = doc.create_element("div").ok()?;
+    tile.set_class_name("tile");
+    let _ = tile.set_attribute("data-origin", origin);
+    let name = origin.rsplit_once('-').map_or(origin, |(n, _)| n);
+    let label = doc.create_element("div").ok()?;
+    label.set_class_name("tile-name");
+    label.set_text_content(Some(name));
+    let _ = tile.append_child(&label);
+    let _ = remote.append_child(&tile);
+    Some(tile)
+}
+
+/// Every second: refresh inbound counters per origin and kind (for the UI
+/// and tests): packets and bytes, and for video the frames decoded and their
+/// size.
 async fn refresh_inbound(ui: Ui) -> Result<(), JsValue> {
     let Some(pc) = with_engine(|e| e.pc.clone()) else {
         return Ok(());
     };
     let report = JsFuture::from(pc.get_stats()).await?;
     let origins = with_engine(|e| e.mid_origin.clone());
-    let rows = Rc::new(RefCell::new(Vec::<(String, f64, f64)>::new()));
-    let r2 = rows.clone();
-    let f = Closure::<dyn FnMut(JsValue)>::new(move |s: JsValue| {
-        if string(&s, "type") == "inbound-rtp" && string(&s, "kind") == "audio" {
-            let mid = string(&s, "mid");
-            if let Some((_, o)) = origins.iter().find(|(m, _)| *m == mid) {
-                r2.borrow_mut().push((
-                    o.clone(),
-                    num(&s, "packetsReceived"),
-                    num(&s, "bytesReceived"),
-                ));
-            }
-        }
-    });
-    call(&report, "forEach", &[f.as_ref()])?;
     let arr = Array::new();
-    for (origin, packets, bytes) in rows.borrow().iter() {
+    let a2 = arr.clone();
+    let f = Closure::<dyn FnMut(JsValue)>::new(move |s: JsValue| {
+        let kind = string(&s, "kind");
+        if string(&s, "type") != "inbound-rtp" || !(kind == "audio" || kind == "video") {
+            return;
+        }
+        let mid = string(&s, "mid");
+        let Some((_, origin)) = origins.iter().find(|(m, _)| *m == mid) else {
+            return;
+        };
         let o = object();
         set(&o, "origin", origin.as_str());
-        set(&o, "packetsReceived", *packets);
-        set(&o, "bytesReceived", *bytes);
-        arr.push(&o);
-    }
+        set(&o, "kind", kind.as_str());
+        set(&o, "packetsReceived", num(&s, "packetsReceived"));
+        set(&o, "bytesReceived", num(&s, "bytesReceived"));
+        if kind == "video" {
+            set(&o, "framesDecoded", num(&s, "framesDecoded"));
+            set(&o, "frameWidth", num(&s, "frameWidth"));
+            set(&o, "frameHeight", num(&s, "frameHeight"));
+        }
+        a2.push(&o);
+    });
+    call(&report, "forEach", &[f.as_ref()])?;
     ui.inbound_json.set(stringify(&arr));
     Ok(())
 }
@@ -1314,6 +1498,15 @@ async fn join(ui: Ui) -> Result<(), JsValue> {
     // Recording capture starts beside the call and never holds up or fails
     // the join (see start_capture).
     spawn_local(start_capture(ui, raw, epoch));
+    if ui.camera.get_untracked() {
+        // Before connecting, so the first offer already carries it.
+        camera_on(ui, epoch).await;
+        if stale(epoch) {
+            return Ok(());
+        }
+    } else {
+        ui.camera_state.set("off".into());
+    }
     acquire_wake_lock(epoch);
     let tick = every(1000, move || on_tick(ui, epoch));
     let ping = every(50, ping_host);
@@ -1405,7 +1598,7 @@ fn wait_for_producer(ui: Ui, epoch: u32) {
 
 async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     let current = move || !stale(epoch) && CONN_EPOCH.get() == conn;
-    let (live, ctx) = with_engine(|e| (e.live.clone(), e.ctx.clone()));
+    let (live, camera, ctx) = with_engine(|e| (e.live.clone(), e.camera.clone(), e.ctx.clone()));
     let url = ctx.url.clone();
     // From a call link: signal through the rendezvous, whose hello names the
     // ICE servers (STUN, so the offer carries this browser's public address).
@@ -1437,23 +1630,47 @@ async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), JsValue> {
     };
     // Stored before the next await so a drop or leave always closes it.
     with_engine(|e| e.pc = Some(pc.clone()));
-    let mut has_video = false;
     if let Some(live) = live.as_ref() {
-        for t in live.get_tracks().iter() {
-            let t: MediaStreamTrack = t.unchecked_into();
-            has_video |= t.kind() == "video";
+        for t in live.get_audio_tracks().iter() {
             let init = object();
             set(&init, "direction", "sendonly");
             set(&init, "streams", Array::of1(live));
             call(&pc, "addTransceiver", &[&t, &init])?;
         }
     }
-    if !has_video {
-        // The wire contract's first offer carries audio and video m-lines.
+    // The wire contract's first offer carries audio and video m-lines; the
+    // video one exists with or without a camera, so turning the camera on
+    // or off later only swaps its track.
+    let cam_track: JsValue = camera
+        .as_ref()
+        .and_then(first_video)
+        .map(JsValue::from)
+        .unwrap_or_else(|| JsValue::from_str("video"));
+    let video_init = |encodings: Option<Array>| {
         let init = object();
         set(&init, "direction", "sendonly");
-        call(&pc, "addTransceiver", &[&JsValue::from_str("video"), &init])?;
-    }
+        if let Some(live) = live.as_ref() {
+            set(&init, "streams", Array::of1(live));
+        }
+        if let Some(enc) = encodings {
+            set(&init, "sendEncodings", enc);
+        }
+        init
+    };
+    let video = match send_encodings() {
+        Some(enc) => match call(&pc, "addTransceiver", &[&cam_track, &video_init(Some(enc))]) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(error = %describe(&e), "simulcast refused; sending one video encoding");
+                call(&pc, "addTransceiver", &[&cam_track, &video_init(None)])?
+            }
+        },
+        None => call(&pc, "addTransceiver", &[&cam_track, &video_init(None)])?,
+    };
+    let sender = get(&video, "sender");
+    let encodings = stringify(&get(&call(&sender, "getParameters", &[])?, "encodings"));
+    info!(call = %ctx.call, device = %ctx.device, camera = camera.is_some(), encodings = %encodings, "video sender ready");
+    with_engine(|e| e.video_sender = Some(sender));
     let control = pc.create_data_channel("control");
     control.set_binary_type(RtcDataChannelType::Arraybuffer);
     let data = pc.create_data_channel("data");
@@ -1792,6 +2009,7 @@ fn disconnect() {
         e.answering = false;
         e.mid_origin.clear();
         e.last_rx = 0.0;
+        e.video_sender = None;
         e.pc.take()
     });
     if let Some(pc) = pc {
@@ -1820,6 +2038,22 @@ fn check_media(ui: Ui, epoch: u32) {
     });
     if ended {
         spawn_local(restart_media(ui, epoch));
+    }
+    // The camera ended under us (unplugged, or the system took it) while
+    // wanted on: reopen it; the sender gets the new track, no reconnect.
+    let camera_ended = ui.camera.get_untracked()
+        && with_engine(|e| {
+            !e.camera_busy
+                && now - e.last_camera_restart > MEDIA_RETRY_MS
+                && e.camera
+                    .as_ref()
+                    .and_then(first_video)
+                    .is_some_and(|t| string(&t, "readyState") == "ended")
+        });
+    if camera_ended {
+        warn!("camera track ended; reopening it");
+        with_engine(|e| e.last_camera_restart = now);
+        spawn_local(camera_on(ui, epoch));
     }
 }
 
@@ -1956,7 +2190,9 @@ fn leave(ui: Ui) {
     // Last: close this session's log file so it can be offered at the next join.
     flush_logs(true);
     // Release the microphone and camera: every track, clones included.
-    stop_tracks(&[engine.raw, engine.live], &engine.sources);
+    stop_tracks(&[engine.raw, engine.live, engine.camera], &engine.sources);
+    show_preview(None);
+    ui.camera_state.set(String::new());
     close_audio(engine.audio, engine.worklet);
     if let Some(s) = engine.wake {
         quiet(call(&s, "release", &[]), "wake lock release");
@@ -2095,6 +2331,9 @@ fn App() -> impl IntoView {
         take: RwSignal::new(String::new()),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),
+        // `?camera=off` joins with the camera off.
+        camera: RwSignal::new(query_param("camera").as_deref() != Some("off")),
+        camera_state: RwSignal::new(String::new()),
     };
     if bad_link {
         ui.warning
@@ -2147,6 +2386,13 @@ fn App() -> impl IntoView {
         <p>
             <button id="join" disabled=move || ui.joined.get() on:click=on_join>"Join"</button>
             <button id="leave" disabled=move || !ui.joined.get() on:click=move |_| leave(ui)>"Leave"</button>
+            " "
+            <button id="camera" on:click=move |_| toggle_camera(ui)>
+                {move || if ui.camera.get() { "Turn camera off" } else { "Turn camera on" }}</button>
+            " Camera: " <span id="camera-state">{move || {
+                let s = ui.camera_state.get();
+                if s.is_empty() { if ui.camera.get() { "on at join".to_string() } else { "off".to_string() } } else { s }
+            }}</span>
         </p>
         <Producer ui=ui/>
         <p hidden>
@@ -2175,7 +2421,20 @@ fn App() -> impl IntoView {
             </For>
         </ul>
         <p>"Errors: " <code id="errors">{move || ui.errors.get().join(" | ")}</code></p>
-        <div id="remote"></div>
+        <style>
+            ".tiles { display: flex; flex-wrap: wrap; gap: 8px; }
+            .tile { position: relative; width: 320px; min-height: 60px; background: #222; color: #eee; }
+            .tile video { display: block; width: 320px; height: 180px; background: #000; }
+            .tile-name { position: absolute; left: 4px; top: 2px; font: 12px sans-serif; z-index: 1; }
+            .tile.camera-off video, .tile.self-off video { visibility: hidden; }"
+        </style>
+        <div class="tiles">
+            <div class="tile" class=("self-off", move || ui.camera_state.get() != "on") hidden=move || !ui.joined.get()>
+                <div class="tile-name">{move || format!("{} (you)", ui.name.get())}</div>
+                <video id="self-video" autoplay=true muted=true prop:muted=true playsinline=true width="320" height="180"></video>
+            </div>
+            <div id="remote" class="tiles"></div>
+        </div>
         <pre id="debug-tracks" hidden>{move || ui.tracks_json.get()}</pre>
         <pre id="debug-inbound" hidden>{move || ui.inbound_json.get()}</pre>
     }

@@ -12,7 +12,7 @@
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
-//! [--rendezvous URL] [--relay-only] [--participate [DEVICE]] [--name NAME] [--open]`
+//! [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
@@ -21,6 +21,10 @@
 //! that rendezvous under its host key and, once registered, prints the call
 //! link for guests anywhere and `CALL_LINK <link>` (see [`rendezvous`]). The
 //! LAN pages and `POST /offer` keep working beside it.
+//!
+//! `--bandwidth-cap KBPS` caps the bandwidth the video allocation assumes
+//! toward each guest (castcorder-transport `HostConfig::bandwidth_cap_kbps`):
+//! for a thin uplink, and for testing the low layer. It shapes no traffic.
 //!
 //! `--relay-only` (for testing the relay path) offers guests only the TURN
 //! relayed candidate from the rendezvous: no host or server-reflexive ones.
@@ -58,7 +62,7 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_transport::{Host, HostConfig};
 
 const USAGE: &str = "usage: castcorder-host --dist DIR [--library DIR] [--call NAME] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] \
+[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] \
 [--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open]";
 
 struct Args {
@@ -72,6 +76,8 @@ struct Args {
     advertise: Vec<IpAddr>,
     rendezvous: Option<String>,
     relay_only: bool,
+    /// `--bandwidth-cap KBPS`: the most the video allocation assumes per guest.
+    bandwidth_cap: Option<u64>,
     /// `--participate`: `Some(None)` is the default input.
     participate: Option<Option<String>>,
     name: String,
@@ -112,6 +118,7 @@ fn parse_args() -> Args {
         advertise: vec![],
         rendezvous: None,
         relay_only: false,
+        bandwidth_cap: None,
         participate: None,
         name: "host".into(),
         keep_wav: true,
@@ -143,6 +150,13 @@ fn parse_args() -> Args {
                 a.rendezvous = Some(url.trim_end_matches('/').to_string());
             }
             "--relay-only" => a.relay_only = true,
+            "--bandwidth-cap" => {
+                a.bandwidth_cap = Some(
+                    value()
+                        .parse()
+                        .unwrap_or_else(|_| fail("bad --bandwidth-cap (kbps)")),
+                )
+            }
             "--open" => a.open = true,
             "--participate" => {
                 if !cfg!(feature = "native-capture") {
@@ -296,6 +310,7 @@ fn main() {
                 .map(|ip| SocketAddr::new(*ip, udp.port()))
                 .collect(),
             relay_only: args.relay_only,
+            bandwidth_cap_kbps: args.bandwidth_cap,
             ..HostConfig::default()
         },
     );
