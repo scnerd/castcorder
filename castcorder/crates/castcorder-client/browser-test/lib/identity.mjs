@@ -122,8 +122,14 @@ export async function identityChecks() {
     'a track whose sidecar a crash left empty was recovered from its timing header, synced and left OPFS');
   check(opfsLeft.includes('orphan-take0001.wav') && !opfsLeft.includes('orphan-take0001.json'),
     'the startup scan created no sidecar for audio that has none, and kept the audio: ' + opfsLeft.join(' '));
-  const listed = JSON.parse((await M.textContent('#debug-tracks')) || '[]');
-  const orphan = listed.find((t) => t.name === 'orphan-take0001');
+  // The seed page's sync access handles are released asynchronously (Firefox
+  // does it after the page is gone), so the first scan may list the track busy;
+  // the worker re-lists busy tracks, and the listing settles (cast-9c9).
+  const orphan = await waitFor(async () => {
+    const listed = JSON.parse((await M.textContent('#debug-tracks')) || '[]');
+    const t = listed.find((x) => x.name === 'orphan-take0001');
+    return t && !t.busy ? t : null;
+  }, 'the orphan track listed, no longer busy', 30000);
   check(orphan && orphan.noSidecar && !orphan.error && orphan.frames === 4800,
     'the audio without a sidecar is listed (noSidecar, 4800 frames): ' + JSON.stringify(orphan));
 

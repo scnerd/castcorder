@@ -990,6 +990,7 @@ pub(crate) async fn list() -> Result<(), JsValue> {
     let active = ACTIVE.with(|a| a.borrow().as_ref().map(|a| a.name.clone()));
     let names = entry_names(&dir).await?;
     let tracks = Array::new();
+    let mut any_busy = false;
     for n in names.iter().filter(|n| n.ends_with(".wav")) {
         let track = n.trim_end_matches(".wav").to_string();
         let item = object();
@@ -1028,7 +1029,8 @@ pub(crate) async fn list() -> Result<(), JsValue> {
         // The scan never creates a file: a track's files are opened only if
         // they exist. One held elsewhere (another tab recording or syncing
         // it) is skipped this pass; that tab owns it.
-        let busy = |why: &str| {
+        let mut busy = |why: &str| {
+            any_busy = true;
             info!(track = %track, reason = %why, "track in use elsewhere; skipped this scan");
             set(&item, "busy", true);
             tracks.push(&item);
@@ -1096,7 +1098,45 @@ pub(crate) async fn list() -> Result<(), JsValue> {
     set(&o, "type", "list");
     set(&o, "tracks", tracks);
     post(&o);
+    relist_if_busy(any_busy);
     Ok(())
+}
+
+/// How many times a scan that skipped a busy track is repeated, one second
+/// apart. A lock can outlive its holder briefly (Firefox releases a closed
+/// page's sync access handles asynchronously), and nothing else would
+/// re-list for a tab that only just started.
+const BUSY_RELISTS: u32 = 8;
+
+thread_local! {
+    static RELISTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn relist_if_busy(any_busy: bool) {
+    if !any_busy {
+        RELISTS.with(|r| r.set(0));
+        return;
+    }
+    let done = RELISTS.with(|r| {
+        let n = r.get();
+        r.set(n + 1);
+        n
+    });
+    if done >= BUSY_RELISTS {
+        return;
+    }
+    let again = Closure::once_into_js(|| {
+        spawn_local(async {
+            if let Err(e) = list().await {
+                warn!(error = %describe(&e), "re-list of busy tracks failed");
+            }
+        });
+    });
+    let _ = call(
+        &js_sys::global(),
+        "setTimeout",
+        &[again.unchecked_ref(), &JsValue::from(1000)],
+    );
 }
 
 /// Entry point of the worker binary.
