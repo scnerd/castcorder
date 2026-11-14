@@ -1,7 +1,7 @@
 // Video recording (M4 part 2, chromium and firefox modes): take 3 with the
 // call's recording profile set to record video by the producer's control.
 // - Each guest with a camera records it with MediaRecorder (WebM) into OPFS;
-//   in firefox A turns its camera off and on mid-take, which ends one video track and
+//   A turns its camera off and on mid-take, which ends one video track and
 //   starts another.
 // - chromium: B's MediaRecorder claims no codec (isTypeSupported replaced),
 //   so B reports "cannot meet profile": A's producer panel shows it, B's
@@ -91,23 +91,21 @@ export async function videoRecChecks(A, B) {
   } else {
     await waitFor(async () => (await text(B, '#video-recording')).startsWith('recording take0003'), 'B recording its camera', 15000);
   }
-  // firefox: A's camera off then on mid-take, two video tracks for A.
-  // (chromium keeps it on: reopening the camera stalled the page's raw audio
-  // capture for 40 ms there, which the bit-exact check below would catch.)
-  const toggle = !chromium;
+  // A's camera off then on mid-take: two video tracks for A, and (chromium)
+  // A's raw audio stays bit-exact through it (cast-47x: opening the new
+  // video track once stalled the storage worker past the audio source's
+  // queue; camtoggle.mjs stresses this).
   await sleep(3000);
-  if (toggle) {
-    await A.click('#camera');
-    await waitFor(async () => (await text(A, '#video-recording')).startsWith('stopped take0003'), 'A\x27s first video track closed with its camera', 10000);
-    await A.click('#camera');
-    await waitFor(async () => { const r = await text(A, '#video-recording'); return r.startsWith('recording take0003') && r !== recA1; },
-      'A records a new video track after the camera is back', 15000);
-  }
+  await A.click('#camera');
+  await waitFor(async () => (await text(A, '#video-recording')).startsWith('stopped take0003'), 'A\x27s first video track closed with its camera', 10000);
+  await A.click('#camera');
+  await waitFor(async () => { const r = await text(A, '#video-recording'); return r.startsWith('recording take0003') && r !== recA1; },
+    'A records a new video track after the camera is back', 15000);
   await sleep(3000);
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 3 stopped', 10000);
 
-  const expected = { A: { audio: 3, video: toggle ? 6 : 3 }, B: { audio: 3, video: chromium ? 0 : 3 } };
+  const expected = { A: { audio: 3, video: 6 }, B: { audio: 3, video: chromium ? 0 : 3 } };
   const total = 3 + expected.A.video + 3 + expected.B.video;
   const manifest = () => {
     const m = join(TAKE3, 'manifest.jsonl');
@@ -134,7 +132,7 @@ export async function videoRecChecks(A, B) {
   const files = readdirSync(TAKE3).sort();
   console.log('host take03: ' + files.join(' '));
   const want = ['take03_A_mic.wav', 'take03_B_mic.wav', 'take03_A_cam.webm', 'take03_A_cam.json', 'take03_A_cam.timing.jsonl'];
-  if (toggle) want.push('take03_A-2_cam.webm', 'take03_A-2_cam.json', 'take03_A-2_cam.timing.jsonl');
+  want.push('take03_A-2_cam.webm', 'take03_A-2_cam.json', 'take03_A-2_cam.timing.jsonl');
   if (!chromium) want.push('take03_B_cam.webm', 'take03_B_cam.json', 'take03_B_cam.timing.jsonl');
   check(want.every((f) => files.includes(f)) && !files.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
     'host take03 holds every audio track and each video track with its sidecar and timing metadata');
@@ -188,6 +186,9 @@ export async function videoRecChecks(A, B) {
       check(clean, 'take 3 (with video) channel ' + c.channel + ' vs ' + c.against + ': ' + c.verdict + ' (dropped ' + c.droppedFrames
         + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames + ', mismatched ' + c.mismatched + ')');
     }
+    const disc = readFileSync(join(TAKE3, 'take03_A_mic.timing.jsonl'), 'utf8').trim().split('\n')
+      .map((l) => JSON.parse(l)).filter((l) => l.type === 'discontinuity');
+    check(disc.length === 0, 'A\x27s take 3 timing metadata lists no discontinuity: ' + JSON.stringify(disc));
   }
   // Back to audio only for what follows.
   await A.click('#record-video');

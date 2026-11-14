@@ -69,8 +69,7 @@ pub(super) async fn capture_mstp_window(
         .dyn_into()
         .map_err(|_| "MediaStreamTrackProcessor is not exposed on the page".to_string())?;
     let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
-    let init = object();
-    set(&init, "track", &clone);
+    let init = crate::worker::mstp_init(&clone);
     let processor = Reflect::construct(&ctor, &Array::of1(&init)).map_err(|e| describe(&e))?;
     let readable = get(&processor, "readable");
     let msg = worker_cmd("source");

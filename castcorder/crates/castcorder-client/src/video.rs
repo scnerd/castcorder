@@ -44,6 +44,9 @@ struct Active {
     sidecar: FileSystemSyncAccessHandle,
     timing: FileSystemSyncAccessHandle,
     timing_len: f64,
+    /// Timing lines not yet written: written with one write and one flush
+    /// at open, at the recorder's start, with every chunk and at the end.
+    timing_buf: String,
     meta: JsValue,
     bytes: u64,
     chunks: u64,
@@ -93,11 +96,23 @@ fn now_ms() -> f64 {
 }
 
 impl Active {
+    /// Queue a timing line; [`Self::flush_timing`] writes it.
     fn timing_line(&mut self, line: &TimingLine) {
-        let text = line.to_line();
+        self.timing_buf.push_str(&line.to_line());
+    }
+
+    /// Write the queued timing lines: one write and one flush, however many
+    /// lines. This worker also reads the raw audio, so it never spends a
+    /// flush per line (opening a track with the clock window's hundreds of
+    /// sync lines that way stalled it past the audio source's queue).
+    fn flush_timing(&mut self) {
+        if self.timing_buf.is_empty() {
+            return;
+        }
+        let buf = std::mem::take(&mut self.timing_buf);
         let r = self
             .timing
-            .write_with_u8_array_and_options(text.as_bytes(), &at(self.timing_len))
+            .write_with_u8_array_and_options(buf.as_bytes(), &at(self.timing_len))
             .and_then(|n| self.timing.flush().map(|()| n));
         match r {
             Ok(n) => self.timing_len += n,
@@ -143,6 +158,7 @@ impl Active {
             mime = %start.mime, width = start.width, height = start.height,
             bits_per_second = start.bits_per_second, "video recorder started");
         self.timing_line(&TimingLine::VideoStart(start));
+        self.flush_timing();
         self.write_sidecar(false);
     }
 
@@ -178,6 +194,7 @@ impl Active {
             host_us: host_us_of(device_us),
             timecode_ms: timecode,
         }));
+        self.flush_timing();
         self.bytes += len;
         self.chunks += 1;
         self.write_sidecar(false);
@@ -194,6 +211,7 @@ impl Active {
             device_us,
             host_us: host_us_of(device_us),
         });
+        a.flush_timing();
         a.write_sidecar(true);
         a.file.close();
         a.sidecar.close();
@@ -279,6 +297,7 @@ async fn open(name: &str, msg: &JsValue) -> Result<Active, JsValue> {
         sidecar,
         timing,
         timing_len: 0.0,
+        timing_buf: String::new(),
         meta,
         bytes: 0,
         chunks: 0,
@@ -301,6 +320,7 @@ async fn open(name: &str, msg: &JsValue) -> Result<Active, JsValue> {
     for s in samples {
         a.timing_line(&TimingLine::Sync(s));
     }
+    a.flush_timing();
     a.write_sidecar(false);
     info!(call = %a.call, device = %a.device, take = a.take, track = %a.name, "video track recording");
     Ok(a)

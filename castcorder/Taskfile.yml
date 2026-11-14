@@ -98,6 +98,23 @@ tasks:
       - node e2e.mjs fallback
       - node e2e.mjs firefox
 
+  test:browser:camtoggle:
+    desc: Stress the raw audio against camera toggles and a storage-worker stall in headless Chromium (not part of test:browser)
+    summary: |
+      Builds castcorder-host and the client like test:browser:client, then runs
+      crates/castcorder-client/browser-test/camtoggle.mjs: one guest records
+      takes with video, its storage worker is stalled for 500 ms and its camera
+      turned off and on several times per take; every take's raw audio must
+      arrive bit-exact with no discontinuity in its timing metadata (cast-47x).
+      Arguments after --: takes, toggles, stall ms (default 3 4 500).
+    dir: crates/castcorder-client/browser-test
+    cmds:
+      - cargo build --release --locked -p castcorder-host
+      - cd .. && trunk build --release
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node camtoggle.mjs {{.CLI_ARGS}}
+
   host:
     desc: Run a call on this machine's local network (builds the client and the host, then runs castcorder-host)
     summary: |

@@ -163,6 +163,42 @@ impl ClockWatch {
     }
 }
 
+/// Smallest timestamp jump reported as lost audio, in us (whatever the
+/// buffer length: rounding and capture-time jitter stay well below it).
+const GAP_MIN_US: f64 = 2000.0;
+
+/// Detects audio lost before the reader got it, on a path whose buffers carry
+/// capture timestamps (MediaStreamTrackProcessor's AudioData): each buffer
+/// should start where the previous one ended. A buffer the source's queue
+/// dropped, or one the capture never delivered, shows as a forward jump.
+/// Each buffer is checked against the one before it, so drift between the
+/// sample clock and the timestamp clock never accumulates into a report.
+#[derive(Clone, Debug, Default)]
+pub struct TimestampWatch {
+    next_us: Option<f64>,
+}
+
+impl TimestampWatch {
+    /// A watch with no buffer seen yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A buffer of `frames` at `rate` stamped `ts_us`. Returns the frames
+    /// missing just before it (positive) or overlapping the previous buffer
+    /// (negative) when the jump is at least half a buffer and 2 ms; jitter
+    /// below that returns `None`.
+    pub fn observe(&mut self, ts_us: f64, frames: u64, rate: u32) -> Option<i64> {
+        let rate = f64::from(rate.max(1));
+        let dur_us = frames as f64 * 1e6 / rate;
+        let gap = self.next_us.replace(ts_us + dur_us).map(|e| ts_us - e)?;
+        if gap.abs() < (dur_us / 2.0).max(GAP_MIN_US) {
+            return None;
+        }
+        Some((gap * rate / 1e6).round() as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +220,40 @@ mod tests {
             }
         }
         out
+    }
+
+    /// 10 ms buffers at 44.1 kHz stamped with up to 150 us of jitter (as
+    /// Chromium's are, rounded to 100 us); buffers in `lost` never arrive.
+    fn stamps(lost: &[u64]) -> Vec<i64> {
+        let mut w = TimestampWatch::new();
+        (0..1000u64)
+            .filter(|b| !lost.contains(b))
+            .filter_map(|b| {
+                let jitter = ((b * 7919) % 300) as f64 - 150.0;
+                w.observe(b as f64 * 10_000.0 + jitter, 441, 44_100)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn timestamp_watch_ignores_jitter() {
+        assert_eq!(stamps(&[]), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn timestamp_watch_reports_lost_buffers() {
+        // One buffer, then four in a row (the 40 ms of cast-47x).
+        let r = stamps(&[100, 500, 501, 502, 503]);
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert!((r[0] - 441).abs() <= 15, "{r:?}");
+        assert!((r[1] - 1764).abs() <= 15, "{r:?}");
+    }
+
+    #[test]
+    fn timestamp_watch_reports_an_overlap() {
+        let mut w = TimestampWatch::new();
+        assert_eq!(w.observe(0.0, 441, 44_100), None);
+        assert_eq!(w.observe(0.0, 441, 44_100), Some(-441));
     }
 
     #[test]

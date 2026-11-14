@@ -28,7 +28,10 @@
 //! from js/capture-worklet.js through a MessagePort). Each answers
 //! `source-ok {id, path}` on its first audio or `source-failed {id, message}`.
 //! The worklet path runs on the AudioContext's render clock, so it records
-//! detected discontinuities (inserted or dropped blocks) in the sidecar.
+//! detected discontinuities (inserted or dropped blocks) in the sidecar and
+//! the timing metadata. The MediaStreamTrackProcessor paths are lossless
+//! unless the processor's queue overflows or the capture skips: their
+//! AudioData timestamps are checked, and a jump is recorded the same way.
 //!
 //! Messages in (`cmd`): `source {id, readable}`, `source-track {id, track}`,
 //! `source-port {id, port, channels, sampleRate}`, `start {name, meta}`, `stop`,
@@ -58,7 +61,7 @@ use web_sys::{
 };
 
 use crate::js::{call, describe, get, num, object, set, string};
-use crate::session::ClockWatch;
+use crate::session::{ClockWatch, TimestampWatch};
 use crate::wav::{
     HEADER_LEN, frame_offset, frames_in_file, header_frames, interleave_le, parse_header, peak,
     wav_header,
@@ -195,7 +198,8 @@ struct Active {
     max_write_ms: f64,
     max_flush_ms: f64,
     bytes: Vec<u8>,
-    /// Detected discontinuities, as sidecar objects (worklet path only).
+    /// Detected discontinuities, as sidecar objects (every path; see
+    /// [`TimestampWatch`] and [`ClockWatch`]).
     discontinuities: Array,
     inserted_frames: u64,
     dropped_frames: u64,
@@ -603,14 +607,52 @@ async fn run_reader(
     }
 }
 
+/// The `maxBufferSize` of every audio MediaStreamTrackProcessor: how many
+/// AudioData its queue holds before it drops the oldest. Chromium's default
+/// is 10 (100 ms of its 10 ms buffers), so a stall of this worker longer
+/// than that lost raw audio (cast-47x); this is about 20 s of 10 ms buffers.
+pub(crate) const MSTP_MAX_BUFFER: u16 = 2000;
+
+/// The MediaStreamTrackProcessor init for `track`.
+pub(crate) fn mstp_init(track: &JsValue) -> JsValue {
+    let init = object();
+    set(&init, "track", track);
+    set(&init, "maxBufferSize", MSTP_MAX_BUFFER);
+    init
+}
+
+/// AudioData timestamps jumped by `frames` (see [`TimestampWatch`]): audio
+/// was lost before this worker read it (positive), or a buffer overlapped the
+/// one before (negative). Never silent: logged, and written into a recording
+/// track's timing metadata and sidecar as a discontinuity.
+fn timestamp_jump(path: &str, frames: i64, ts_us: f64) {
+    let recorded = ACTIVE.with(|a| match a.borrow_mut().as_mut() {
+        Some(a) if a.format.is_some() => {
+            let cause = if frames > 0 {
+                "audio timestamps skipped: frames lost before the worker read them"
+            } else {
+                "audio timestamps overlapped the previous buffer"
+            };
+            a.discontinuity(frames < 0, frames.unsigned_abs(), cause);
+            true
+        }
+        _ => false,
+    });
+    if !recorded {
+        warn!(
+            capture_path = path,
+            frames, ts_us, "raw audio timestamps jumped (no track recording)"
+        );
+    }
+}
+
 /// `source-track`: build the processor here from a transferred track (the
 /// spec exposes MediaStreamTrackProcessor in dedicated workers).
 fn worker_processor(msg: &JsValue) -> Result<JsValue, JsValue> {
     let ctor: js_sys::Function = get(&js_sys::global(), "MediaStreamTrackProcessor")
         .dyn_into()
         .map_err(|_| JsValue::from_str("MediaStreamTrackProcessor is not exposed in workers"))?;
-    let init = object();
-    set(&init, "track", get(msg, "track"));
+    let init = mstp_init(&get(msg, "track"));
     let processor = js_sys::Reflect::construct(&ctor, &Array::of1(&init))?;
     Ok(get(&processor, "readable"))
 }
@@ -630,6 +672,7 @@ async fn read_source(
     set(&opts, "format", "f32-planar");
     let mut planes: Vec<Vec<f32>> = Vec::new();
     info!(capture_path = path, "raw source reading");
+    let mut watch = TimestampWatch::new();
     loop {
         let r = JsFuture::from(Promise::from(call(&reader, "read", &[])?)).await?;
         if get(&r, "done").is_truthy() {
@@ -640,6 +683,9 @@ async fn read_source(
         let ch = (num(&ad, "numberOfChannels") as usize).max(1);
         let rate = num(&ad, "sampleRate") as u32;
         let ts = num(&ad, "timestamp");
+        if let Some(d) = watch.observe(ts, n as u64, rate) {
+            timestamp_jump(path, d, ts);
+        }
         planes.resize_with(ch, Vec::new);
         let plane = Float32Array::new_with_length(n as u32);
         for (c, p) in planes.iter_mut().enumerate() {
