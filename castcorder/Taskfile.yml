@@ -154,6 +154,21 @@ tasks:
       - cd crates/castcorder-client && trunk build --release --dist {{.CLIENT_DIST}}
       - cargo run --release --locked -p castcorder-app --features desktop,native-capture -- {{.CLI_ARGS}}
 
+  app:bundle:
+    desc: Build the desktop app's installers (unsigned) with the client bundled - NSIS on Windows, .app and .dmg on macOS, .deb and AppImage on Linux
+    summary: |
+      Builds the Browser Guest with trunk into crates/castcorder-app/client, which
+      tauri.bundle.conf.json ships as the app's `client` resource (the in-process
+      host serves it from beside the executable or the platform's resource
+      directory), then runs `cargo tauri build` (tauri-cli 2: `cargo binstall
+      tauri-cli --version "^2"`). Installers land in
+      <target dir>/release/bundle/. Built without native-capture: GStreamer is not
+      bundled, so the installed app records through the webview microphone only.
+      Pass bundles after --, e.g. task app:bundle -- --bundles nsis
+    cmds:
+      - cd crates/castcorder-client && trunk build --release --dist ../castcorder-app/client
+      - cd crates/castcorder-app && cargo tauri build --config tauri.bundle.conf.json --features desktop {{.CLI_ARGS}}
+
   app:check:
     desc: Clippy, tests and a headless smoke run of the desktop app (needs the system webview; CI runs it under xvfb on Linux)
     summary: |

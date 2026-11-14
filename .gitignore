@@ -45,3 +45,6 @@ Thumbs.db
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Client build bundled into the desktop installers (task app:bundle)
+**/castcorder-app/client/
