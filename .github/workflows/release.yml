@@ -140,6 +140,10 @@ jobs:
           if (-not (Test-Path "$dir/client/index.html")) { throw 'client not installed' }
           if (-not (Test-Path "$dir/gstreamer-1.0-0.dll")) { throw 'GStreamer not installed' }
           if (-not (Test-Path "$dir/licenses/gstreamer/NOTICE.txt")) { throw 'GStreamer notice not installed' }
+          # Every non-system DLL the exe, its DLLs and the plugins import (the MSVC
+          # runtime included, which a clean machine lacks) is in the install.
+          uv run scripts/check_install_dlls.py $dir
+          if ($LASTEXITCODE -ne 0) { throw 'installed folder is missing imported DLLs' }
           $env:Path = ($env:Path -split ';' | Where-Object { $_ -notmatch 'gstreamer' }) -join ';'
           Get-ChildItem env: | Where-Object { $_.Name -match '^GST' } | ForEach-Object { Remove-Item "env:$($_.Name)" }
           $gst = & "$dir/castcorder-app.exe" --smoke-gst 2>&1 | Out-String
