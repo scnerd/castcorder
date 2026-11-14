@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "gstreamer/bin/": "./",
+      "gstreamer/gstreamer-1.0/": "gstreamer-1.0/",
+      "gstreamer/licenses/": "licenses/gstreamer/"
+    }
+  }
+}

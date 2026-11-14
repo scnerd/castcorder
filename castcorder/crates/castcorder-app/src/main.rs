@@ -12,6 +12,8 @@
 //! starts on a throwaway library and OS-picked loopback ports, waits for the
 //! hidden window to load the producer page, prints `APP_READY`, then stops
 //! the host and exits (exit code 1 if that takes over a minute).
+//! `castcorder-app --smoke-gst` only checks GStreamer (see `smoke_gst`); an
+//! installer's bundled GStreamer is found beside the executable.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -40,6 +42,9 @@ struct Shell {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--smoke-gst") {
+        std::process::exit(smoke_gst());
+    }
     let mut args = AppArgs::parse(std::env::args().skip(1)).unwrap_or_else(|e| {
         eprintln!("castcorder-app: {e}");
         eprintln!(
@@ -124,6 +129,37 @@ fn main() {
             }
         }
     });
+}
+
+/// `--smoke-gst`: GStreamer initialises and every element native capture
+/// needs is found. Prints `GST_ELEMENT <name> <plugin file>` or
+/// `GST_MISSING <name>` per element, then `GST_OK`; exit code 1 if a required
+/// element is missing or the build has no native capture.
+fn smoke_gst() -> i32 {
+    let elements = match castcorder_host::native_capture_check() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("castcorder-app: GStreamer: {e}");
+            return 1;
+        }
+    };
+    let mut ok = true;
+    for e in &elements {
+        match &e.plugin {
+            Some(p) => println!("GST_ELEMENT {} {}", e.name, p.display()),
+            None => {
+                let optional = if e.required { "" } else { " (optional)" };
+                println!("GST_MISSING {}{optional}", e.name);
+                ok &= !e.required;
+            }
+        }
+    }
+    if ok {
+        println!("GST_OK");
+        0
+    } else {
+        1
+    }
 }
 
 /// A smoke run without a client build serves a stand-in page from its

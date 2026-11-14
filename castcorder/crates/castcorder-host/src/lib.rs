@@ -126,6 +126,43 @@ pub const NATIVE_CAPTURE: bool = cfg!(feature = "native-capture");
 const NO_NATIVE: &str =
     "this build has no native capture (it needs the native-capture feature and GStreamer)";
 
+/// One GStreamer element the native microphone uses, as this process finds it.
+#[derive(Clone, Debug)]
+pub struct GstElement {
+    /// The element factory's name.
+    pub name: String,
+    /// The plugin file it loads from; `None`: missing.
+    pub plugin: Option<PathBuf>,
+    /// Without it native capture does not work (else it degrades).
+    pub required: bool,
+}
+
+/// Initialise GStreamer as native capture does and find each element it
+/// uses (installer smoke runs). Errors if GStreamer does not initialise or the
+/// build has no native capture.
+pub fn native_capture_check() -> Result<Vec<GstElement>, String> {
+    #[cfg(not(feature = "native-capture"))]
+    {
+        Err(NO_NATIVE.into())
+    }
+    #[cfg(feature = "native-capture")]
+    {
+        use castcorder_capture_gst as cg;
+        let required = cg::required_elements();
+        let mut names = required.clone();
+        names.extend_from_slice(cg::OPTIONAL_ELEMENTS);
+        let found = cg::element_plugins(&names).map_err(|e| e.to_string())?;
+        Ok(found
+            .into_iter()
+            .map(|(name, plugin)| GstElement {
+                required: required.contains(&name.as_str()),
+                name,
+                plugin,
+            })
+            .collect())
+    }
+}
+
 pub use args::USAGE;
 pub use participant::{NativeDevice, NativeInput, NativeState};
 
