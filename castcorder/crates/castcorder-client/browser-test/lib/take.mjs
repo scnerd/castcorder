@@ -6,6 +6,7 @@ import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { parseOggOpus } from '../ogg.mjs';
 import { ctx } from './ctx.mjs';
 import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming } from './helpers.mjs';
+import { muteChecks } from './levels.mjs';
 
 export async function takeChecks(A, B) {
   const { MODE, FULL, RESULTS, LIBRARY, HTTP, host, logs, input, TAKE_SECONDS, WORKSPACE, chromium, firefox } = ctx;
@@ -49,6 +50,9 @@ export async function takeChecks(A, B) {
     await second.close();
     writeFileSync(join(RESULTS, 'guest-A-second-tab' + (FULL ? '' : '-' + MODE) + '.log'), secondLog.join('\n'));
   }
+  // Mute is call-only (cast-xe2): A mutes and unmutes mid-take; its track is
+  // checked bit-exact below (chromium) through the mute.
+  await muteChecks(A, B);
   await sleep(Math.max(0, TAKE_SECONDS * 1000 - (Date.now() - takeT0)));
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);

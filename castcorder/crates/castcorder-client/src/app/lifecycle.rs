@@ -75,6 +75,7 @@ pub(super) fn on_tick(ui: Ui, epoch: u32) {
     send_signal(&Signal::Hb);
     check_connection(ui, epoch);
     check_media(ui, epoch);
+    report_mic_if_due(ui);
     update_elapsed(ui);
     if js_sys::Date::now() >= with_engine(|e| e.next_disk_report)
         && with_engine(|e| e.participant.is_some())
@@ -177,6 +178,7 @@ pub(super) fn disconnect() {
         e.rpc = None;
         e.offered.clear();
         e.offer_requests.clear();
+        e.mic_requests.clear();
         e.join_request = None;
         e.status_request = None;
         e.participant = None;
@@ -197,6 +199,7 @@ pub(super) fn disconnect() {
     {
         remote.set_inner_html("");
     }
+    meters::close();
 }
 
 /// Reopen the microphone if its track ended under us (a phone's system can
@@ -332,6 +335,7 @@ pub(super) fn on_wake(ui: Ui) {
 /// A click resumes a capture context that the autoplay policy suspended.
 /// Only the current join's context, and only while it is suspended.
 pub(super) fn resume_audio() {
+    meters::resume();
     if let Some(c) = with_engine(|e| e.audio.clone())
         && c.state() == AudioContextState::Suspended
     {

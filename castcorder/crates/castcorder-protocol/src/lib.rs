@@ -139,6 +139,20 @@ pub enum Request {
         /// Free bytes for new recordings.
         free_bytes: u64,
     },
+    /// This participant's microphone in the call: whether it is muted, and
+    /// the level of its raw microphone (what its track records; never audio).
+    /// Mute is call-only: the recording goes on. Sent when mute toggles and,
+    /// while muted, about ten times a second, so the others see a muted but
+    /// moving level (a report not refreshed for a second or so is stale).
+    /// The host relays it to everyone else in the call ([`Event::MicState`]).
+    /// Answered with [`Response::Done`].
+    MicState {
+        /// Muted in the call.
+        muted: bool,
+        /// Peak level of the raw microphone over the last tenth of a second,
+        /// 0 (silence) to 255 (full scale), linear.
+        level: u8,
+    },
 }
 
 /// One source of one device that cannot be recorded as the recording profile
@@ -380,6 +394,16 @@ pub enum Event {
     /// How much recording room each device has, with the host's own library
     /// volume (sent to producers only, whenever it changes).
     DeviceDisk(Vec<DeviceDisk>),
+    /// Another participant's microphone, as it reported it
+    /// ([`Request::MicState`]), relayed to everyone else in the call.
+    MicState {
+        /// Whose microphone (their forwarded stream id ends in `-<id>`).
+        participant: ParticipantId,
+        /// Muted in the call (their track still records).
+        muted: bool,
+        /// Peak level of their raw microphone, 0 to 255, linear.
+        level: u8,
+    },
 }
 
 /// One device's room for recording, as the host works it out from the device's
@@ -559,6 +583,10 @@ mod tests {
             Request::DiskFree {
                 free_bytes: 5_000_000_000,
             },
+            Request::MicState {
+                muted: true,
+                level: 255,
+            },
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -619,6 +647,11 @@ mod tests {
                     kind: SourceKind::Video,
                     reason: "no codec".into(),
                 },
+            }),
+            CoreMessage::Event(Event::MicState {
+                participant: ParticipantId(2),
+                muted: true,
+                level: 128,
             }),
             CoreMessage::Event(Event::DeviceDisk(vec![DeviceDisk {
                 participant: Some(ParticipantId(2)),
@@ -865,6 +898,23 @@ mod tests {
                 low: true,
             }])),
             vec![7, 1, 0, 0, 2, 3, 1]
+        );
+        // Remote mute and the muted level (appended): the level is one byte, so
+        // 200 is a plain byte here, not a varint.
+        assert_eq!(
+            encode(&Request::MicState {
+                muted: true,
+                level: 200
+            }),
+            vec![11, 1, 200]
+        );
+        assert_eq!(
+            encode(&Event::MicState {
+                participant: ParticipantId(3),
+                muted: false,
+                level: 7
+            }),
+            vec![8, 3, 0, 7]
         );
     }
 

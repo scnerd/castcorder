@@ -440,6 +440,30 @@ impl Call {
         self.names_sent = names;
     }
 
+    /// A participant's microphone state (mute is call-only; while muted its
+    /// raw level keeps coming, about ten times a second): relay it to
+    /// everyone else who has joined. Nothing is kept: a muted device keeps
+    /// reporting, so a late joiner hears of it within a tenth of a second.
+    fn relay_mic(&mut self, from: GuestId, muted: bool, level: u8) -> Response {
+        if !self.names.contains_key(&from) {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "join first".into(),
+            };
+        }
+        let event = Event::MicState {
+            participant: ParticipantId(from.0),
+            muted,
+            level,
+        };
+        for (id, rpc) in &mut self.rpc {
+            if *id != from && self.names.contains_key(id) && rpc.emit(event.clone()).is_err() {
+                warn!(guest = id.0, "microphone state not sent: channel closed");
+            }
+        }
+        Response::Done
+    }
+
     /// A device cannot meet the recording profile: warn, and tell every
     /// producer. The take goes on.
     fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
@@ -1087,6 +1111,7 @@ impl Call {
                     }
                     Request::Room(action) => self.room_action(id, &action),
                     Request::ProfileUnmet(issue) => self.profile_unmet(id, issue),
+                    Request::MicState { muted, level } => self.relay_mic(id, muted, level),
                     Request::DiskFree { free_bytes } => {
                         self.disk.insert(id, free_bytes);
                         Response::Done
