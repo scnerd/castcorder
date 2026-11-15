@@ -116,8 +116,11 @@ pub(super) fn NativeMic() -> impl IntoView {
     };
     view! {
         <Show when=move || state.get().available>
-            <h2>"Microphone on this machine"</h2>
-            <p>
+            <div class="native">
+            <h2>"Or use the microphone on this machine"</h2>
+            <span class="small muted">"The host records it directly, at full quality."</span>
+            <div class="native-row">
+                <label class="sr-only" for="native-device">"Microphone on this machine"</label>
                 <select id="native-device" disabled=move || joined() || busy.get()
                     on:change=move |ev| device.set(event_target_value(&ev))>
                     <option value="">"Default input"</option>
@@ -125,11 +128,12 @@ pub(super) fn NativeMic() -> impl IntoView {
                         <option value=d.0.clone()>{format!("{}{}", d.0, if d.1 { " (default)" } else { "" })}</option>
                     </For>
                 </select>
-                " " <button id="native-join" disabled=move || joined() || busy.get() on:click=move |_| act(true)>
+                <button id="native-join" class="btn" disabled=move || joined() || busy.get() on:click=move |_| act(true)>
                     "Join with this microphone"</button>
-                " " <button id="native-leave" disabled=move || !joined() || busy.get() on:click=move |_| act(false)>
+                <button id="native-leave" class="btn outline" disabled=move || !joined() || busy.get() on:click=move |_| act(false)>
                     "Leave"</button>
-                " " <span id="native-state">{move || match state.get().joined {
+            </div>
+            <span class="small muted"><span id="native-state">{move || match state.get().joined {
                     Some(j) => format!("in the call with {j}"),
                     None => "not in the call".to_string(),
                 }}</span>
@@ -137,8 +141,8 @@ pub(super) fn NativeMic() -> impl IntoView {
                     let e = state.get().error;
                     let m = message.get();
                     if m.is_empty() { e } else { m }
-                }}</code>
-            </p>
+                }}</code></span>
+            </div>
         </Show>
     }
 }

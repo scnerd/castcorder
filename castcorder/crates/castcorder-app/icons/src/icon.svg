@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Castcorder mark: a mic inside two broadcast arcs. Used from 48 px up. -->
+  <rect width="64" height="64" rx="14" fill="#1c2027"/>
+  <rect x="0.5" y="0.5" width="63" height="63" rx="13.5" fill="none" stroke="#ffffff" stroke-opacity="0.14"/>
+  <rect x="27" y="21" width="10" height="19" rx="5" fill="#ffffff"/>
+  <path d="M19 38.5A15 15 0 1 1 45 38.5" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M12.1 42.5A23 23 0 1 1 51.9 42.5" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+  <path d="M32 44v10" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+</svg>

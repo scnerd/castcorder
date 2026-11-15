@@ -2,7 +2,12 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Castcorder</title>
+  <link rel="icon" id="favicon" href="favicon.svg" type="image/svg+xml">
+  <link data-trunk rel="css" href="style.css" />
+  <link data-trunk rel="copy-file" href="favicon.svg" />
+  <link data-trunk rel="copy-file" href="favicon-rec.svg" />
   <link data-trunk rel="rust" href="Cargo.toml" data-bin="app" data-type="main" data-wasm-opt="0" />
   <link data-trunk rel="rust" href="Cargo.toml" data-bin="worker" data-type="worker" data-loader-shim data-wasm-opt="0" />
   <link data-trunk rel="copy-file" href="js/capture-worklet.js" />

@@ -324,6 +324,7 @@ fn content_type(name: &str) -> &'static str {
         Some("wasm") => "application/wasm",
         Some("css") => "text/css",
         Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
         _ => "application/octet-stream",
     }
 }

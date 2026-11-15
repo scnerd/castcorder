@@ -181,6 +181,15 @@ tasks:
       - cd crates/castcorder-client && trunk build --release --dist ../castcorder-app/client
       - cd crates/castcorder-app && cargo tauri build --config tauri.bundle.conf.json {{.EXTRA_CONFIG}} --features {{.FEATURES}} {{.CLI_ARGS}}
 
+  app:icons:
+    desc: Render the app icons (crates/castcorder-app/icons) from their SVG sources in icons/src
+    summary: |
+      icon.svg is the full mark (48 px and up), icon-small.svg the small cut
+      (16-32 px). Writes the PNGs and the multi-size icon.ico tauri.conf.json
+      lists. See scripts/render_icons.py.
+    cmds:
+      - uv run ../scripts/render_icons.py
+
   app:gst:stage:
     desc: Stage the trimmed, LGPL-only GStreamer the Windows installer bundles (crates/castcorder-app/gstreamer)
     summary: |

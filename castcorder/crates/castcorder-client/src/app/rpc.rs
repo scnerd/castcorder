@@ -447,6 +447,14 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     let tile = doc.create_element("div").ok()?;
     tile.set_class_name("tile");
     let _ = tile.set_attribute("data-origin", origin);
+    // Shown while there is no picture (audio only, or camera off).
+    let avatar = doc.create_element("div").ok()?;
+    avatar.set_class_name("tile-avatar");
+    let initials = doc.create_element("span").ok()?;
+    initials.set_class_name("tile-initials");
+    initials.set_text_content(Some(&super::view::initials(&tile_name(origin))));
+    let _ = avatar.append_child(&initials);
+    let _ = tile.append_child(&avatar);
     let label = doc.create_element("div").ok()?;
     label.set_class_name("tile-name");
     label.set_text_content(Some(&tile_name(origin)));
@@ -485,7 +493,11 @@ fn relabel_tiles() {
             && let Some(origin) = t.get_attribute("data-origin")
             && let Ok(Some(label)) = t.query_selector(".tile-name")
         {
-            label.set_text_content(Some(&tile_name(&origin)));
+            let name = tile_name(&origin);
+            if let Ok(Some(i)) = t.query_selector(".tile-initials") {
+                i.set_text_content(Some(&super::view::initials(&name)));
+            }
+            label.set_text_content(Some(&name));
         }
     }
 }

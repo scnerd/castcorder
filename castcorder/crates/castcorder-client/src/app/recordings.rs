@@ -80,16 +80,16 @@ pub(super) fn Recordings(ui: Ui) -> impl IntoView {
     view! {
         <h3>"Recordings"</h3>
         <Show when=move || folder().is_some()>
-            <p id="recordings-folder-row">
+            <p id="recordings-folder-row" class="small">
                 "Saved on this computer in " <code id="recordings-folder">{move || folder().unwrap_or_default()}</code>
-                " " <button id="open-folder" on:click=on_open>"Open recordings folder"</button>
+                " " <button id="open-folder" class="btn" on:click=on_open>"Open recordings folder"</button>
                 " " <span id="open-folder-result">{move || result.get()}</span>
             </p>
         </Show>
         <Show when=move || state().is_some() && folder().is_none()>
             <p>"Tracks are saved on the host's computer."</p>
         </Show>
-        <ul id="recordings">
+        <ul id="recordings" class="list">
             <For each=takes key=|t| format!("{:?}", t) let:t>
                 <li class="take" data-take=t.take.0.to_string()>
                     {format!("Take {} ({})", t.take.0, t.dir)}
@@ -123,11 +123,11 @@ pub(super) fn YourRecordings(ui: Ui) -> impl IntoView {
         rows(&listed, &progress, &ui.delivered.get())
     };
     view! {
-        <h2>"Your recordings"</h2>
-        <p>"Your recordings are saved in this browser first and sent to the host after each take; "
+        <h3>"Your recordings"</h3>
+        <p class="small muted">"Your recordings are saved in this browser first and sent to the host after each take; "
            "each is removed here once the host has it. Keep this page open (or come back to it "
            "in this same browser) until every recording says delivered."</p>
-        <ul id="your-recordings">
+        <ul id="your-recordings" class="list small">
             <For each=list key=|(n, d)| format!("{n}{d:?}") let:row>
                 <li data-name=row.0.clone() data-state=delivery_key(row.1)>
                     {format!("{}: {}", row.0, row.1.label())}

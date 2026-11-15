@@ -340,6 +340,31 @@ struct Ui {
     progress: RwSignal<std::collections::BTreeMap<String, u8>>,
     /// Items the host confirmed (their local copies are deleted).
     delivered: RwSignal<BTreeSet<String>>,
+    /// Muted in the call: the live stream's microphone is off. The raw
+    /// microphone, which is the recording, is never touched.
+    muted: RwSignal<bool>,
+    /// The first-mute explanation is showing.
+    mute_tip: RwSignal<bool>,
+    /// Which side panel is open.
+    panel: RwSignal<Panel>,
+    /// Show this participant's own camera in its tile (others see it either way).
+    self_view: RwSignal<bool>,
+    /// The last `WAVE_LEN` raw microphone peaks, oldest first: the dock waveform.
+    levels: RwSignal<VecDeque<f64>>,
+}
+
+/// How many level readings the dock waveform shows.
+const WAVE_LEN: usize = 36;
+
+/// The side panel. `Auto` until the person picks one: People for producers,
+/// closed for everyone else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Panel {
+    Auto,
+    Closed,
+    People,
+    Recordings,
+    Transcript,
 }
 
 impl Ui {
@@ -422,7 +447,16 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                     let _ = resolve.call1(&JsValue::NULL, &d);
                 }
             }
-            "level" => ui.level.set(num(&d, "peak")),
+            "level" => {
+                let peak = num(&d, "peak");
+                ui.level.set(peak);
+                ui.levels.update(|v| {
+                    v.push_back(peak);
+                    while v.len() > WAVE_LEN {
+                        v.pop_front();
+                    }
+                });
+            }
             "recording" => ui
                 .recording
                 .set(format!("recording {}", string(&d, "name"))),
