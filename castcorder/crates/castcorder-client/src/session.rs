@@ -161,19 +161,55 @@ impl ClockWatch {
     }
 }
 
-/// Smallest timestamp jump reported as lost audio, in us (whatever the
-/// buffer length: rounding and capture-time jitter stay well below it).
+/// Smallest offset step reported as lost audio, in us (whatever the buffer
+/// length: rounding and capture-time jitter stay well below it).
 const GAP_MIN_US: f64 = 2000.0;
 
+/// How long a step must persist before it is reported, in us of audio.
+const GAP_CONFIRM_US: f64 = 50_000.0;
+
+/// Buffers whose offsets set the baseline before any step is looked for.
+const WARMUP_BUFFERS: usize = 5;
+
+/// How fast the baseline follows slow clock drift (per buffer).
+const BASELINE_ALPHA: f64 = 0.05;
+
+/// Audio lost (or overlapped) before the reader got it, as found by
+/// [`TimestampWatch`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimestampJump {
+    /// Frames missing (positive) or overlapping (negative).
+    pub frames: i64,
+    /// Frames the reader passed on between the start of the jump and the
+    /// buffer that confirmed it (so the jump sits that far back).
+    pub frames_ago: u64,
+}
+
+#[derive(Clone, Debug)]
+struct Step {
+    /// Frames written when the step began.
+    start: u64,
+    /// Sum of the offset deviation over the buffers that confirm it.
+    sum: f64,
+    count: u32,
+    /// Audio covered by those buffers, in us.
+    span_us: f64,
+}
+
 /// Detects audio lost before the reader got it, on a path whose buffers carry
-/// capture timestamps (MediaStreamTrackProcessor's AudioData): each buffer
-/// should start where the previous one ended. A buffer the source's queue
-/// dropped, or one the capture never delivered, shows as a forward jump.
-/// Each buffer is checked against the one before it, so drift between the
-/// sample clock and the timestamp clock never accumulates into a report.
+/// capture timestamps (MediaStreamTrackProcessor's AudioData). The offset of
+/// each timestamp from where the frames written so far put it moves by the
+/// lost duration when audio is dropped, and stays there; capture-time jitter
+/// is a spike that returns, and drift moves it slowly. So a step is reported
+/// only once it has persisted for [`GAP_CONFIRM_US`], against a baseline that
+/// follows drift.
 #[derive(Clone, Debug, Default)]
 pub struct TimestampWatch {
-    next_us: Option<f64>,
+    t0_us: Option<f64>,
+    written: u64,
+    warmup: Vec<f64>,
+    base: f64,
+    step: Option<Step>,
 }
 
 impl TimestampWatch {
@@ -182,18 +218,62 @@ impl TimestampWatch {
         Self::default()
     }
 
-    /// A buffer of `frames` at `rate` stamped `ts_us`. Returns the frames
-    /// missing just before it (positive) or overlapping the previous buffer
-    /// (negative) when the jump is at least half a buffer and 2 ms; jitter
-    /// below that returns `None`.
-    pub fn observe(&mut self, ts_us: f64, frames: u64, rate: u32) -> Option<i64> {
-        let rate = f64::from(rate.max(1));
-        let dur_us = frames as f64 * 1e6 / rate;
-        let gap = self.next_us.replace(ts_us + dur_us).map(|e| ts_us - e)?;
-        if gap.abs() < (dur_us / 2.0).max(GAP_MIN_US) {
+    /// A buffer of `frames` at `rate` stamped `ts_us`. Returns the jump once
+    /// a step in the timestamps has persisted; jitter and drift return `None`.
+    pub fn observe(&mut self, ts_us: f64, frames: u64, rate: u32) -> Option<TimestampJump> {
+        let rate_hz = f64::from(rate.max(1));
+        let dur_us = frames as f64 * 1e6 / rate_hz;
+        let t0 = *self.t0_us.get_or_insert(ts_us);
+        let before = self.written;
+        self.written += frames;
+        let off = ts_us - (t0 + before as f64 * 1e6 / rate_hz);
+        if self.warmup.len() < WARMUP_BUFFERS {
+            self.warmup.push(off);
+            if self.warmup.len() == WARMUP_BUFFERS {
+                let mut w = self.warmup.clone();
+                w.sort_by(f64::total_cmp);
+                self.base = w[WARMUP_BUFFERS / 2];
+            }
             return None;
         }
-        Some((gap * rate / 1e6).round() as i64)
+        let dev = off - self.base;
+        let min = (dur_us / 2.0).max(GAP_MIN_US);
+        if let Some(step) = self.step.as_mut() {
+            let mean = step.sum / f64::from(step.count);
+            if dev.abs() < min {
+                // Back at the baseline: it was jitter.
+                self.step = None;
+            } else if (dev - mean).abs() < GAP_MIN_US.max(dur_us / 4.0) {
+                step.sum += dev;
+                step.count += 1;
+                step.span_us += dur_us;
+                if step.count >= 2 && step.span_us >= GAP_CONFIRM_US {
+                    let size = step.sum / f64::from(step.count);
+                    let ago = before.saturating_sub(step.start);
+                    self.base += size;
+                    self.step = None;
+                    return Some(TimestampJump {
+                        frames: (size * rate_hz / 1e6).round() as i64,
+                        frames_ago: ago,
+                    });
+                }
+                return None;
+            } else {
+                // A different step: start over from here.
+                self.step = None;
+            }
+        }
+        if dev.abs() >= min {
+            self.step = Some(Step {
+                start: before,
+                sum: dev,
+                count: 1,
+                span_us: dur_us,
+            });
+        } else {
+            self.base += dev * BASELINE_ALPHA;
+        }
+        None
     }
 }
 
@@ -221,37 +301,90 @@ mod tests {
     }
 
     /// 10 ms buffers at 44.1 kHz stamped with up to 150 us of jitter (as
-    /// Chromium's are, rounded to 100 us); buffers in `lost` never arrive.
-    fn stamps(lost: &[u64]) -> Vec<i64> {
+    /// Chromium does, rounded to 100 us); buffers in `lost` never arrive,
+    /// `late` adds delay to single timestamps and `drift_ppm` is how much
+    /// faster the timestamp clock runs than the samples.
+    fn stamps_with(
+        lost: &[u64],
+        late: &[(u64, f64)],
+        drift_ppm: f64,
+        n: u64,
+    ) -> Vec<TimestampJump> {
         let mut w = TimestampWatch::new();
-        (0..1000u64)
+        (0..n)
             .filter(|b| !lost.contains(b))
             .filter_map(|b| {
                 let jitter = ((b * 7919) % 300) as f64 - 150.0;
-                w.observe(b as f64 * 10_000.0 + jitter, 441, 44_100)
+                let extra: f64 = late.iter().filter(|(l, _)| *l == b).map(|(_, d)| d).sum();
+                let ts = b as f64 * 10_000.0 * (1.0 + drift_ppm * 1e-6) + jitter + extra;
+                w.observe(ts, 441, 44_100)
             })
             .collect()
     }
 
+    fn stamps(lost: &[u64]) -> Vec<TimestampJump> {
+        stamps_with(lost, &[], 0.0, 1000)
+    }
+
     #[test]
     fn timestamp_watch_ignores_jitter() {
-        assert_eq!(stamps(&[]), Vec::<i64>::new());
+        assert_eq!(stamps(&[]), Vec::new());
     }
 
     #[test]
-    fn timestamp_watch_reports_lost_buffers() {
-        // One buffer, then four in a row (the 40 ms of cast-47x).
+    fn timestamp_watch_ignores_a_single_late_timestamp() {
+        // cast-71q: one timestamp 10 ms late, audio intact.
+        assert_eq!(stamps_with(&[], &[(120, 10_000.0)], 0.0, 1000), Vec::new());
+        assert_eq!(stamps_with(&[], &[(120, -10_000.0)], 0.0, 1000), Vec::new());
+        let two = [(120, 10_000.0), (121, 10_000.0)];
+        assert_eq!(stamps_with(&[], &two, 0.0, 1000), Vec::new());
+    }
+
+    #[test]
+    fn timestamp_watch_ignores_slow_drift() {
+        // 100 ppm for 10 minutes of 10 ms buffers: 60 ms of total drift.
+        assert_eq!(stamps_with(&[], &[], 100.0, 60_000), Vec::new());
+        assert_eq!(stamps_with(&[], &[], -100.0, 60_000), Vec::new());
+    }
+
+    #[test]
+    fn timestamp_watch_reports_a_10ms_drop_where_it_began() {
+        let r = stamps(&[100]);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!((r[0].frames - 441).abs() <= 15, "{r:?}");
+        // Confirmed after the 50 ms window, so the jump sits 4+ buffers back.
+        assert!(r[0].frames_ago >= 441 * 4, "{r:?}");
+        assert!(r[0].frames_ago <= 441 * 6, "{r:?}");
+    }
+
+    #[test]
+    fn timestamp_watch_reports_a_200ms_drop_once() {
+        let lost: Vec<u64> = (300..320).collect();
+        let r = stamps(&lost);
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!((r[0].frames - 8820).abs() <= 15, "{r:?}");
+    }
+
+    #[test]
+    fn timestamp_watch_reports_separate_drops() {
         let r = stamps(&[100, 500, 501, 502, 503]);
         assert_eq!(r.len(), 2, "{r:?}");
-        assert!((r[0] - 441).abs() <= 15, "{r:?}");
-        assert!((r[1] - 1764).abs() <= 15, "{r:?}");
+        assert!((r[0].frames - 441).abs() <= 15, "{r:?}");
+        assert!((r[1].frames - 1764).abs() <= 15, "{r:?}");
     }
 
     #[test]
-    fn timestamp_watch_reports_an_overlap() {
+    fn timestamp_watch_reports_a_persistent_overlap() {
+        // From buffer 100 on, every timestamp is 10 ms early.
         let mut w = TimestampWatch::new();
-        assert_eq!(w.observe(0.0, 441, 44_100), None);
-        assert_eq!(w.observe(0.0, 441, 44_100), Some(-441));
+        let r: Vec<_> = (0..300u64)
+            .filter_map(|b| {
+                let step = if b >= 100 { -10_000.0 } else { 0.0 };
+                w.observe(b as f64 * 10_000.0 + step, 441, 44_100)
+            })
+            .collect();
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!((r[0].frames + 441).abs() <= 15, "{r:?}");
     }
 
     #[test]
