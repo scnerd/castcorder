@@ -20,6 +20,13 @@
 // answer with its own new relay candidate, the call moves to the new
 // allocation without a reconnect, audio keeps flowing once the old
 // allocation is deleted, and a second take syncs.
+// Then relay metering: the rendezvous scrapes coturn's Prometheus exporter
+// (--prometheus-username-labels, published on a Docker-picked TCP port) and,
+// once the guests leave and their sessions end, its admin /usage (and the
+// `usage` subcommand on its data dir) shows bytes relayed for the host key.
+// Restarted on the same port and data dir with --relay-budget 1, it refuses
+// relay credentials with relay_quota: the reconnecting host logs it, and a
+// guest's hello for that host carries it with no turn: server.
 //
 // Every port is picked by the OS. CARGO_TARGET_DIR and CASTCORDER_DIST select
 // other build dirs; DOCKER_HOST is honoured by the docker CLI.
@@ -61,6 +68,7 @@ mkdirSync(RESULTS, { recursive: true });
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
 writeWav16(INPUT_WAV, makeInput());
 const LIBRARY = join(RESULTS, 'library-relay');
+const RV_DATA = join(RESULTS, 'rendezvous-data-' + process.pid);
 rmSync(LIBRARY, { recursive: true, force: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -189,9 +197,10 @@ try {
   } catch (e) {
     throw new Error('docker is not reachable (set DOCKER_HOST?): ' + String(e.stderr || e.message).trim());
   }
-  docker(['run', '-d', '--rm', '--name', CONTAINER, '-p', '3478/udp', COTURN_IMAGE,
+  docker(['run', '-d', '--rm', '--name', CONTAINER, '-p', '3478/udp', '-p', '9641/tcp', COTURN_IMAGE,
     '-n', '--listening-port=3478', '--realm=castcorder.test', '--fingerprint',
     '--use-auth-secret', '--static-auth-secret=' + SECRET, '--min-port=49160', '--max-port=49200',
+    '--prometheus', '--prometheus-username-labels', '--user-quota=32', '--max-bps=2500000',
     '--no-tls', '--no-dtls', '--no-tcp-relay', '--no-cli', '--log-file=stdout', '--simple-log', '--verbose']);
   const mapped = docker(['port', CONTAINER, '3478/udp']).split('\n')[0];
   const TURN_PORT = Number(mapped.split(':').pop());
@@ -199,9 +208,13 @@ try {
   const TURN_URL = 'turn:' + TURN_IP + ':' + TURN_PORT + '?transport=udp';
   console.log('coturn (' + COTURN_IMAGE + ', Docker) answering STUN at ' + TURN_IP + ':' + TURN_PORT + '/udp');
 
-  rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist,
-    '--turn', TURN_URL, '--turn-ttl', String(TTL)], 'rendezvous', { CASTCORDER_TURN_SECRET: SECRET });
-  const [, RV_HTTP] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
+  const METRICS_PORT = Number(docker(['port', CONTAINER, '9641/tcp']).split('\n')[0].split(':').pop());
+  const METRICS_URL = 'http://' + TURN_IP + ':' + METRICS_PORT + '/metrics';
+  const rvArgs = (listen) => ['--listen', listen, '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist,
+    '--turn', TURN_URL, '--turn-ttl', String(TTL), '--turn-metrics', METRICS_URL, '--turn-metrics-interval', '2',
+    '--data-dir', RV_DATA, '--admin', '127.0.0.1:0'];
+  rv = start(RV_EXE, rvArgs('127.0.0.1:0'), 'rendezvous', { CASTCORDER_TURN_SECRET: SECRET });
+  const [, RV_HTTP, , RV_ADMIN] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+) admin=(\S+)/, 'RENDEZVOUS_READY');
   console.log('rendezvous at ' + RV_HTTP);
 
   // The host binds the local address that routes to the TURN server (loopback
@@ -332,6 +345,37 @@ try {
   check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 4, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
+
+  // Relay metering. The guests leave, so their coturn sessions end and coturn
+  // reports their bytes (it counts a session when it ends).
+  const HOST_ID = link.split('#')[1].split('.')[0];
+  for (const p of [A, B]) await p.close().catch(() => {});
+  const usageOf = async () => {
+    const r = await fetch('http://' + RV_ADMIN + '/usage').then((x) => x.json()).catch(() => null);
+    return ((r && r.hosts) || []).find((h) => h.host === HOST_ID);
+  };
+  const used = await waitFor(async () => { const u = await usageOf(); return u && u.bytes > 0 ? u : null; },
+    'relay usage for the host key', 180000, 1000).catch(() => null);
+  check(!!used, 'the rendezvous counted bytes relayed for the host key: ' + (used ? used.bytes : 'none'));
+  const cli = JSON.parse(execFileSync(RV_EXE, ['usage', '--data-dir', RV_DATA, '--json'], { encoding: 'utf8' }));
+  const stored = cli.hosts.find((h) => h.host === HOST_ID);
+  check(!!stored && stored.bytes > 0, 'the usage subcommand reads it from the data dir: ' + (stored ? stored.bytes : 'none'));
+  // Restart with a tiny budget on the same port and data dir.
+  rv.p.kill();
+  await waitFor(() => rv.exited !== undefined || rv.p.signalCode, 'rendezvous stopped', 10000);
+  const rv2 = start(RV_EXE, [...rvArgs(RV_HTTP), '--relay-budget', '1'], 'rendezvous-budget', { CASTCORDER_TURN_SECRET: SECRET });
+  await line(rv2, /RENDEZVOUS_READY/, 'RENDEZVOUS_READY (budget)');
+  const quotaLogged = await waitFor(() => /relay_quota/.test(host.err), 'host logs relay_quota', 60000).then(() => true, () => false);
+  check(quotaLogged, 'the host, reconnected, logged that the rendezvous refused relay credentials with relay_quota');
+  const guestHello = await new Promise((resolve, reject) => {
+    const ws = new WebSocket('ws://' + RV_HTTP + '/ws?host=' + HOST_ID);
+    const t = setTimeout(() => { ws.close(); reject(new Error('no hello')); }, 10000);
+    ws.onmessage = (ev) => { clearTimeout(t); ws.close(); resolve(JSON.parse(String(ev.data))); };
+    ws.onerror = () => { clearTimeout(t); reject(new Error('websocket error')); };
+  });
+  const turnGiven = (guestHello.ice_servers || []).some((s) => s.urls.some((u) => u.startsWith('turn:')));
+  check(String(guestHello.relay_error || '').startsWith('relay_quota') && !turnGiven,
+    'a guest calling the host over budget gets no relay, with relay_error ' + guestHello.relay_error);
 
   coturnLog = docker(['logs', CONTAINER]);
   check(/session \d+: new, realm=<castcorder.test>/.test(coturnLog) || coturnLog.includes('ALLOCATE processed, success'),

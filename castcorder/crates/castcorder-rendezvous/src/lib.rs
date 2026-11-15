@@ -15,13 +15,20 @@
 //!   the project-hosted site of ADR 0002, so a call link's page and its
 //!   mailbox share one secure origin when deployed behind TLS.
 //!
-//! Stateless beyond live connections: nothing is stored on disk.
-//! Wire protocol: `castcorder_link::wire`. Structured `tracing` logs.
+//! Stateless beyond live connections, except the relay usage ledger
+//! ([`usage`]): one small JSON file in the data dir, when relay metering is
+//! on. Wire protocol: `castcorder_link::wire`. Structured `tracing` logs.
 //! With a TURN server configured, a host gets short-lived relay credentials
 //! ([`turn`]) in its `registered` frame, once it has proved its key, and a
 //! guest in the hello for the host named in the WebSocket URL, only while
 //! that host is online (otherwise the hello's `relay_error` says why).
+//! With metering ([`server::Metering`]) the rendezvous scrapes coturn's
+//! Prometheus exporter for bytes relayed per host key, and a host key over
+//! its budget gets no relay credentials (`relay_quota`); direct connections
+//! keep working. An operator reads usage per host key on the admin listener
+//! (`GET /usage`) or with `castcorder-rendezvous usage`.
 
 pub mod mailbox;
 pub mod server;
 pub mod turn;
+pub mod usage;

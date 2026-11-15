@@ -61,6 +61,10 @@ pub mod code {
     pub const NO_SUCH_GUEST: &str = "no_such_guest";
     /// A newer connection registered the same host key.
     pub const REPLACED: &str = "replaced";
+    /// The host key has used up its relay (TURN) budget: no relay credentials
+    /// are minted for it until its usage falls back under the budget. Direct
+    /// connections are unaffected.
+    pub const RELAY_QUOTA: &str = "relay_quota";
 }
 
 /// A frame from the server.
@@ -87,9 +91,14 @@ pub enum ServerMsg {
         /// The host's TCP source address as the server saw it.
         observed: String,
         /// Relay (TURN) credentials for this host, minted once it proved its
-        /// key; empty without a TURN server (or when rate limited).
+        /// key; empty without a TURN server (or when refused, see
+        /// `relay_error`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ice_servers: Vec<IceServer>,
+        /// Why relay credentials were not given although the server has a
+        /// TURN server: `<code>: <message>`, e.g. [`code::RELAY_QUOTA`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_error: Option<String>,
     },
     /// A guest's sealed offer, to a host.
     Offer {
@@ -226,6 +235,7 @@ mod tests {
             Some(ServerMsg::Registered {
                 observed: "1.2.3.4:5".into(),
                 ice_servers: vec![],
+                relay_error: None,
             })
         );
         assert_eq!(

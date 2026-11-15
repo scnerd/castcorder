@@ -21,6 +21,16 @@ services:
       # environment below. They expire after --turn-ttl seconds; hosts renew them.
       - --turn
       - "turn:${TURN_HOST:-localhost}:3478?transport=udp"
+      # Relay metering: bytes relayed per host key, scraped from coturn's
+      # Prometheus exporter and kept in the volume below. A host key over the
+      # budget (per 30 days) gets no relay credentials (relay_quota). View it:
+      #   docker compose exec rendezvous castcorder-rendezvous usage --data-dir /var/lib/castcorder
+      - --turn-metrics
+      - http://coturn:9641/metrics
+      - --data-dir
+      - /var/lib/castcorder
+      - --relay-budget
+      - ${CASTCORDER_RELAY_BUDGET:-50G}
     environment:
       RUST_LOG: info
       CASTCORDER_TURN_SECRET: ${CASTCORDER_TURN_SECRET:-castcorder-dev-secret}
@@ -29,6 +39,9 @@ services:
         source: ./castcorder/crates/castcorder-client/${CLIENT_DIST:-dist}
         target: /srv/client/0.0.0
         read_only: true
+      - type: volume
+        source: rendezvous-data
+        target: /var/lib/castcorder
     ports:
       - "8080:8080/tcp"
       - "3479:3479/udp"
@@ -51,3 +64,6 @@ services:
       - --static-auth-secret=${CASTCORDER_TURN_SECRET:-castcorder-dev-secret}
       # Relayed addresses are announced as this IP, not the container's.
       - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+
+volumes:
+  rendezvous-data:

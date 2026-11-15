@@ -6,6 +6,9 @@
 //! - A host gets its own credentials in `registered`, after proving its key.
 //! - While it is registered, a guest naming it gets credentials; once it has
 //!   gone, no more.
+//! - A host key over its relay budget (a stored ledger) gets no credentials,
+//!   as a host or for its guests (`relay_quota`); the admin listener reports
+//!   its usage.
 
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -15,14 +18,20 @@ use castcorder_link::wire::{
     ClientMsg, IceServer, ServerMsg, b64, code, from_json, to_json, unb64,
 };
 use castcorder_rendezvous::mailbox::Limits;
-use castcorder_rendezvous::server::{Config, bind};
+use castcorder_rendezvous::server::{Config, Metering, bind};
 use castcorder_rendezvous::turn::TurnConfig;
+use castcorder_rendezvous::usage::{LEDGER_FILE, Ledger, save};
 use tungstenite::{Message, WebSocket};
 
 type Ws = WebSocket<TcpStream>;
 
 /// Start the real server on an OS-picked loopback port, on its own runtime.
 fn start() -> SocketAddr {
+    start_with(None).0
+}
+
+/// The same with relay metering; also returns the admin address.
+fn start_with(metering: Option<Metering>) -> (SocketAddr, Option<SocketAddr>) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
@@ -39,10 +48,11 @@ fn start() -> SocketAddr {
                     secret: "test-secret".into(),
                     ttl: Duration::from_secs(600),
                 }),
+                metering,
             })
             .await
             .expect("bind");
-            tx.send(bound.http).unwrap();
+            tx.send((bound.http, bound.admin)).unwrap();
             bound.run().await.expect("serve");
         });
     });
@@ -149,4 +159,93 @@ fn relay_credentials_only_for_a_host_that_is_online() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn register(addr: SocketAddr, key: &HostKey) -> (Ws, Vec<IceServer>, Option<String>) {
+    let id = key.id().encode();
+    let mut ws = connect(addr, &id);
+    let (nonce, _, _) = hello(&mut ws);
+    let reg = ClientMsg::Register {
+        host: id,
+        sig: b64(&key.sign_register(&unb64(&nonce).unwrap())),
+    };
+    ws.send(Message::Text(to_json(&reg).into())).unwrap();
+    match read(&mut ws) {
+        ServerMsg::Registered {
+            ice_servers,
+            relay_error,
+            ..
+        } => (ws, ice_servers, relay_error),
+        other => panic!("expected registered, got {other:?}"),
+    }
+}
+
+fn http_get(addr: SocketAddr, path: &str) -> String {
+    use std::io::{Read, Write};
+    let mut s = TcpStream::connect(addr).expect("connect admin");
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(s, "GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut body = String::new();
+    s.read_to_string(&mut body).unwrap();
+    body
+}
+
+#[test]
+fn a_host_key_over_its_relay_budget_gets_no_relay_credentials() {
+    let over = HostKey::from_secret([21; 32]);
+    let under = HostKey::from_secret([22; 32]);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // A ledger left by an earlier run: one host key over the budget.
+    let dir = std::env::temp_dir().join(format!("cc-rv-quota-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut ledger = Ledger::default();
+    ledger.record(&over.id(), 5_000, now);
+    ledger.record(&under.id(), 10, now);
+    save(&dir.join(LEDGER_FILE), &ledger.to_json()).unwrap();
+
+    let (addr, admin) = start_with(Some(Metering {
+        metrics_url: None,
+        interval: Duration::from_secs(30),
+        data_dir: Some(dir.clone()),
+        budget: Some(1_000),
+        admin: Some("127.0.0.1:0".parse().unwrap()),
+    }));
+
+    // Over budget: registered, but no relay, and the frame says why.
+    let (_over_ws, ice, why) = register(addr, &over);
+    assert!(turn_users(&ice).is_empty(), "{ice:?}");
+    let why = why.expect("a relay error");
+    assert!(why.starts_with(code::RELAY_QUOTA), "{why}");
+    // A guest calling it: the same in the hello.
+    let (_, ice, why) = hello(&mut connect(addr, &over.id().encode()));
+    assert!(turn_users(&ice).is_empty(), "{ice:?}");
+    assert!(why.unwrap().starts_with(code::RELAY_QUOTA));
+
+    // Under budget: minted as usual.
+    let (_under_ws, ice, why) = register(addr, &under);
+    assert_eq!(turn_users(&ice).len(), 1, "{ice:?}");
+    assert_eq!(why, None);
+    let (_, ice, why) = hello(&mut connect(addr, &under.id().encode()));
+    assert_eq!(turn_users(&ice).len(), 1);
+    assert_eq!(why, None);
+
+    // The operator's view on the admin listener.
+    let resp = http_get(admin.expect("admin bound"), "/usage");
+    assert!(
+        resp.starts_with("HTTP/1.0 200") || resp.starts_with("HTTP/1.1 200"),
+        "{resp}"
+    );
+    let body = resp.split_once("\r\n\r\n").unwrap().1;
+    assert!(
+        body.contains(&format!(
+            "{{\"host\":\"{}\",\"bytes\":5000,\"over_budget\":true}}",
+            over.id().encode()
+        )),
+        "{body}"
+    );
+    assert!(body.contains("\"budget_bytes\":1000"), "{body}");
+    std::fs::remove_dir_all(&dir).ok();
 }

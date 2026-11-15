@@ -21,8 +21,11 @@ base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 castcorder-link.workspace = true
 getrandom = "0.3"
 hmac = "0.13"
+serde.workspace = true
+serde_json.workspace = true
 sha1 = { version = "0.11", default-features = false }
 tokio = { version = "1", features = [
+  "io-util",
   "fs",
   "macros",
   "net",
