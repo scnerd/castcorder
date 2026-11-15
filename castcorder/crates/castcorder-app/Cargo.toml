@@ -24,6 +24,7 @@ desktop = [
   "dep:tauri",
   "dep:tauri-build",
   "dep:tauri-plugin-autostart",
+  "dep:tauri-plugin-clipboard-manager",
   "dep:tauri-plugin-deep-link",
   "dep:tauri-plugin-single-instance",
   # generate_context! expands to serde_json paths.
@@ -40,6 +41,7 @@ tracing.workspace = true
 serde_json = { workspace = true, optional = true }
 tauri = { version = "2", optional = true, features = ["tray-icon"] }
 tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
 tauri-plugin-deep-link = { version = "2", optional = true }
 # Windows and Linux deliver a deep link by starting a second process; this
 # hands it to the running app instead of starting a second host.

@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 use std::sync::Mutex;
 
-use castcorder_host::{Config, NativeInput, NativeState, Running};
+use castcorder_host::{Config, LiveStatus, NativeInput, NativeState, Running};
 
 /// What the window and the tray show about the running host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,6 +95,22 @@ impl HostControl {
             .map(Running::native_state)
     }
 
+    /// The call as it is now (guests, recording take, syncing outboxes), if
+    /// the host is running.
+    pub fn live_status(&self) -> Option<LiveStatus> {
+        self.running.lock().ok()?.as_ref()?.live_status()
+    }
+
+    /// Rotate the call secret (the old call link stops admitting anyone) and
+    /// return the new call link, if the host is reachable through a rendezvous.
+    pub fn regenerate_link(&self) -> Result<Option<String>, String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .regenerate_link()
+    }
+
     /// Finish the host's open files and stop it; nothing happens if it is not
     /// running. Its ports are free when this returns.
     pub fn stop(&self) {
@@ -119,5 +135,41 @@ fn status(r: &Running) -> HostStatus {
         lan_links: r.lan_links().to_vec(),
         udp_addr: r.udp_addr(),
         call_link: r.call_link(),
+    }
+}
+
+/// The one line the tray shows for `live`: guests, the recording take (or
+/// idle) and outboxes still syncing.
+pub fn tray_text(live: &LiveStatus) -> String {
+    let guests = match live.guests {
+        1 => "1 guest".to_string(),
+        n => format!("{n} guests"),
+    };
+    let take = match live.recording {
+        Some(t) => format!("recording take {t}"),
+        None => "not recording".to_string(),
+    };
+    let mut text = format!("{guests}, {take}");
+    if live.syncing > 0 {
+        text.push_str(&format!(", syncing {}", live.syncing));
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_text_says_guests_take_and_sync() {
+        let mut live = LiveStatus::default();
+        assert_eq!(tray_text(&live), "0 guests, not recording");
+        live.guests = 1;
+        live.recording = Some(3);
+        assert_eq!(tray_text(&live), "1 guest, recording take 3");
+        live.guests = 2;
+        live.recording = None;
+        live.syncing = 1;
+        assert_eq!(tray_text(&live), "2 guests, not recording, syncing 1");
     }
 }

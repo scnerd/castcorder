@@ -164,6 +164,7 @@ pub fn native_capture_check() -> Result<Vec<GstElement>, String> {
 }
 
 pub use args::USAGE;
+pub use call::LiveStatus;
 pub use participant::{NativeDevice, NativeInput, NativeState};
 
 fn wall_ms() -> u64 {
@@ -319,6 +320,31 @@ impl Running {
     /// The call link for guests anywhere, once registered with the rendezvous.
     pub fn call_link(&self) -> Option<String> {
         self.call_link.lock().ok().and_then(|l| l.clone())
+    }
+
+    /// The live status (guests, recording take, syncing outboxes), asked of
+    /// the call's thread; `None` once the host is stopping.
+    pub fn live_status(&self) -> Option<LiveStatus> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher.tx.send(call::Command::Live { reply }).ok()?;
+        rx.recv_timeout(Duration::from_secs(2)).ok()
+    }
+
+    /// Rotate the call secret: the old call link stops admitting anyone (guests
+    /// in the call stay). The new link, if reachable through a rendezvous.
+    pub fn regenerate_link(&self) -> Result<Option<String>, String> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::RegenerateLink { reply })
+            .map_err(|_| "the host is stopping")?;
+        let link = rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the host did not answer")??;
+        if let (Some(l), Ok(mut slot)) = (&link, self.call_link.lock()) {
+            *slot = Some(l.clone());
+        }
+        Ok(link)
     }
 
     /// What finishes the host's open files (for a Ctrl+C handler).
