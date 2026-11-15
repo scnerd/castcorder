@@ -85,7 +85,8 @@ export async function takeChecks(A, B) {
     const m = join(LOGS_DIR, 'manifest.jsonl');
     const verified = existsSync(m)
       ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
-    return verified >= 2 && devicesWithLogs().size >= 2;
+    return verified >= 2 && devicesWithLogs().size >= 2
+      && !readdirSync(LOGS_DIR).some((f) => f.endsWith('.obao') || f.endsWith('.journal'));
   }, 'both guests\' log files verified on the host', 60000, 250);
   const logFiles = readdirSync(LOGS_DIR).sort();
   console.log('host logs: ' + logFiles.join(' '));
