@@ -22,12 +22,13 @@ use std::time::Duration;
 
 use castcorder_app::AppArgs;
 use castcorder_app::deeplink;
-use castcorder_app::host_control::HostControl;
+use castcorder_app::host_control::{HostControl, tray_text};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
 
 /// The window with the host's producer page.
@@ -76,6 +77,7 @@ fn main() {
     }
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
@@ -111,6 +113,16 @@ fn main() {
                 if !ours {
                     eprintln!("castcorder-app: smoke run loaded {url}, not the host's page");
                     std::process::exit(1);
+                }
+                // The tray's status snapshot answers: nobody is in the call.
+                match webview.state::<Shell>().host.live_status() {
+                    Some(live) if live.guests == 0 && live.recording.is_none() => {
+                        println!("APP_STATUS {}", tray_text(&live));
+                    }
+                    other => {
+                        eprintln!("castcorder-app: smoke run got status {other:?}");
+                        std::process::exit(1);
+                    }
                 }
                 println!("APP_READY url={url}");
                 quit(webview.app_handle());
@@ -244,10 +256,23 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit (stop hosting)", true, None::<&str>)?;
+    let status_item = MenuItem::with_id(app, "status", "Starting", false, None::<&str>)?;
+    let copy = MenuItem::with_id(app, "copy_link", "Copy call link", true, None::<&str>)?;
+    let regen = MenuItem::with_id(
+        app,
+        "regen_link",
+        "Regenerate call link",
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(
         app,
         &[
+            &status_item,
+            &PredefinedMenuItem::separator(app)?,
             &open,
+            &copy,
+            &regen,
             &login,
             &PredefinedMenuItem::separator(app)?,
             &quit_item,
@@ -272,6 +297,16 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
                 }
                 let _ = login.set_checked(autostart.is_enabled().unwrap_or(false));
             }
+            "copy_link" => copy_link(app),
+            "regen_link" => {
+                let app = app.clone();
+                // The host answers on its own thread; not on the event loop.
+                std::thread::spawn(move || match app.state::<Shell>().host.regenerate_link() {
+                    Ok(Some(link)) => write_clipboard(&app, &link),
+                    Ok(None) => tracing::warn!("no call link: the host has no rendezvous"),
+                    Err(e) => tracing::warn!(error = %e, "call link not regenerated"),
+                });
+            }
             "quit" => quit(app),
             _ => {}
         })
@@ -288,8 +323,70 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
     }
-    tray.build(app)?;
+    let tray = tray.build(app)?;
+    let recording_icon = app.default_window_icon().map(recording_variant);
+    let idle_icon = app
+        .default_window_icon()
+        .map(|i| tauri::image::Image::new_owned(i.rgba().to_vec(), i.width(), i.height()));
+    let app = app.clone();
+    // Poll the host once a second; touch the OS only when something changed.
+    std::thread::spawn(move || {
+        let mut last = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let Some(live) = app.state::<Shell>().host.live_status() else {
+                continue;
+            };
+            if last == Some(live) {
+                continue;
+            }
+            last = Some(live);
+            let text = tray_text(&live);
+            let _ = status_item.set_text(&text);
+            let _ = tray.set_tooltip(Some(format!("Castcorder: {text}")));
+            let _ = tray.set_title(live.recording.map(|t| format!("REC {t}")));
+            let icon = if live.recording.is_some() {
+                recording_icon.clone()
+            } else {
+                idle_icon.clone()
+            };
+            if icon.is_some() {
+                let _ = tray.set_icon(icon);
+            }
+        }
+    });
     Ok(())
+}
+
+/// `icon` with a red dot in its lower right corner: the tray while recording.
+fn recording_variant(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+    let (w, h) = (icon.width() as i64, icon.height() as i64);
+    let mut rgba = icon.rgba().to_vec();
+    let r = (w.min(h) / 3).max(2);
+    let (cx, cy) = (w - r - 1, h - r - 1);
+    for y in 0..h {
+        for x in 0..w {
+            if (x - cx).pow(2) + (y - cy).pow(2) <= r * r {
+                let i = ((y * w + x) * 4) as usize;
+                rgba[i..i + 4].copy_from_slice(&[220, 30, 30, 255]);
+            }
+        }
+    }
+    tauri::image::Image::new_owned(rgba, w as u32, h as u32)
+}
+
+/// Put the running host's call link on the clipboard.
+fn copy_link(app: &AppHandle) {
+    match app.state::<Shell>().host.status().and_then(|s| s.call_link) {
+        Some(link) => write_clipboard(app, &link),
+        None => tracing::warn!("no call link yet: the host is not registered with a rendezvous"),
+    }
+}
+
+fn write_clipboard(app: &AppHandle, text: &str) {
+    if let Err(e) = app.clipboard().write_text(text) {
+        tracing::warn!(error = %e, "call link not copied");
+    }
 }
 
 fn show(app: &AppHandle, label: &str) {

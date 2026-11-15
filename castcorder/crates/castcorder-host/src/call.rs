@@ -25,6 +25,19 @@ use crate::room::{Admission, Effect, Need, Room};
 use castcorder_transport::{GuestAudio, GuestChannel, GuestId, Host, HostEvent, LocalAudio};
 use tracing::{info, warn};
 
+/// What the desktop app's tray shows about the running call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LiveStatus {
+    /// Guests in the call (the host microphone is not counted).
+    pub guests: usize,
+    /// The take recording now, if any.
+    pub recording: Option<u32>,
+    /// The highest take number so far.
+    pub last_take: u32,
+    /// Guests whose outbox is still syncing to the library.
+    pub syncing: usize,
+}
+
 /// A request from the HTTP side to the host thread.
 pub enum Command {
     /// A guest's first offer; the reply is the answer SDP.
@@ -60,6 +73,17 @@ pub enum Command {
         reply: mpsc::Sender<Result<(TakeId, i64), String>>,
     },
     /// The take status and the connected guests, as JSON text.
+    /// The live status snapshot (the tray).
+    Live {
+        /// The snapshot.
+        reply: mpsc::Sender<LiveStatus>,
+    },
+    /// Rotate the call secret, from the host machine (the tray); the reply is
+    /// the new call link, if reachable through a rendezvous.
+    RegenerateLink {
+        /// The new link, or why the secret was not rotated.
+        reply: mpsc::Sender<Result<Option<String>, String>>,
+    },
     Status {
         /// Where the JSON goes.
         reply: mpsc::Sender<String>,
@@ -414,35 +438,13 @@ impl Call {
                 self.send_roles(&conns);
                 Response::Done
             }
-            Ok(Effect::RegenerateLink) => {
-                let rotated = match (&self.call_dir, &self.secret) {
-                    (Some(dir), Some(secret)) => {
-                        crate::rendezvous::regenerate_secret(dir, secret).map_err(|e| e.to_string())
-                    }
-                    _ => Err("this call has no call secret".into()),
-                };
-                match rotated {
-                    Ok(_) => {
-                        let link = self.current_link();
-                        if let Some(l) = &link {
-                            println!();
-                            println!(
-                                "  The call link was regenerated; the old one no longer works:"
-                            );
-                            println!("    {l}");
-                            println!("CALL_LINK {l}");
-                        }
-                        Response::Link(link)
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "call link not regenerated");
-                        Response::Error {
-                            kind: ErrorKind::Other,
-                            message: e,
-                        }
-                    }
-                }
-            }
+            Ok(Effect::RegenerateLink) => match self.regenerate_link() {
+                Ok(link) => Response::Link(link),
+                Err(e) => Response::Error {
+                    kind: ErrorKind::Other,
+                    message: e,
+                },
+            },
         };
         self.save_room();
         self.broadcast_room();
@@ -674,6 +676,38 @@ impl Call {
         }
         self.broadcast();
         Ok((take, host_us))
+    }
+
+    /// Rotate the call secret; the new link, if reachable through a rendezvous.
+    fn regenerate_link(&mut self) -> Result<Option<String>, String> {
+        let (Some(dir), Some(secret)) = (&self.call_dir, &self.secret) else {
+            return Err("this call has no call secret".into());
+        };
+        if let Err(e) = crate::rendezvous::regenerate_secret(dir, secret) {
+            warn!(error = %e, "call link not regenerated");
+            return Err(e.to_string());
+        }
+        let link = self.current_link();
+        if let Some(l) = &link {
+            println!();
+            println!("  The call link was regenerated; the old one no longer works:");
+            println!("    {l}");
+            println!("CALL_LINK {l}");
+        }
+        Ok(link)
+    }
+
+    /// The tray's snapshot.
+    fn live(&self) -> LiveStatus {
+        LiveStatus {
+            guests: self.names.len(),
+            recording: match self.status {
+                TakeStatus::Recording { take, .. } => Some(take.0),
+                TakeStatus::Idle => None,
+            },
+            last_take: self.last_take,
+            syncing: self.pullers.values().filter(|p| !p.is_idle()).count(),
+        }
     }
 
     fn status_json(&self) -> String {
@@ -967,6 +1001,14 @@ impl Call {
                     "at the host machine",
                 );
                 let _ = reply.send(self.stop_take());
+            }
+            Command::Live { reply } => {
+                let _ = reply.send(self.live());
+            }
+            Command::RegenerateLink { reply } => {
+                let r = self.regenerate_link();
+                self.broadcast_room();
+                let _ = reply.send(r);
             }
             Command::Status { reply } => {
                 let _ = reply.send(self.status_json());

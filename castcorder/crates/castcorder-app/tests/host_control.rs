@@ -139,3 +139,67 @@ fn the_in_process_host_serves_role_accepts_a_guest_and_restarts_on_its_ports() {
     control.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn live_status_follows_a_guest_and_a_take() {
+    let root = scratch("live-status");
+    let control = HostControl::new(config(&root));
+    assert_eq!(control.live_status(), None, "not running yet");
+    let status = control.start().unwrap();
+
+    let live = control.live_status().unwrap();
+    assert_eq!((live.guests, live.recording), (0, None), "{live:?}");
+    assert_eq!(
+        castcorder_app::host_control::tray_text(&live),
+        "0 guests, not recording"
+    );
+
+    let (_, role) = request(status.http_addr, "GET", "/role", "");
+    let role: serde_json::Value = serde_json::from_str(&role).unwrap();
+    let host_id = role["host"].as_str().unwrap().to_string();
+    let (mut guest, offer) = TestGuest::new(
+        UdpDatagramSocket::bind_loopback().unwrap(),
+        SystemClock::new(),
+    );
+    let proof = identity::sign_offer(&[6; 32], &host_id, None, now_ms(), &offer);
+    let body = serde_json::json!({
+        "type": "offer",
+        "sdp": offer,
+        "proof": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&proof)
+        ).unwrap(),
+    })
+    .to_string();
+    let (code, answer) = request(status.http_addr, "POST", "/offer?name=guest", &body);
+    assert_eq!(code, 200, "{answer}");
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    guest.accept_answer(answer["sdp"].as_str().unwrap());
+    let end = Instant::now() + Duration::from_secs(15);
+    while !(guest.connected && guest.channels_open()) {
+        assert!(Instant::now() < end, "the guest did not connect");
+        guest.step();
+        sleep(Duration::from_millis(1));
+    }
+    assert_eq!(control.live_status().unwrap().guests, 1);
+
+    // A take starts from the host machine's page; the snapshot says which.
+    let (code, started) = request(status.http_addr, "POST", "/take/start", "");
+    assert_eq!(code, 200, "{started}");
+    let live = control.live_status().unwrap();
+    assert_eq!(live.recording, Some(1), "{live:?}");
+    assert_eq!(
+        castcorder_app::host_control::tray_text(&live),
+        "1 guest, recording take 1"
+    );
+
+    let (code, _) = request(status.http_addr, "POST", "/take/stop", "");
+    assert_eq!(code, 200);
+    let live = control.live_status().unwrap();
+    assert_eq!((live.recording, live.last_take), (None, 1), "{live:?}");
+
+    // No rendezvous: no link to regenerate, and the host says so politely.
+    assert_eq!(control.status().unwrap().call_link, None);
+    control.stop();
+    assert_eq!(control.live_status(), None, "stopped");
+    let _ = std::fs::remove_dir_all(&root);
+}
