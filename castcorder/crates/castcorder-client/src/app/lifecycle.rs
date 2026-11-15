@@ -255,6 +255,7 @@ pub(super) async fn restart_media(ui: Ui, epoch: u32) {
                 e.raw = Some(handle(&raw));
                 e.live = Some(live);
             });
+            apply_mute(ui);
             start_capture(ui, raw, epoch).await;
             if stale(epoch) {
                 return;
@@ -383,6 +384,7 @@ pub(super) fn leave(ui: Ui) {
     ui.participant.set(String::new());
     ui.role.set(Role::default());
     ui.level.set(0.0);
+    ui.levels.set(VecDeque::new());
 }
 
 pub(super) fn db(x: f64) -> String {

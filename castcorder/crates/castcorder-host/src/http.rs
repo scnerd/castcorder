@@ -491,6 +491,7 @@ fn serve_file(dir: &Path, path: &str) -> Response {
         Some("wasm") => "application/wasm",
         Some("css") => "text/css",
         Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
         _ => "application/octet-stream",
     };
     match std::fs::read(dir.join(name)) {

@@ -167,6 +167,48 @@ pub(super) fn toggle_camera(ui: Ui) {
     }
 }
 
+/// Mute or unmute this participant in the call: only the live stream's
+/// microphone track is switched (it then sends silence). The raw microphone,
+/// which the recording reads, is a separate track and is never touched, so a
+/// muted participant's track keeps recording.
+pub(super) fn apply_mute(ui: Ui) {
+    let on = !ui.muted.get_untracked();
+    if let Some(live) = with_engine(|e| e.live.as_ref().map(handle)) {
+        for t in live.get_audio_tracks().iter() {
+            t.unchecked_into::<MediaStreamTrack>().set_enabled(on);
+        }
+    }
+}
+
+/// The mute button: the first mute explains what it does.
+pub(super) fn toggle_mute(ui: Ui) {
+    let muted = !ui.muted.get_untracked();
+    ui.muted.set(muted);
+    apply_mute(ui);
+    if muted && !mute_tip_seen() {
+        ui.mute_tip.set(true);
+    }
+}
+
+const MUTE_TIP_KEY: &str = "castcorder.muteTipSeen";
+
+fn mute_tip_seen() -> bool {
+    window()
+        .local_storage()
+        .ok()
+        .flatten()
+        .and_then(|s| s.get_item(MUTE_TIP_KEY).ok().flatten())
+        .is_some()
+}
+
+/// Close the first-mute explanation for good (on this browser profile).
+pub(super) fn dismiss_mute_tip(ui: Ui) {
+    ui.mute_tip.set(false);
+    if let Some(s) = window().local_storage().ok().flatten() {
+        let _ = s.set_item(MUTE_TIP_KEY, "1");
+    }
+}
+
 /// The two simulcast encodings of the live video: full size up to 800 kbit/s
 /// and half size up to 150 kbit/s (`?simulcast=0`: one encoding).
 pub(super) fn send_encodings() -> Option<Array> {

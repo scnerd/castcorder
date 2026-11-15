@@ -152,6 +152,17 @@ What they changed or left open:
 - **Tray status.** The tray shows a one-line status (`2 guests, recording take 3, syncing 1`) as a disabled menu item, in the tooltip, as a `REC <take>` title (macOS) and as an icon with a red dot while a take records. The app polls `HostControl::live_status` once a second (a `Command::Live` to the call thread: guests, recording take, last take, guests with an outbox still syncing) and touches the OS only when it changed. "Copy call link" puts the current link on the clipboard (tauri-plugin-clipboard-manager); "Regenerate call link" rotates the call secret from the host machine (`Running::regenerate_link`, the same rotation as the producer action: guests in the call stay, the old link stops admitting) and copies the new link. Both need a rendezvous (a call link). Tested in `task check` through host control against a real host (guest joins: 1 guest; take starts: recording) and in `task app:check` (`--smoke` asserts the snapshot answers).
 - **Open.** App guests use the browser client in the call window rather than the native core; updater; native capture on macOS.
 
+## UI
+
+The design pass (cast-72g) is the "Castcorder UX" canvas; `castcorder-client/style.css` carries its tokens and components.
+
+- **Layout.** A lobby before joining (name, password, camera choice, the recording notice). In the call: a top bar with the recording state, the stage (one tile per participant, own tile first), one optional side panel (People and call controls, Recordings, Transcript) and a bottom dock (Mute, Camera, Hide me, Start/Stop take for producers, Leave). The conversation fills the window; producers get the People panel open by default.
+- **Red means REC and nothing else.** The REC pill (take number), a red rule under the top bar for the whole take, the red own-track waveform, the tab title (`REC take 3 - Castcorder`) and favicon, and the tray dot. Muted is an inverted button with a slashed mic, never red. Amber is for things to check; warnings say what still works and never block.
+- **Mute is call-only.** It disables the live stream's microphone track; the raw microphone, which is the track, keeps recording. The first mute explains this once per browser profile, and the dock's own-track waveform keeps moving while muted.
+- **Two signals per person, kept apart:** live (are we hearing them?) and track (is their machine recording?). Only signals backed by real data are drawn: per-participant levels, track status, remote mute and the elapsed take time are open (cast-vr3, cast-2y4, cast-xe2, cast-wuk).
+- **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge: red recording, blue syncing, amber needs a look.
+- **Open.** Device selection and recorded vs live sources (cast-94c), disk-space warnings (cast-ycn), the host app home with calls (cast-brj), tray syncing badges (cast-0f0), the live transcript (cast-7hm).
+
 ## Not in v1
 
-Screen sharing, text chat, live streaming to platforms, editing or mixing, transcription, mobile apps, scheduling UI, S3 targets, continuous upload during takes, explicit device pairing, self-served browser client, code signing. Host markers during a take are the first candidate after v1.
+Screen sharing, text chat, live streaming to platforms, editing or mixing, mobile apps, scheduling UI, S3 targets, continuous upload during takes, explicit device pairing, self-served browser client, code signing. Host markers during a take are the first candidate after v1. A live transcript was asked for in the design pass and is tracked as cast-7hm.

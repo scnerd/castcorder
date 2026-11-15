@@ -57,6 +57,7 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
         e.live = Some(handle(&live));
         e.capture = None;
     });
+    apply_mute(ui);
     // Recording capture starts beside the call and never holds up or fails
     // the join (see start_capture).
     spawn_local(start_capture(ui, raw, epoch));
