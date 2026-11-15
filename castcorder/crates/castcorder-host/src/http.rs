@@ -260,7 +260,7 @@ fn read_request(stream: impl Read) -> io::Result<Request> {
     })
 }
 
-/// `localhost:47801` -> `localhost`, `[::1]:1` -> `[::1]`.
+/// `localhost:27801` -> `localhost`, `[::1]:1` -> `[::1]`.
 fn host_without_port(v: &str) -> &str {
     if v.starts_with('[') {
         return v.find(']').map(|i| &v[..=i]).unwrap_or(v);

@@ -83,16 +83,18 @@ pub struct Config {
 impl Config {
     /// The `castcorder-host` defaults, serving the client build in `dist`:
     /// the library in `~/Castcorder`, a call named by the current time, every
-    /// interface, ports 47800 (HTTPS), 47801 (HTTP) and 47802 (UDP).
+    /// interface, ports 27800 (HTTPS), 27801 (HTTP) and 27802 (UDP). They sit
+    /// below 32768 so no OS hands them out as ephemeral ports or reserves them
+    /// (Windows Hyper-V reserves blocks inside its dynamic range).
     pub fn new(dist: impl Into<PathBuf>) -> Self {
         Config {
             dist: dist.into(),
             library: default_library(),
             call: format!("call-{}", utc_compact(wall_ms())),
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            https_port: 47800,
-            http_port: 47801,
-            udp_port: 47802,
+            https_port: 27800,
+            http_port: 27801,
+            udp_port: 27802,
             advertise: vec![],
             rendezvous: None,
             relay_only: false,
