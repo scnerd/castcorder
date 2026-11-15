@@ -9,6 +9,7 @@ RUN cargo build --release --locked -p castcorder-rendezvous
 
 FROM debian:bookworm-slim
 COPY --from=build /src/target/release/castcorder-rendezvous /usr/local/bin/castcorder-rendezvous
+RUN mkdir -p /var/lib/castcorder && chown nobody:nogroup /var/lib/castcorder
 USER nobody
 EXPOSE 8080/tcp 3479/udp
 ENTRYPOINT ["castcorder-rendezvous"]

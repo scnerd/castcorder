@@ -294,6 +294,7 @@ impl Mailbox {
                 observed: peer.to_string(),
                 // Filled by the server, which holds the TURN config.
                 ice_servers: vec![],
+                relay_error: None,
             },
         ));
         out
@@ -426,6 +427,7 @@ mod tests {
                 ServerMsg::Registered {
                     observed: "10.0.0.1:5000".into(),
                     ice_servers: vec![],
+                    relay_error: None,
                 }
             )]
         );

@@ -49,6 +49,9 @@ const POLL: Duration = Duration::from_secs(1);
 /// on the current ones has passed, but never sooner than [`RENEW_MIN`] from now.
 const RENEW_AT_PERCENT: u64 = 80;
 const RENEW_MIN: Duration = Duration::from_secs(5);
+/// How long a host over its relay budget (`relay_quota`) waits before asking
+/// the rendezvous again.
+const QUOTA_RETRY: Duration = Duration::from_secs(15 * 60);
 
 /// How long until fresh relay credentials are due, for a TURN `username` of
 /// the rendezvous's shape (`<expiry unix seconds>:<host id>`) at `now_unix`.
@@ -351,13 +354,14 @@ fn session(
             sig: b64(&cfg.key.sign_register(&nonce)),
         },
     )?;
-    let ice_servers = match read_msg(&mut ws)? {
+    let (ice_servers, relay_error) = match read_msg(&mut ws)? {
         ServerMsg::Registered {
             observed,
             ice_servers,
+            relay_error,
         } => {
             info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), observed = %observed, "registered with the rendezvous");
-            ice_servers
+            (ice_servers, relay_error)
         }
         ServerMsg::Error { code, message } => return Err(format!("{code}: {message}")),
         other => return Err(format!("expected registered, got {other:?}")),
@@ -384,6 +388,9 @@ fn session(
             *turn_user = Some(server.username.clone());
             let _ = tx.send(Command::Turn { server });
         }
+        None if relay_error.is_some() => {
+            warn!(reason = %relay_error.as_deref().unwrap_or(""), keeping_old = turn_user.is_some(), "the rendezvous gave no relay (TURN) credentials");
+        }
         None if turn_user.is_some() => {
             warn!(
                 "the rendezvous gave no fresh relay (TURN) credentials; keeping the old ones and asking again soon"
@@ -393,10 +400,19 @@ fn session(
     }
     // Credentials expire (the username holds the expiry) and a TURN allocation
     // cannot outlive them: reconnect for fresh ones before then.
-    let renew_at = turn_user
+    let quota = relay_error
         .as_deref()
-        .and_then(|u| renew_in(u, unix_now()))
-        .map(|d| Instant::now() + d);
+        .is_some_and(|e| e.starts_with(castcorder_link::wire::code::RELAY_QUOTA));
+    let renew_at = if quota {
+        // Over the relay budget: direct connections keep working; ask again
+        // later rather than reconnecting at the renewal pace.
+        Some(Instant::now() + QUOTA_RETRY)
+    } else {
+        turn_user
+            .as_deref()
+            .and_then(|u| renew_in(u, unix_now()))
+            .map(|d| Instant::now() + d)
+    };
     if let Some(at) = renew_at {
         info!(
             renew_in_s = at.saturating_duration_since(Instant::now()).as_secs(),

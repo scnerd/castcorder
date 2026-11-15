@@ -17,12 +17,14 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use castcorder_link::wire::{IceServer, ServerMsg, b64, code, to_json};
 use castcorder_link::{HostId, stun};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::mailbox::{ConnId, Limits, Mailbox, Out, Rate};
 use crate::turn::{TurnConfig, mint};
+use crate::usage::{LEDGER_FILE, Ledger, parse_metrics, save};
 
 /// Largest WebSocket frame accepted (a sealed SDP is a few KiB).
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -48,7 +50,36 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// A TURN server to mint relay credentials for, if any.
     pub turn: Option<TurnConfig>,
+    /// Relay usage accounting and budgets, if any.
+    pub metering: Option<Metering>,
 }
+
+/// Relay metering: where coturn's usage comes from, where it is kept, the
+/// budget, and the operator's view.
+#[derive(Clone, Debug)]
+pub struct Metering {
+    /// coturn's Prometheus exporter, `http://HOST:PORT/PATH`, scraped every
+    /// `interval`; `None` only enforces the stored ledger.
+    pub metrics_url: Option<String>,
+    /// How often to scrape.
+    pub interval: Duration,
+    /// Where the ledger ([`LEDGER_FILE`]) is kept; `None` keeps it in memory.
+    pub data_dir: Option<PathBuf>,
+    /// Relayed bytes allowed per host key per [`crate::usage::WINDOW_DAYS`];
+    /// `None` only counts.
+    pub budget: Option<u64>,
+    /// The admin listener (`GET /usage`); keep it on loopback.
+    pub admin: Option<SocketAddr>,
+}
+
+struct Meter {
+    ledger: Mutex<Ledger>,
+    budget: Option<u64>,
+}
+
+/// Largest metrics page read from coturn; a larger one is an error, not a
+/// partial read (missing counters would be counted again later).
+const MAX_METRICS: u64 = 64 * 1024 * 1024;
 
 struct Hub {
     mailbox: Mutex<(Mailbox, HashMap<ConnId, mpsc::UnboundedSender<Message>>)>,
@@ -57,6 +88,7 @@ struct Hub {
     public_host: Option<String>,
     trust_forwarded_for: bool,
     turn: Option<TurnConfig>,
+    meter: Option<Arc<Meter>>,
 }
 
 /// The bound ports, and the future that serves them.
@@ -65,6 +97,8 @@ pub struct Bound {
     pub http: SocketAddr,
     /// The STUN address.
     pub stun: Option<SocketAddr>,
+    /// The admin address (`GET /usage`).
+    pub admin: Option<SocketAddr>,
     serve: std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send>>,
 }
 
@@ -84,6 +118,37 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         None => None,
     };
     let stun_addr = udp.as_ref().map(|u| u.local_addr()).transpose()?;
+    let mut scrape = None;
+    let mut admin = None;
+    let meter = match cfg.metering {
+        Some(m) => {
+            let path = match &m.data_dir {
+                Some(d) => {
+                    std::fs::create_dir_all(d)?;
+                    Some(d.join(LEDGER_FILE))
+                }
+                None => None,
+            };
+            let ledger = match &path {
+                Some(p) => Ledger::load(p)
+                    .map_err(|e| io::Error::other(format!("{}: {e}", p.display())))?,
+                None => Ledger::default(),
+            };
+            let meter = Arc::new(Meter {
+                ledger: Mutex::new(ledger),
+                budget: m.budget,
+            });
+            if let Some(a) = m.admin {
+                admin = Some(TcpListener::bind(a).await?);
+            }
+            if let Some(url) = m.metrics_url {
+                scrape = Some(scrape_loop(meter.clone(), url, m.interval, path));
+            }
+            Some(meter)
+        }
+        None => None,
+    };
+    let admin_addr = admin.as_ref().map(|a| a.local_addr()).transpose()?;
     let hub = Arc::new(Hub {
         mailbox: Mutex::new((Mailbox::new(cfg.limits), HashMap::new())),
         stun_port: stun_addr.map(|a| a.port()),
@@ -91,6 +156,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         public_host: cfg.public_host,
         trust_forwarded_for: cfg.trust_forwarded_for,
         turn: cfg.turn,
+        meter: meter.clone(),
     });
     let app = Router::new()
         .route("/", get(index))
@@ -105,13 +171,146 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         if let Some(udp) = udp {
             tokio::spawn(stun_loop(udp, limits.ip));
         }
+        if let Some(s) = scrape {
+            tokio::spawn(s);
+        }
+        if let (Some(listener), Some(meter)) = (admin, meter) {
+            let admin_app = Router::new()
+                .route("/usage", get(usage_report))
+                .with_state(meter);
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, admin_app).await {
+                    warn!(error = %e, "admin listener stopped");
+                }
+            });
+        }
         axum::serve(tcp, app.into_make_service_with_connect_info::<SocketAddr>()).await
     };
     Ok(Bound {
         http,
         stun: stun_addr,
+        admin: admin_addr,
         serve: Box::pin(serve),
     })
+}
+
+/// `GET /usage` on the admin listener: relayed bytes per host key.
+async fn usage_report(State(meter): State<Arc<Meter>>) -> Response {
+    let report = meter
+        .ledger
+        .lock()
+        .expect("ledger lock")
+        .usage_report(meter.budget, unix_now());
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&report).expect("a report serializes"),
+    )
+        .into_response()
+}
+
+/// Scrape coturn's exporter every `interval`, account the counters, and
+/// write the ledger when it changed.
+async fn scrape_loop(meter: Arc<Meter>, url: String, interval: Duration, path: Option<PathBuf>) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut failing = false;
+    let mut saved = String::new();
+    loop {
+        tick.tick().await;
+        let text = match tokio::time::timeout(Duration::from_secs(10), fetch(&url)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                if !failing {
+                    warn!(url = %url, error = %e, "cannot scrape coturn metrics; relay usage is not being counted");
+                }
+                failing = true;
+                continue;
+            }
+            Err(_) => {
+                if !failing {
+                    warn!(url = %url, "coturn metrics timed out; relay usage is not being counted");
+                }
+                failing = true;
+                continue;
+            }
+        };
+        if failing {
+            info!(url = %url, "coturn metrics reachable again");
+            failing = false;
+        }
+        let counters = parse_metrics(&text);
+        let (added, json) = {
+            let mut l = meter.ledger.lock().expect("ledger lock");
+            (l.observe(&counters, unix_now()), l.to_json())
+        };
+        if added > 0 {
+            info!(
+                bytes = added,
+                counters = counters.len(),
+                "relay usage counted"
+            );
+        } else {
+            debug!(counters = counters.len(), "relay usage scraped");
+        }
+        if let Some(p) = &path
+            && json != saved
+        {
+            let p = p.clone();
+            let j = json.clone();
+            match tokio::task::spawn_blocking(move || save(&p, &j)).await {
+                Ok(Ok(())) => saved = json,
+                Ok(Err(e)) => warn!(error = %e, "cannot write the relay usage ledger"),
+                Err(e) => warn!(error = %e, "ledger writer failed"),
+            }
+        }
+    }
+}
+
+/// GET an `http://HOST:PORT/PATH` page (HTTP/1.0: no chunking, the server
+/// closes).
+async fn fetch(url: &str) -> io::Result<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| io::Error::other("only http:// metrics URLs"))?;
+    let (authority, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/metrics"),
+    };
+    let mut s = tokio::net::TcpStream::connect(authority).await?;
+    s.write_all(
+        format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nAccept: text/plain\r\n\r\n")
+            .as_bytes(),
+    )
+    .await?;
+    let mut buf = Vec::new();
+    (&mut s).take(MAX_METRICS).read_to_end(&mut buf).await?;
+    if buf.len() as u64 >= MAX_METRICS {
+        return Err(io::Error::other("metrics page too large"));
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| io::Error::other("no HTTP header"))?;
+    let status = head.lines().next().unwrap_or("");
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(io::Error::other(format!("metrics answered {status}")));
+    }
+    if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        return Err(io::Error::other("chunked metrics are not supported"));
+    }
+    Ok(body.to_string())
+}
+
+/// Why `host` gets no relay credentials because of its budget, if so.
+fn quota_refusal(hub: &Hub, host: &HostId) -> Option<String> {
+    let m = hub.meter.as_ref()?;
+    m.ledger
+        .lock()
+        .expect("ledger lock")
+        .refusal(host, m.budget, unix_now())
 }
 
 async fn index() -> &'static str {
@@ -260,13 +459,29 @@ fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: 
         return;
     };
     for o in outs {
-        if let Out::Send(c, ServerMsg::Registered { ice_servers, .. }) = o
+        if let Out::Send(
+            c,
+            ServerMsg::Registered {
+                ice_servers,
+                relay_error,
+                ..
+            },
+        ) = o
             && *c == conn
             && let Some(host) = mb.host_of(conn)
-            && mb.mint_allowed(host, now)
         {
-            info!(conn, host = %host.short(), ttl_s = turn.ttl.as_secs(), registered = true, "relay credentials minted");
-            ice_servers.push(mint(turn, &host, unix_now()));
+            if let Some(why) = quota_refusal(hub, &host) {
+                info!(conn, host = %host.short(), registered = true, "relay credentials refused: over the relay budget");
+                *relay_error = Some(why);
+            } else if mb.mint_allowed(host, now) {
+                info!(conn, host = %host.short(), ttl_s = turn.ttl.as_secs(), registered = true, "relay credentials minted");
+                ice_servers.push(mint(turn, &host, unix_now()));
+            } else {
+                *relay_error = Some(format!(
+                    "{}: too many relay credentials for this host",
+                    code::RATE_LIMITED
+                ));
+            }
         }
     }
 }
@@ -302,6 +517,9 @@ async fn connection(
                         "{}: that host is not online; no relay credentials",
                         code::HOST_OFFLINE
                     ));
+                } else if let Some(why) = quota_refusal(&hub, &host) {
+                    info!(conn = id, host = %host.short(), "relay credentials refused: over the relay budget");
+                    relay_error = Some(why);
                 } else if g.0.mint_allowed(host, now) {
                     info!(conn = id, host = %host.short(), ttl_s = turn.ttl.as_secs(), "relay credentials minted");
                     ice.push(mint(turn, &host, unix_now()));
@@ -410,5 +628,5 @@ async fn stun_loop(udp: UdpSocket, rate: Rate) {
 
 /// Log a line saying where everything is.
 pub fn log_ready(b: &Bound) {
-    info!(http = %b.http, stun = ?b.stun, "rendezvous listening");
+    info!(http = %b.http, stun = ?b.stun, admin = ?b.admin, "rendezvous listening");
 }
