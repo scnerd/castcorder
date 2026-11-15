@@ -111,6 +111,28 @@ impl<F: StorageFile> GuestOutbox<F> {
         confirmed
     }
 
+    /// How far each unconfirmed track the host has started pulling has got,
+    /// as (name, percent): the highest part served against the whole track,
+    /// 99 at most until the host confirms it. Log files are not tracks and
+    /// are left out.
+    pub fn progress(&self) -> Vec<(String, u8)> {
+        self.sender
+            .blobs
+            .iter()
+            .zip(&self.offers)
+            .filter(|(b, o)| {
+                !b.confirmed
+                    && b.units_reached > 0
+                    && o.kind != castcorder_protocol::SourceKind::Log
+            })
+            .map(|(b, o)| {
+                let total = b.geometry.n_units().max(1);
+                let pct = (b.units_reached.min(total) * 100 / total).min(99) as u8;
+                (o.name.clone(), pct)
+            })
+            .collect()
+    }
+
     /// The next message for the host's "data" channel, if any.
     pub fn poll_transmit(&mut self) -> Option<Vec<u8>> {
         self.sender.poll_transmit()

@@ -6,7 +6,7 @@
 use super::*;
 
 /// The header every `/native` request carries (the host refuses others).
-const NATIVE_HEADER: &str = "X-Castcorder-Native";
+pub(super) const NATIVE_HEADER: &str = "X-Castcorder-Native";
 
 /// What `GET /native` said.
 #[derive(Clone, Debug, Default, PartialEq)]

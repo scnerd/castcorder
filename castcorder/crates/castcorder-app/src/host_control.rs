@@ -5,6 +5,7 @@
 //! the producer page does the same through the host's `/native` endpoints).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use castcorder_host::{Config, LiveStatus, NativeInput, NativeState, Running};
@@ -93,6 +94,23 @@ impl HostControl {
             .ok()?
             .as_ref()
             .map(Running::native_state)
+    }
+
+    /// Where the call's tracks are saved: `<library>/<call>`, absolute (the
+    /// running host's folder, else the one the config names).
+    pub fn recordings_folder(&self) -> PathBuf {
+        let dir = self
+            .running
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|r| r.call_dir().to_path_buf()))
+            .unwrap_or_else(|| self.config.library.join(&self.config.call));
+        std::path::absolute(&dir).unwrap_or(dir)
+    }
+
+    /// Open the call's folder in the file manager.
+    pub fn open_recordings_folder(&self) -> Result<(), String> {
+        castcorder_host::open_folder(&self.recordings_folder())
     }
 
     /// The call as it is now (guests, recording take, syncing outboxes), if

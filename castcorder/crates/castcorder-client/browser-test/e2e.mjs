@@ -27,6 +27,10 @@
 //    keeps recording into the same file, shows "reconnecting", rejoins, then
 //    its microphone tracks are stopped (as a phone's system may) and it
 //    reopens them and continues in a new segment. Both segments reach the host.
+//    Meanwhile the pages say where the tracks are (lib/recordings.mjs): the
+//    host machine's page shows the call folder and each track's state, B's
+//    finished segment waits then is delivered, and B made a producer sees the
+//    states but not the folder.
 // 6b. Take 3 (chromium, firefox): the producer turns video recording on;
 //    webcams are recorded as WebM, sync after the audio, and B, made unable
 //    to record video in chromium, reports it: see lib/videorec.mjs.
@@ -81,6 +85,7 @@ import { identityChecks } from './lib/identity.mjs';
 import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
 import { openGuest } from './lib/guest.mjs';
+import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -233,6 +238,7 @@ try {
     return r.includes('recording take0002') && r !== seg1 ? r : null;
   }, 'B reopened its microphone and records a new segment', 30000);
   check(true, 'B lost its microphone and continues take 2 in a new segment (' + seg2 + ')');
+  const seg1Name = await recordingsWhileRecording(A, B, seg1);
   await waitFor(async () => (await text(B, '#state')) === 'connected' && (await text(B, '#participant')).length > 0,
     'B connected again after reopening its microphone', 30000);
   await sleep(2000);
@@ -256,6 +262,7 @@ try {
   check(s1 > expect1 - 1.5, 'B\'s first segment (' + s1.toFixed(2) + ' s) spans the connection drop without a gap (expected ~'
     + expect1.toFixed(1) + ' s)');
   check(s2 > 1, 'B\'s second segment holds ' + s2.toFixed(2) + ' s');
+  await recordingsAfterSync(A, B, seg1Name);
   // Video recording is off by default: takes 1 and 2 have no video track.
   check(['take01', 'take02'].every((t) => !readdirSync(join(LIBRARY, 'browser-test', t)).some((f) => f.includes('_cam'))),
     'with video recording off (the default) takes 1 and 2 have no video track');

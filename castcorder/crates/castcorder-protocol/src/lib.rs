@@ -358,6 +358,61 @@ pub enum Event {
     /// joins or leaves): each participant's display name, so a forwarded
     /// stream (whose id ends in `-<participant id>`) can be shown by name.
     Participants(Vec<ParticipantName>),
+    /// Every take's tracks and where each stands on its way into the host's
+    /// library (sent to producers only, whenever it changes).
+    Tracks(TracksState),
+}
+
+/// Where one track stands on its way into the host's library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackState {
+    /// The take is still recording it.
+    Recording,
+    /// Offered by its device's outbox, not yet being received.
+    Pending,
+    /// Being received from its device's outbox.
+    Receiving {
+        /// How much is on the host, 0 to 99.
+        percent: u8,
+    },
+    /// Every byte is on the host and matches what the device offered.
+    Verified,
+    /// Verified, and its aligned track is rendered.
+    Aligned,
+}
+
+/// One track of a take, as producers see it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackStatus {
+    /// The participant's display name.
+    pub participant: String,
+    /// The track's file name in the take's directory (empty while recording).
+    pub file: String,
+    /// Audio or video.
+    pub kind: SourceKind,
+    /// Where it stands.
+    pub state: TrackState,
+}
+
+/// One take's tracks.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeTracks {
+    /// The take.
+    pub take: TakeId,
+    /// Its directory in the call's folder (for example `take01`).
+    pub dir: String,
+    /// Its tracks.
+    pub tracks: Vec<TrackStatus>,
+}
+
+/// The call's takes and tracks, for producers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TracksState {
+    /// The call's folder on the host machine: only the host machine's own
+    /// page is told it, never a producer on another device.
+    pub folder: Option<String>,
+    /// Every take, oldest first.
+    pub takes: Vec<TakeTracks>,
 }
 
 /// One participant's display name.
@@ -727,6 +782,28 @@ mod tests {
                 name: "A".into(),
             }])),
             vec![5, 1, 5, 1, b'A']
+        );
+        // Track states for producers (appended).
+        assert_eq!(encode(&TrackState::Recording), vec![0]);
+        assert_eq!(encode(&TrackState::Pending), vec![1]);
+        assert_eq!(encode(&TrackState::Receiving { percent: 7 }), vec![2, 7]);
+        assert_eq!(encode(&TrackState::Verified), vec![3]);
+        assert_eq!(encode(&TrackState::Aligned), vec![4]);
+        assert_eq!(
+            encode(&Event::Tracks(TracksState {
+                folder: None,
+                takes: vec![TakeTracks {
+                    take: TakeId(1),
+                    dir: String::new(),
+                    tracks: vec![TrackStatus {
+                        participant: String::new(),
+                        file: String::new(),
+                        kind: SourceKind::Audio,
+                        state: TrackState::Verified,
+                    }],
+                }],
+            })),
+            vec![6, 0, 1, 1, 0, 1, 0, 0, 0, 3]
         );
     }
 

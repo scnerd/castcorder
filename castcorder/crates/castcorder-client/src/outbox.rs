@@ -50,6 +50,8 @@ thread_local! {
     static CALL: RefCell<String> = const { RefCell::new(String::new()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static PREPARE_AGAIN: Cell<bool> = const { Cell::new(false) };
+    /// The transfer progress last posted to the page.
+    static PROGRESS: RefCell<Vec<(String, u8)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn js_err(e: JsValue) -> io::Error {
@@ -317,11 +319,9 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
 fn transmit(room: f64) {
     let frames = Array::new();
     let mut sent = 0f64;
-    OUTBOX.with(|o| {
+    let progress = OUTBOX.with(|o| {
         let mut o = o.borrow_mut();
-        let Some(o) = o.as_mut() else {
-            return;
-        };
+        let o = o.as_mut()?;
         while sent < room.max(1.0) {
             let Some(m) = o.poll_transmit() else {
                 break;
@@ -329,7 +329,24 @@ fn transmit(room: f64) {
             sent += m.len() as f64;
             frames.push(&Uint8Array::from(&m[..]).buffer());
         }
+        Some(o.progress())
     });
+    // The page shows how far each track has got: posted when it changes.
+    if let Some(p) = progress
+        && PROGRESS.with(|last| last.replace(p.clone())) != p
+    {
+        let items = Array::new();
+        for (name, pct) in &p {
+            let item = Array::new();
+            item.push(&JsValue::from(name.as_str()));
+            item.push(&JsValue::from(*pct));
+            items.push(&item);
+        }
+        let out = object();
+        set(&out, "type", "xfer-progress");
+        set(&out, "items", &items);
+        post(&out);
+    }
     if frames.length() > 0 {
         let out = object();
         set(&out, "type", "xfer-out");
@@ -377,6 +394,7 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
         let o = object();
         set(&o, "type", "synced");
         set(&o, "name", c.name.as_str());
+        set(&o, "log", log);
         post(&o);
     }
     list_locked().await?;
@@ -567,4 +585,10 @@ pub fn xfer_reset() {
             o.on_disconnect();
         }
     });
+    // Nothing moves until the host asks again.
+    PROGRESS.with(|p| p.borrow_mut().clear());
+    let out = object();
+    set(&out, "type", "xfer-progress");
+    set(&out, "items", Array::new());
+    post(&out);
 }

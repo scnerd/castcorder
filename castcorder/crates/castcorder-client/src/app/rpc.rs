@@ -194,11 +194,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                     ui.role.set(role);
                     if !role.producer {
                         ui.room.set(None);
+                        ui.takes.set(None);
                     } else if let Ok(id) = rpc.send(Request::GetRoom) {
                         e.producer_requests.push((id, false));
                     }
                 }
                 Event::Room(s) => ui.room.set(Some(s)),
+                Event::Tracks(s) => ui.takes.set(Some(s)),
                 Event::ProfileUnmet {
                     participant,
                     name,
