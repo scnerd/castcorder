@@ -258,6 +258,13 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     let quit_item = MenuItem::with_id(app, "quit", "Quit (stop hosting)", true, None::<&str>)?;
     let status_item = MenuItem::with_id(app, "status", "Starting", false, None::<&str>)?;
     let copy = MenuItem::with_id(app, "copy_link", "Copy call link", true, None::<&str>)?;
+    let folder = MenuItem::with_id(
+        app,
+        "open_folder",
+        "Open recordings folder",
+        true,
+        None::<&str>,
+    )?;
     let regen = MenuItem::with_id(
         app,
         "regen_link",
@@ -271,6 +278,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             &status_item,
             &PredefinedMenuItem::separator(app)?,
             &open,
+            &folder,
             &copy,
             &regen,
             &login,
@@ -298,6 +306,11 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
                 let _ = login.set_checked(autostart.is_enabled().unwrap_or(false));
             }
             "copy_link" => copy_link(app),
+            "open_folder" => {
+                if let Err(e) = app.state::<Shell>().host.open_recordings_folder() {
+                    tracing::warn!(error = %e, "recordings folder not opened");
+                }
+            }
             "regen_link" => {
                 let app = app.clone();
                 // The host answers on its own thread; not on the event loop.

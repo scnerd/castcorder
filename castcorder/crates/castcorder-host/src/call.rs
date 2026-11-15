@@ -16,7 +16,7 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
     ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue, Request,
-    Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer,
+    Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer, TracksState,
 };
 use std::path::PathBuf;
 
@@ -228,13 +228,27 @@ pub struct Call {
     /// Takes whose host microphone files are still being finalised: not
     /// aligned until the recorder says done.
     local_busy: std::collections::BTreeSet<u32>,
+    /// Each take's aligned tracks, as the align thread reports them.
+    aligned: crate::tracks::Aligned,
+    /// Whether takes aligned in an earlier run were read into `aligned`.
+    aligned_seeded: bool,
+    /// The [`Event::Tracks`] each producer connection was last sent.
+    tracks_sent: BTreeMap<u64, TracksState>,
+    /// When the tracks state is next worked out (host timeline, us).
+    tracks_due_us: i64,
 }
+
+/// How often producers' tracks state is worked out (and sent if changed).
+const TRACKS_EVERY_US: i64 = 500_000;
 
 /// Render aligned tracks on their own thread, one take at a time (never on
 /// the host thread: it answers clock pings, and their delay is error).
 /// Requests for a take already queued are merged; a take whose tracks keep
 /// arriving is aligned again after each.
-fn spawn_aligner(cfg: castcorder_align::AlignConfig) -> mpsc::Sender<(TakeId, FsStorage)> {
+fn spawn_aligner(
+    cfg: castcorder_align::AlignConfig,
+    aligned: crate::tracks::Aligned,
+) -> mpsc::Sender<(TakeId, FsStorage)> {
     let (tx, rx) = mpsc::channel::<(TakeId, FsStorage)>();
     let spawned = thread::Builder::new().name("align".into()).spawn(move || {
         while let Ok(first) = rx.recv() {
@@ -254,14 +268,25 @@ fn spawn_aligner(cfg: castcorder_align::AlignConfig) -> mpsc::Sender<(TakeId, Fs
                 }
                 info!(take, dir = %dir.root().display(), "aligning take");
                 match castcorder_align::align_take(&dir, &cfg) {
-                    Ok(s) => info!(
-                        take,
-                        tracks = s.tracks.len(),
-                        skipped = s.skipped.len(),
-                        frames = s.frames,
-                        rate = s.sample_rate,
-                        "aligned tracks written"
-                    ),
+                    Ok(s) => {
+                        info!(
+                            take,
+                            tracks = s.tracks.len(),
+                            skipped = s.skipped.len(),
+                            frames = s.frames,
+                            rate = s.sample_rate,
+                            "aligned tracks written"
+                        );
+                        if let Ok(mut a) = aligned.lock() {
+                            a.insert(
+                                take,
+                                s.tracks
+                                    .iter()
+                                    .map(|t| (t.device.clone(), t.source.clone()))
+                                    .collect(),
+                            );
+                        }
+                    }
                     Err(e) => warn!(take, error = %e, "take not aligned"),
                 }
             }
@@ -306,6 +331,10 @@ impl Call {
             link: None,
             remove: Vec::new(),
             local_busy: Default::default(),
+            aligned: Default::default(),
+            aligned_seeded: false,
+            tracks_sent: BTreeMap::new(),
+            tracks_due_us: 0,
         }
     }
 
@@ -454,7 +483,7 @@ impl Call {
     /// Align each take once its guests' audio tracks and timing metadata
     /// are all verified, and again when a late track arrives.
     pub fn with_alignment(mut self, cfg: castcorder_align::AlignConfig) -> Self {
-        self.align = Some(spawn_aligner(cfg));
+        self.align = Some(spawn_aligner(cfg, self.aligned.clone()));
         self
     }
 
@@ -594,6 +623,117 @@ impl Call {
         }
         if !completed.is_empty() {
             self.align_completed(completed);
+        }
+    }
+
+    /// The call's takes and tracks as producers see them, without the folder.
+    fn tracks_state(&mut self) -> TracksState {
+        let takes: Vec<u32> = match &self.call_dir {
+            Some(dir) => {
+                if !self.aligned_seeded {
+                    self.aligned_seeded = true;
+                    if let Ok(mut a) = self.aligned.lock() {
+                        for t in 1..=self.last_take {
+                            let set = crate::tracks::aligned_on_disk(dir, TakeId(t));
+                            if !set.is_empty() {
+                                a.entry(t).or_insert(set);
+                            }
+                        }
+                    }
+                }
+                (1..=self.last_take)
+                    .filter(|t| dir.join(crate::tracks::take_dir(TakeId(*t))).is_dir())
+                    .collect()
+            }
+            None => (1..=self.last_take).collect(),
+        };
+        let receiving: Vec<crate::tracks::Receiving> = self
+            .pullers
+            .values()
+            .filter_map(|p| p.receiving())
+            .map(|(e, have, total)| crate::tracks::Receiving {
+                take: e.offer.take,
+                device: e.offer.device.clone(),
+                name: e.offer.name.clone(),
+                have,
+                total,
+            })
+            .collect();
+        let recording_take = match self.status {
+            TakeStatus::Recording { take, .. } => Some(take),
+            TakeStatus::Idle => None,
+        };
+        let who: Vec<String> = self
+            .names
+            .values()
+            .cloned()
+            .chain(self.participant.iter().map(|p| p.name.clone()))
+            .collect();
+        let aligned = self.aligned.lock().map(|a| a.clone()).unwrap_or_default();
+        let mut out = Vec::new();
+        for t in takes {
+            let take = TakeId(t);
+            let entries = match self.library.entries(take) {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(take = t, error = %e, "take manifest unreadable; not shown to producers");
+                    continue;
+                }
+            };
+            let recording: &[String] = if recording_take == Some(take) {
+                &who
+            } else {
+                &[]
+            };
+            out.push(crate::tracks::take_tracks(
+                take,
+                &entries,
+                &receiving,
+                aligned.get(&t),
+                recording,
+            ));
+        }
+        TracksState {
+            folder: None,
+            takes: out,
+        }
+    }
+
+    /// Every half second: send each producer the takes and tracks if they
+    /// changed for it (the call's folder only to the host machine's page).
+    fn publish_tracks(&mut self) {
+        let now = self.timeline.now_us();
+        if now < self.tracks_due_us {
+            return;
+        }
+        self.tracks_due_us = now + TRACKS_EVERY_US;
+        let producers = self.room.producers();
+        self.tracks_sent.retain(|c, _| producers.contains(c));
+        if producers.is_empty() {
+            return;
+        }
+        let state = self.tracks_state();
+        let folder = self.call_dir.as_ref().map(|d| {
+            std::path::absolute(d)
+                .unwrap_or_else(|_| d.clone())
+                .display()
+                .to_string()
+        });
+        for id in producers {
+            let mut s = state.clone();
+            if self.room.role(id).host_machine {
+                s.folder = folder.clone();
+            }
+            if self.tracks_sent.get(&id) == Some(&s) {
+                continue;
+            }
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(id)) {
+                if rpc.emit(Event::Tracks(s.clone())).is_err() {
+                    warn!(guest = id, "tracks state not sent: channel closed");
+                    continue;
+                }
+                self.tracks_sent.insert(id, s);
+            }
         }
     }
 
@@ -920,6 +1060,7 @@ impl Call {
                         host.remove(id);
                     }
                     self.sync();
+                    self.publish_tracks();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
                     let wait = deadline.saturating_sub(clock.monotonic());

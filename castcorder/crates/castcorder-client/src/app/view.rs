@@ -76,6 +76,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     </li>
                 </For>
             </ul>
+            <recordings::Recordings ui=ui/>
         </Show>
     }
 }
@@ -117,6 +118,9 @@ pub(super) fn App() -> impl IntoView {
         camera_state: RwSignal::new(String::new()),
         video_rec: RwSignal::new(String::new()),
         profile_warnings: RwSignal::new(Vec::new()),
+        takes: RwSignal::new(None),
+        progress: RwSignal::new(Default::default()),
+        delivered: RwSignal::new(Default::default()),
     };
     if bad_link {
         ui.warning
@@ -205,6 +209,7 @@ pub(super) fn App() -> impl IntoView {
                 </li>
             </For>
         </ul>
+        <recordings::YourRecordings ui=ui/>
         <p>"Errors: " <code id="errors">{move || ui.errors.get().join(" | ")}</code></p>
         <style>
             ".tiles { display: flex; flex-wrap: wrap; gap: 8px; }

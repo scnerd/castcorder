@@ -203,3 +203,28 @@ fn live_status_follows_a_guest_and_a_take() {
     assert_eq!(control.live_status(), None, "stopped");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// "Open recordings folder" (tray and producer page) opens `<library>/<call>`:
+/// the path it resolves, before and after the host starts, absolute and
+/// existing once the host runs. Nothing is opened here.
+#[test]
+fn the_recordings_folder_is_the_calls_folder_in_the_library() {
+    let root = scratch("recordings-folder");
+    let control = HostControl::new(config(&root));
+    let expected = std::path::absolute(root.join("library").join("app-test")).unwrap();
+    assert_eq!(
+        control.recordings_folder(),
+        expected,
+        "before the host starts"
+    );
+    control.start().unwrap();
+    let folder = control.recordings_folder();
+    assert_eq!(folder, expected, "while the host runs");
+    assert!(
+        folder.is_absolute() && folder.is_dir(),
+        "{}",
+        folder.display()
+    );
+    control.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}

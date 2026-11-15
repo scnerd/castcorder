@@ -52,6 +52,7 @@ mod join;
 mod lifecycle;
 mod media;
 mod native;
+mod recordings;
 mod recvideo;
 mod rpc;
 mod view;
@@ -333,6 +334,12 @@ struct Ui {
     video_rec: RwSignal<String>,
     /// Producers: devices that cannot meet the recording profile, as text.
     profile_warnings: RwSignal<Vec<String>>,
+    /// Producers: every take's tracks as the host last reported them.
+    takes: RwSignal<Option<castcorder_protocol::TracksState>>,
+    /// This device's tracks being sent to the host: item name to percent.
+    progress: RwSignal<std::collections::BTreeMap<String, u8>>,
+    /// Items the host confirmed (their local copies are deleted).
+    delivered: RwSignal<BTreeSet<String>>,
 }
 
 impl Ui {
@@ -445,7 +452,24 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
             "outbox" => offer_tracks(&get(&d, "offers")),
             "xfer-out" => send_frames(&get(&d, "frames")),
+            "xfer-progress" => ui.progress.set(
+                Array::from(&get(&d, "items"))
+                    .iter()
+                    .map(|i| {
+                        let i = Array::from(&i);
+                        (
+                            i.get(0).as_string().unwrap_or_default(),
+                            i.get(1).as_f64().unwrap_or(0.0) as u8,
+                        )
+                    })
+                    .collect(),
+            ),
             "synced" => {
+                if !get(&d, "log").is_truthy() {
+                    ui.delivered.update(|s| {
+                        s.insert(string(&d, "name"));
+                    });
+                }
                 let ctx = with_engine(|e| e.ctx.clone());
                 info!(call = %ctx.call, device = %ctx.device, track = %string(&d, "name"), "track synced to the host; local copy deleted");
             }

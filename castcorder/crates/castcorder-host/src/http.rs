@@ -27,6 +27,9 @@
 //!   `error`); `POST /native/join` takes `{"device":NAME|null}` (null: the
 //!   default input) and `POST /native/leave` leaves; both answer the state,
 //!   or 409 with the reason.
+//! - `POST /folder/open`, under the same guard: opens the call's folder
+//!   (`<library>/<call>`) in the host machine's file manager; 204, or 409
+//!   with the reason. It takes no path: only that folder is ever opened.
 //! - Any other `GET` serves a file from the client build (flat directory;
 //!   `/` is `index.html`).
 
@@ -58,6 +61,8 @@ pub struct App {
     pub host_id: String,
     /// The host's own participant (`/native`).
     pub native: Arc<crate::participant::NativeCtl>,
+    /// The call's folder (`/folder/open`).
+    pub call_dir: PathBuf,
 }
 
 /// The header a `/native` request must carry. A page on another origin
@@ -428,6 +433,18 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 "the native microphone is only available to the host machine's own page",
             )
         }
+        ("POST", "/folder/open") if !native_allowed(req, producer) => text(
+            403,
+            "the recordings folder opens only from the host machine's own page",
+        ),
+        ("POST", "/folder/open") => match crate::open_folder(&app.call_dir) {
+            Ok(()) => Response {
+                status: 204,
+                content_type: "text/plain",
+                body: Vec::new(),
+            },
+            Err(e) => text(409, e),
+        },
         ("GET", "/native") => json(
             200,
             serde_json::to_string(&app.native.state()).unwrap_or_default(),
@@ -526,10 +543,19 @@ mod tests {
 
     /// One request with extra header lines; the status and body.
     fn request_with(addr: std::net::SocketAddr, path: &str, headers: &str) -> (u16, String) {
+        request_method_with(addr, "GET", path, headers)
+    }
+
+    fn request_method_with(
+        addr: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &str,
+    ) -> (u16, String) {
         let mut s = TcpStream::connect(addr).unwrap();
         write!(
             s,
-            "GET {path} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n"
+            "{method} {path} HTTP/1.1\r\n{headers}Content-Length: 0\r\n\r\n"
         )
         .unwrap();
         let mut out = String::new();
@@ -550,6 +576,7 @@ mod tests {
             dist: std::env::temp_dir(),
             host_id: "h".into(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+            call_dir: std::env::temp_dir(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -583,6 +610,10 @@ mod tests {
         ] {
             let (status, body) = request_with(addr, "/native", headers);
             assert_eq!(status, 403, "{headers}: {body}");
+            // The folder opens under the same guard (the allowed case would
+            // open a window, so it is not exercised here).
+            let (status, body) = request_method_with(addr, "POST", "/folder/open", headers);
+            assert_eq!(status, 403, "{headers}: {body}");
         }
         stop.store(true, Ordering::SeqCst);
     }
@@ -599,6 +630,7 @@ mod tests {
             dist: std::env::temp_dir(),
             host_id: host_id.clone(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+            call_dir: std::env::temp_dir(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

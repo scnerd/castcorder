@@ -318,3 +318,75 @@ fn every_track_arrives_bit_exact_through_cuts_crashes_and_restarts() {
     assert_eq!(confirmed.len(), 1);
     assert!(outbox.pending().is_empty());
 }
+
+/// Both ends report how far a track has got while it moves: the host's
+/// puller (units on disk) and the guest's outbox (highest part served), each
+/// rising, below 100 until the host confirms, and gone afterwards.
+#[test]
+fn progress_rises_on_both_ends_until_the_track_is_confirmed() {
+    let guest_disk = SimDisk::new(5);
+    let (name, take, source, kind, size) = TRACKS[1];
+    let mut data = vec![0u8; size];
+    fill_pseudo_random(9, 0, &mut data);
+    let mut f = guest_disk.open(&format!("{name}.wav")).unwrap();
+    f.write_at(0, &data).unwrap();
+    f.sync().unwrap();
+    let host_disk = SimDisk::new(6);
+    let host_root = host_disk.subdir("library").unwrap();
+    let mut lib = Library::open(&host_root, CALL, cfg()).unwrap();
+    let mut outbox = GuestOutbox::new(CALL, cfg());
+    outbox
+        .add(
+            offer_meta(name, take, source, kind),
+            guest_disk.open(&format!("{name}.wav")).unwrap(),
+        )
+        .unwrap();
+    let (mut g, h) = mem_link(None, None);
+    let mut puller = Puller::new(CALL, "Alice", h);
+    for o in outbox.pending() {
+        puller.offer(&mut lib, &o).unwrap();
+    }
+    assert!(
+        outbox.progress().is_empty(),
+        "nothing served before a request"
+    );
+    let (mut host_seen, mut guest_seen) = (Vec::new(), Vec::new());
+    let mut confirmed = false;
+    for _ in 0..10_000 {
+        confirmed |= !outbox.pump(&mut g, MAX_BUFFERED).unwrap().is_empty();
+        puller.poll(&mut lib, false).unwrap();
+        if let Some((e, have, total)) = puller.receiving() {
+            assert_eq!(e.offer.name, name);
+            assert!(have <= total);
+            host_seen.push(have * 100 / total.max(1));
+        }
+        match outbox.progress().as_slice() {
+            [] => {}
+            [(n, pct)] => {
+                assert_eq!(n, name);
+                assert!(*pct <= 99);
+                guest_seen.push(u64::from(*pct));
+            }
+            more => panic!("one track only: {more:?}"),
+        }
+        if confirmed && puller.is_idle() {
+            break;
+        }
+    }
+    assert!(confirmed, "track never confirmed");
+    assert!(
+        puller.receiving().is_none(),
+        "nothing in progress once done"
+    );
+    assert!(outbox.progress().is_empty(), "no progress once confirmed");
+    for seen in [&host_seen, &guest_seen] {
+        assert!(
+            seen.windows(2).all(|w| w[0] <= w[1]),
+            "progress never falls: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|p| *p > 0 && *p < 100),
+            "progress seen mid-track: {seen:?}"
+        );
+    }
+}

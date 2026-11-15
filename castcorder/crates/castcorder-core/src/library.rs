@@ -604,6 +604,18 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         std::mem::take(&mut self.completed)
     }
 
+    /// The track being received now, if any: its manifest entry, the transfer
+    /// units already on disk and the units in the whole track.
+    pub fn receiving(&self) -> Option<(&ManifestEntry, u64, u64)> {
+        self.current.as_ref().map(|c| {
+            (
+                &c.entry,
+                c.receiver.units_have(),
+                c.receiver.geometry().n_units(),
+            )
+        })
+    }
+
     /// Whether the channel is closed (drop the puller with [`disconnect`](Self::disconnect)).
     pub fn is_closed(&self) -> bool {
         self.closed

@@ -19,6 +19,7 @@ mod participant;
 mod rendezvous;
 mod room;
 mod tls;
+mod tracks;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -108,6 +109,28 @@ impl Config {
             log: false,
         }
     }
+}
+
+/// Open `dir` in the host machine's file manager (Explorer, Finder, or
+/// whatever `xdg-open` picks). Returns once the file manager was started.
+pub fn open_folder(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{} is not a folder", dir.display()));
+    }
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    // Explorer exits 1 even when it opened the folder: only a failure to
+    // start it counts.
+    std::process::Command::new(program)
+        .arg(dir)
+        .spawn()
+        .map(|_| tracing::info!(folder = %dir.display(), "recordings folder opened"))
+        .map_err(|e| format!("cannot start {program}: {e}"))
 }
 
 /// `~/Castcorder` (`%USERPROFILE%\Castcorder` on Windows).
@@ -533,6 +556,7 @@ pub fn start(
         dist: args.dist.clone(),
         host_id: host_id.clone(),
         native: native.clone(),
+        call_dir: call_dir.clone(),
     });
     threads.push(http::serve(
         https,

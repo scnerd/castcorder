@@ -24,6 +24,9 @@ pub struct OutgoingBlob<F> {
     pub confirmed: bool,
     /// Which item this blob is (empty when the caller does not name items).
     pub item: Vec<u8>,
+    /// One past the highest unit served so far (0: none): how far the
+    /// receiver has got, since it requests the units it lacks in order.
+    pub units_reached: u64,
 }
 
 impl<F> OutgoingBlob<F> {
@@ -94,6 +97,7 @@ impl<F: StorageFile> Sender<F> {
             geometry,
             confirmed: false,
             item,
+            units_reached: 0,
         });
     }
 
@@ -223,6 +227,7 @@ impl<F: StorageFile> Sender<F> {
             match res {
                 Ok(()) => {
                     self.stats.units_encoded += 1;
+                    b.units_reached = b.units_reached.max(unit + 1);
                     self.current = Some(Current {
                         blob,
                         unit,

@@ -30,6 +30,7 @@
 //! Natively only the pure modules compile; the browser modules are wasm32-only.
 //! The real-browser test is `task test:browser:client` (see `browser-test/`).
 
+pub mod delivery;
 pub mod session;
 pub mod signal;
 pub mod wav;
