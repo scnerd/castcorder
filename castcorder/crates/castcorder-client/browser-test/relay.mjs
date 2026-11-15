@@ -200,7 +200,7 @@ try {
   docker(['run', '-d', '--rm', '--name', CONTAINER, '-p', '3478/udp', '-p', '9641/tcp', COTURN_IMAGE,
     '-n', '--listening-port=3478', '--realm=castcorder.test', '--fingerprint',
     '--use-auth-secret', '--static-auth-secret=' + SECRET, '--min-port=49160', '--max-port=49200',
-    '--prometheus', '--prometheus-username-labels', '--user-quota=8', '--max-bps=2500000',
+    '--prometheus', '--prometheus-username-labels', '--user-quota=32', '--max-bps=2500000',
     '--no-tls', '--no-dtls', '--no-tcp-relay', '--no-cli', '--log-file=stdout', '--simple-log', '--verbose']);
   const mapped = docker(['port', CONTAINER, '3478/udp']).split('\n')[0];
   const TURN_PORT = Number(mapped.split(':').pop());
