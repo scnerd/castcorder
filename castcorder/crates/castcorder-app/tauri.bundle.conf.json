@@ -6,7 +6,7 @@
     "shortDescription": "Castcorder podcast recorder",
     "longDescription": "Record podcasts with remote guests: the host runs in the app, guests join from a browser.",
     "category": "Music",
-    "licenseFile": "../../../LICENSE-MIT",
+    "licenseFile": "../../../LICENSE",
     "resources": {
       "client": "client"
     },

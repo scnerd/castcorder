@@ -1,5 +1,5 @@
 //! Reaching a host by its call link, shared by the host, the Browser Guest and
-//! the rendezvous (which is AGPL and may depend on this MIT/Apache crate, never
+//! the rendezvous (which is AGPL and may depend on this MIT crate, never
 //! the other way round).
 //!
 //! - [`link`]: the call link `https://<rendezvous>/v/<version>/#<host-id>.<call-secret>`.

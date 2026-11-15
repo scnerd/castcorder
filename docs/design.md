@@ -80,7 +80,7 @@ Each device continuously measures its clock offset to the host and logs it besid
 /deploy/                infrastructure
 ```
 
-- Licences: MIT/Apache-2.0 for the app and client crates, AGPL for the rendezvous. No GPL GStreamer plugins.
+- Licences: MIT for the app and client crates, AGPL for the rendezvous. No GPL GStreamer plugins.
 - Tooling mirrors the genesys repo: Taskfile as the single entry point, the `.githooks` chain running beads then pre-commit, hygiene-only hooks, beads for issues.
 - CI: GitHub-hosted runners (the repo is public). Linux runs every automated test tier on each pull request. A release is a version tag that builds Windows, macOS, and Linux installers and publishes the matching web client.
 - Builds are unsigned. Windows is first-class, macOS best-effort, Linux gets builds. Tauri's updater uses its own key.

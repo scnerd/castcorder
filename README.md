@@ -58,4 +58,4 @@ Same network only for now: calls across the internet need the rendezvous and TUR
 
 ## Licences
 
-MIT OR Apache-2.0 for everything except `castcorder-rendezvous`, which is AGPL-3.0-or-later.
+MIT for everything except `castcorder-rendezvous`, which is AGPL-3.0-or-later.

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Castcorder spike: raw microphone recording to OPFS from a Leptos CSR app"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 # Empty workspace table: this spike never attaches to a parent workspace.
 [workspace]
