@@ -42,7 +42,8 @@
 //!
 //! Each remote participant gets a tile (keyed by their forwarded stream id,
 //! named by their display name from the host's participant list) holding
-//! their `<video>` and `<audio>`; this guest's own camera shows in a muted
+//! their `<video>` and `<audio>` and a live level ([`meters`]: waveform and
+//! speaking ring from the audio arriving); this guest's own camera shows in a muted
 //! preview tile. JS handles live in a thread-local [`Engine`]; Leptos signals
 //! hold only plain values.
 
@@ -51,6 +52,7 @@ mod data;
 mod join;
 mod lifecycle;
 mod media;
+mod meters;
 mod native;
 mod recordings;
 mod recvideo;

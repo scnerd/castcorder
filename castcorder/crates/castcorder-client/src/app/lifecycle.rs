@@ -197,6 +197,7 @@ pub(super) fn disconnect() {
     {
         remote.set_inner_html("");
     }
+    meters::close();
 }
 
 /// Reopen the microphone if its track ended under us (a phone's system can
@@ -332,6 +333,7 @@ pub(super) fn on_wake(ui: Ui) {
 /// A click resumes a capture context that the autoplay policy suspended.
 /// Only the current join's context, and only while it is suspended.
 pub(super) fn resume_audio() {
+    meters::resume();
     if let Some(c) = with_engine(|e| e.audio.clone())
         && c.state() == AudioContextState::Suspended
     {

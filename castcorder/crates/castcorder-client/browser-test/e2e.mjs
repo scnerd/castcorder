@@ -12,7 +12,9 @@
 //    Live video (every mode, see videoChecks): each guest decodes the other's
 //    fake camera in a named tile, A sends two simulcast layers, and A's camera
 //    turned off is released, stops B's frames while audio goes on, and turned
-//    on again is decoded again, with no renegotiation.
+//    on again is decoded again, with no renegotiation. Each guest's tile for the
+//    other shows the level of the audio arriving and its speaking ring
+//    (lib/levels.mjs).
 // 3. A's producer controls start a take; ~5 s later they stop it.
 // 4. Each guest's outbox syncs its track and JSON sidecar into the host's
 //    library (--library test-results/library), verified; only then is the
@@ -78,6 +80,7 @@ import { fileURLToPath } from 'node:url';
 import { ctx } from './lib/ctx.mjs';
 import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check, opfsNames } from './lib/helpers.mjs';
 import { takeChecks } from './lib/take.mjs';
+import { liveLevelChecks } from './lib/levels.mjs';
 import { videoChecks } from './lib/video.mjs';
 import { videoRecChecks } from './lib/videorec.mjs';
 import { securityChecks } from './lib/security.mjs';
@@ -208,6 +211,9 @@ try {
 
   // Live video (every mode): each decodes the other's camera, simulcast, and
   // the camera turns off and on without renegotiating.
+  // Live levels (every mode): each tile's waveform and speaking ring follow the audio arriving.
+  await liveLevelChecks(A, B);
+
   await videoChecks(A, B);
 
   await takeChecks(A, B);

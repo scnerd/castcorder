@@ -1,0 +1,57 @@
+// Live levels on the remote tiles (cast-vr3), every mode: each guest's tile
+// for the other shows the level of the audio actually arriving (the tile's
+// data-live-level, from an AnalyserNode on the received track) and lights its
+// speaking ring while that guest's fake microphone plays. A's input is the
+// continuous test WAV; B's is Chromium's fake beep or Firefox's fake tone.
+import { waitFor, check } from './helpers.mjs';
+
+// Above this the waveform is visibly moving (-46 dBFS).
+export const LIVE = 0.005;
+
+// Sample, for `ms`, the tile on `page` of the guest whose stream id starts
+// with `origin` + '-': its live level, speaking ring, muted indicator, and
+// the waveform. Returns the readings' max, min and distinct count, the
+// tallest bar (px; 2 is flat), and in how many samples the ring was on, the
+// muted indicator showed and the waveform was dimmed.
+export function sampleTile(page, origin, ms = 3000) {
+  return page.evaluate(async ([origin, ms]) => {
+    const tile = () => document.querySelector('#remote .tile[data-origin^="' + origin + '-"]');
+    const live = [];
+    let speaking = 0, muted = 0, n = 0, dimmed = 0, tallest = 0;
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      const t = tile();
+      if (t) {
+        n++;
+        live.push(Number(t.getAttribute('data-live-level') || 0));
+        if (t.classList.contains('speaking')) speaking++;
+        if (t.classList.contains('mic-muted')) muted++;
+        const wave = t.querySelector('.tile-wave');
+        if (wave && Number(getComputedStyle(wave).opacity) < 0.9) dimmed++;
+        if (wave) for (const s of wave.children) tallest = Math.max(tallest, parseFloat(s.style.height) || 0);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return {
+      n, speaking, muted, dimmed,
+      max: live.length ? Math.max(...live) : 0,
+      min: live.length ? Math.min(...live) : 0,
+      distinct: new Set(live).size,
+      tallest,
+    };
+  }, [origin, ms]);
+}
+
+export async function liveLevelChecks(A, B) {
+  for (const [viewer, vn, origin] of [[B, 'B', 'A'], [A, 'A', 'B']]) {
+    let last = null;
+    const s = await waitFor(async () => {
+      const r = last = await sampleTile(viewer, origin, 3000);
+      return r.n > 0 && r.max >= LIVE && r.speaking > 0 && r.tallest > 2 ? r : null;
+    }, vn + ' sees ' + origin + '\x27s live level move and the speaking ring light', 30000, 0)
+      .catch((e) => { console.log('last sample: ' + JSON.stringify(last)); throw e; });
+    check(true, vn + '\x27s tile for ' + origin + ' shows the audio arriving: peak ' + s.max.toFixed(3)
+      + ', tallest bar ' + s.tallest + ' px, speaking ring on in '
+      + s.speaking + ' of ' + s.n + ' samples');
+  }
+}

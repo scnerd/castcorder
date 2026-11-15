@@ -459,6 +459,10 @@ pub(super) fn on_track(ev: RtcTrackEvent) {
         old.remove();
     }
     let _ = tile.append_child(&el);
+    // Their waveform and speaking ring, from the same stream the element plays.
+    if !video && let Some(s) = el.src_object() {
+        super::meters::watch(&origin, &tile, &s);
+    }
 }
 
 /// The tile of one remote participant (by forwarded stream id
@@ -489,6 +493,13 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     label.set_class_name("tile-name");
     label.set_text_content(Some(&tile_name(origin)));
     let _ = tile.append_child(&label);
+    // Their live level (filled by `meters`), beside the name.
+    let level = doc.create_element("div").ok()?;
+    level.set_class_name("tile-level");
+    if let Some(wave) = super::meters::tile_wave(&doc) {
+        let _ = level.append_child(&wave);
+    }
+    let _ = tile.append_child(&level);
     let _ = remote.append_child(&tile);
     Some(tile)
 }
