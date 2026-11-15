@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn smoke_uses_loopback_os_ports_and_registers_nothing() {
-        let a = AppArgs::parse(args("--smoke --port 47800")).unwrap();
+        let a = AppArgs::parse(args("--smoke --port 27800")).unwrap();
         assert!(a.no_register && a.hidden);
         assert_eq!(
             (a.config.https_port, a.config.http_port, a.config.udp_port),

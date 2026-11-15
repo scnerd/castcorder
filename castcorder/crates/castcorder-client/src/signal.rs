@@ -62,8 +62,8 @@ mod tests {
     #[test]
     fn the_role_url_sits_beside_the_offer_url() {
         assert_eq!(
-            role_url("https://192.168.1.5:47801/offer"),
-            "https://192.168.1.5:47801/role"
+            role_url("https://192.168.1.5:27801/offer"),
+            "https://192.168.1.5:27801/role"
         );
         assert_eq!(
             role_url("http://localhost:1/offer?x=1#f"),
