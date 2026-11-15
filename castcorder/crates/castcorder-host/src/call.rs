@@ -779,8 +779,12 @@ impl Call {
         let take = TakeId(self.last_take);
         // The recording profile as it stands now holds for the whole take.
         let video = self.room.record_video();
-        self.status = TakeStatus::Recording { take, video };
         let host_us = self.timeline.now_us();
+        self.status = TakeStatus::Recording {
+            take,
+            video,
+            started_us: host_us,
+        };
         info!(call = %self.library.call(), take = take.0, host_us, video, "take started");
         match self.library.take_dir(take) {
             Ok(dir) => {

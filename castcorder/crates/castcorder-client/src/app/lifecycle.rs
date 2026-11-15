@@ -75,6 +75,7 @@ pub(super) fn on_tick(ui: Ui, epoch: u32) {
     send_signal(&Signal::Hb);
     check_connection(ui, epoch);
     check_media(ui, epoch);
+    update_elapsed(ui);
     spawn_local(async move {
         if let Err(e) = refresh_inbound(ui).await {
             warn!(error = %describe(&e), "stats failed");

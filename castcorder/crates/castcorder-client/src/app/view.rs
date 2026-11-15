@@ -362,6 +362,7 @@ fn Call(ui: Ui) -> impl IntoView {
                 </div>
                 <div class="pill rec" role="status" hidden=move || !take_rec()>
                     <span class="dot"></span>"REC"<span>{move || take_label(&ui.take.get())}</span>
+                    <span class="rec-time" id="rec-elapsed" hidden=move || ui.elapsed.get().is_empty()>{move || ui.elapsed.get()}</span>
                 </div>
                 <div class="pill idle" role="status" hidden=take_rec>
                     <span class="dot"></span>"Not recording"
@@ -559,6 +560,8 @@ pub(super) fn App() -> impl IntoView {
         role: RwSignal::new(Role::default()),
         room: RwSignal::new(None),
         take: RwSignal::new(String::new()),
+        take_started_us: RwSignal::new(None),
+        elapsed: RwSignal::new(String::new()),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),
         // `?camera=off` joins with the camera off.

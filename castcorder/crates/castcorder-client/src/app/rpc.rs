@@ -106,6 +106,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                     info!(call = %ctx.call, device = %ctx.device, participant = participant.0, rejoined, recording = ?e.recording, "joined");
                     e.participant = Some(participant);
                     e.pings_sent = 0;
+                    e.clock = Default::default();
                     e.next_ping = 0.0;
                     ui.participant.set(participant.0.to_string());
                     match rpc.send(Request::GetTakeStatus) {
@@ -153,6 +154,12 @@ pub(super) fn pump_rpc(ui: Ui) {
                     set(&o, "t2", t2_us as f64);
                     set(&o, "t3", e.rx_us);
                     set(&o, "timeline", timeline as f64);
+                    e.clock.push(castcorder_core::clocksync::ClockSample {
+                        t0_us,
+                        t1_us,
+                        t2_us,
+                        t3_us: e.rx_us as i64,
+                    });
                     samples.push(o);
                 }
                 Some(other) => warn!(response = ?other, "clock ping refused"),
@@ -254,13 +261,22 @@ pub(super) fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
         e.status = Some(s);
         e.recording
     });
+    ui.take_started_us.set(match s {
+        TakeStatus::Recording { started_us, .. } => Some(started_us),
+        TakeStatus::Idle => None,
+    });
     ui.take.set(match s {
         TakeStatus::Idle => "idle".into(),
-        TakeStatus::Recording { take, video: false } => format!("recording take {}", take.0),
-        TakeStatus::Recording { take, video: true } => {
+        TakeStatus::Recording {
+            take, video: false, ..
+        } => format!("recording take {}", take.0),
+        TakeStatus::Recording {
+            take, video: true, ..
+        } => {
             format!("recording take {} (with video)", take.0)
         }
     });
+    update_elapsed(ui);
     for c in on_take_status(current, s) {
         match c {
             RecorderCommand::Start(take, video) => start_track(ui, take, video),
@@ -537,4 +553,19 @@ pub(super) async fn refresh_inbound(ui: Ui) -> Result<(), JsValue> {
     call(&report, "forEach", &[f.as_ref()])?;
     ui.inbound_json.set(stringify(&arr));
     Ok(())
+}
+
+/// Refresh the pill's take time: how long the take has run by the host's
+/// clock as this device estimates it (empty while idle, or before the first
+/// pong gives that estimate).
+pub(super) fn update_elapsed(ui: Ui) {
+    let text = match ui.take_started_us.get_untracked() {
+        Some(start) => with_engine(|e| e.clock.host_us(device_now_us() as i64))
+            .map(|host_us| format_elapsed((host_us - start as f64) / 1e6))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    if ui.elapsed.get_untracked() != text {
+        ui.elapsed.set(text);
+    }
 }

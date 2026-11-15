@@ -232,6 +232,11 @@ pub enum TakeStatus {
         /// Devices record their webcams too: the call's recording profile
         /// when the take started.
         video: bool,
+        /// When the take started, on the host timeline (microseconds since the
+        /// Unix epoch; the `host_us` of [`Response::TakeStartedAt`]). A device
+        /// maps it to its own clock with its clock estimate to show how long
+        /// the take has run, also when it joined mid-take.
+        started_us: i64,
     },
 }
 
@@ -569,6 +574,7 @@ mod tests {
             CoreMessage::Event(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(2),
                 video: true,
+                started_us: 0,
             })),
             CoreMessage::Event(Event::ProfileUnmet {
                 participant: ParticipantId(3),
@@ -747,12 +753,14 @@ mod tests {
         assert_eq!(encode(&Event::Room(room)), vec![3, 0, 1, 0, 0, 0, 0]);
         // Video recording (appended): the take status says whether devices
         // record video; a producer sets it; a device that cannot comply says so.
+        // TakeStatus::Recording.started_us (appended): a zigzag varint, -1 is 1.
         assert_eq!(
             encode(&Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(3),
-                video: true
+                video: true,
+                started_us: -1,
             })),
-            vec![1, 1, 3, 1]
+            vec![1, 1, 3, 1, 1]
         );
         assert_eq!(
             encode(&Request::Room(RoomAction::SetRecordVideo(true))),

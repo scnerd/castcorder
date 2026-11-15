@@ -124,6 +124,8 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 .pill .dot { width: 10px; height: 10px; border-radius: 50%; }
 .pill.rec { background: var(--rec); color: #ffffff; font-weight: 700; }
 .pill.rec .dot { background: #ffffff; animation: pulse 1.6s ease-in-out infinite; }
+.pill.rec .rec-time { font-variant-numeric: tabular-nums; font-weight: 600; opacity: 0.9; }
+.pill.rec .rec-time[hidden] { display: none; }
 .pill.idle { background: var(--surface2); color: var(--muted); }
 .pill.idle .dot { border: 2px solid var(--muted); }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;

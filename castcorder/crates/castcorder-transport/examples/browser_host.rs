@@ -132,7 +132,11 @@ impl Call {
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
-        self.status = TakeStatus::Recording { take, video: false };
+        self.status = TakeStatus::Recording {
+            take,
+            video: false,
+            started_us: 0,
+        };
         info!(call = "browser-test", take = take.0, "take started");
         self.broadcast();
         Ok(take)

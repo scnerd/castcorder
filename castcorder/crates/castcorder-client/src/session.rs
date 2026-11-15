@@ -13,16 +13,34 @@ pub enum RecorderCommand {
     Stop(TakeId),
 }
 
+/// A take's running time for the REC pill: "0:07", "12:05", "1:02:03" (negative
+/// or non-finite counts as zero: the clock estimate is not exact).
+pub fn format_elapsed(secs: f64) -> String {
+    let s = if secs.is_finite() {
+        secs.max(0.0) as u64
+    } else {
+        0
+    };
+    let (h, m, s) = (s / 3600, s % 3600 / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 /// The recorder commands that bring a guest recording `current` in line with
 /// the host's `status`. A guest that joins mid-take starts at once; a take that
 /// replaces another (a missed stop) stops the old track first.
 pub fn on_take_status(current: Option<TakeId>, status: TakeStatus) -> Vec<RecorderCommand> {
     match (current, status) {
         (None, TakeStatus::Idle) => vec![],
-        (None, TakeStatus::Recording { take, video }) => vec![RecorderCommand::Start(take, video)],
+        (None, TakeStatus::Recording { take, video, .. }) => {
+            vec![RecorderCommand::Start(take, video)]
+        }
         (Some(old), TakeStatus::Idle) => vec![RecorderCommand::Stop(old)],
         (Some(old), TakeStatus::Recording { take, .. }) if old == take => vec![],
-        (Some(old), TakeStatus::Recording { take, video }) => {
+        (Some(old), TakeStatus::Recording { take, video, .. }) => {
             vec![
                 RecorderCommand::Stop(old),
                 RecorderCommand::Start(take, video),
@@ -407,10 +425,20 @@ mod tests {
     }
 
     #[test]
+    fn elapsed_time_reads_like_a_stopwatch() {
+        assert_eq!(format_elapsed(-0.4), "0:00");
+        assert_eq!(format_elapsed(7.9), "0:07");
+        assert_eq!(format_elapsed(725.0), "12:05");
+        assert_eq!(format_elapsed(3723.0), "1:02:03");
+        assert_eq!(format_elapsed(f64::NAN), "0:00");
+    }
+
+    #[test]
     fn take_status_drives_the_recorder() {
         let rec = |n| TakeStatus::Recording {
             take: TakeId(n),
             video: n == 2,
+            started_us: 0,
         };
         assert_eq!(on_take_status(None, TakeStatus::Idle), vec![]);
         assert_eq!(on_take_status(None, rec(1)), vec![Start(TakeId(1), false)]);

@@ -83,7 +83,8 @@ use web_sys::{
 
 use crate::js::{call, describe, get, num, object, set, string, stringify};
 use crate::session::{
-    RecorderCommand, clean_name, default_name, on_take_status, reconnect_delay_ms, track_name,
+    RecorderCommand, clean_name, default_name, format_elapsed, on_take_status, reconnect_delay_ms,
+    track_name,
 };
 use crate::signal::Signal;
 use castcorder_link::CallLink;
@@ -194,6 +195,8 @@ struct Engine {
     pings: Vec<RequestId>,
     pings_sent: u32,
     next_ping: f64,
+    /// This device's clock against the host's, from the pongs (the pill's take time).
+    clock: castcorder_core::clocksync::ClockEstimator,
     /// Device time (us) the latest "control" message arrived: t3 of a pong.
     rx_us: f64,
     /// Producer requests awaiting their response (the panel shows it), and
@@ -321,6 +324,10 @@ struct Ui {
     room: RwSignal<Option<RoomState>>,
     /// The host's take status, as text ("idle", "recording take N").
     take: RwSignal<String>,
+    /// When the recording take started on the host timeline (us), from its status.
+    take_started_us: RwSignal<Option<i64>>,
+    /// How long the take has run ("1:05"), empty until this device knows the host's clock.
+    elapsed: RwSignal<String>,
     /// The last producer request's result.
     producer_result: RwSignal<String>,
     /// The last debug request's result.
