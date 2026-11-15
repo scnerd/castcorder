@@ -231,7 +231,8 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                 <div class="lobby-form">
                     <div>
                         <span class="small muted">"You're joining"</span>
-                        <h1>"A Castcorder call"</h1>
+                        // One h1 in the page at a time (tests click it as a user gesture).
+                        <Show when=move || !ui.joined.get() fallback=|| view! { <p class="lobby-title">"A Castcorder call"</p> }><h1>"A Castcorder call"</h1></Show>
                     </div>
                     <div class="field">
                         <label for="name">"Your name"</label>
@@ -358,7 +359,7 @@ fn Call(ui: Ui) -> impl IntoView {
         <div class="call" hidden=move || !ui.joined.get()>
             <header class="topbar" class:recording=take_rec>
                 <div class="title">
-                    <strong>"Castcorder"</strong>
+                    <Show when=move || ui.joined.get() fallback=|| view! { <strong>"Castcorder"</strong> }><h1>"Castcorder"</h1></Show>
                     <span class="small muted">{move || if producer() { "You are a producer on this call" } else { "Guest" }}</span>
                 </div>
                 <div class="pill rec" role="status" hidden=move || !take_rec()>
