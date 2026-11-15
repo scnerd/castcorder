@@ -8,7 +8,7 @@
 // bit-exact through it in chromium): B sees A's slashed mic and a dimmed
 // waveform that keeps moving with A's reported raw level (about 10 Hz), no
 // speaking ring, and silence arriving; after unmute, A is heard again.
-import { sleep, waitFor, check } from './helpers.mjs';
+import { waitFor, check } from './helpers.mjs';
 
 // Above this the waveform is visibly moving (-46 dBFS).
 export const LIVE = 0.005;
@@ -71,13 +71,21 @@ export const SILENT = 0.003;
 export async function muteChecks(A, B) {
   await A.click('#mute');
   check((await A.getAttribute('#mute', 'aria-pressed')) === 'true', 'A muted in the call (mid-take)');
-  // Let the audio already in flight play out.
-  await sleep(800);
+  // Let the audio already in flight play out (a slow runner's jitter buffer
+  // can hold a second or more): wait for a second of silence first.
+  const tMute = Date.now();
+  let quiet = null;
+  await waitFor(async () => {
+    quiet = await sampleTile(B, 'A', 1000);
+    return quiet.n > 0 && quiet.max < SILENT ? quiet : null;
+  }, 'B receives silence from muted A', 10000, 0)
+    .catch((e) => { console.log('last sample: ' + JSON.stringify(quiet)); throw e; });
+  console.log('B heard silence from muted A after ' + ((Date.now() - tMute) / 1000).toFixed(1) + ' s');
   const s = await sampleTile(B, 'A', 2500);
   console.log('B samples A muted: ' + JSON.stringify(s));
   check(s.n > 0 && s.muted === s.n && s.dimmed === s.n,
     'B sees A\x27s slashed mic and a dimmed waveform in every sample (' + s.muted + '/' + s.dimmed + ' of ' + s.n + ')');
-  check(s.max < SILENT, 'B receives silence from muted A (live peak ' + s.max.toFixed(4) + ')');
+  check(s.max < SILENT, 'B keeps receiving silence from muted A (live peak ' + s.max.toFixed(4) + ')');
   check(s.speaking === 0, 'no speaking ring on A\x27s tile while A is muted');
   check(s.micMax >= LIVE && s.micUpdates >= 10 && s.tallest > 2,
     'A\x27s dimmed waveform keeps moving with its raw microphone: ' + s.micUpdates + ' level reports in 2.5 s, peak '
