@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use castcorder_app::AppArgs;
 use castcorder_app::deeplink;
-use castcorder_app::host_control::{HostControl, tray_text};
+use castcorder_app::host_control::{Badge, HostControl, tray_badge, tray_text};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
@@ -337,7 +337,14 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
         tray = tray.icon(icon.clone());
     }
     let tray = tray.build(app)?;
-    let recording_icon = app.default_window_icon().map(recording_variant);
+    // One icon per badge, painted once.
+    let badge_icon = |badge: Badge| {
+        app.default_window_icon()
+            .map(|i| badge_variant(i, badge.rgb()))
+    };
+    let recording_icon = badge_icon(Badge::Recording);
+    let attention_icon = badge_icon(Badge::NeedsAttention);
+    let syncing_icon = badge_icon(Badge::Syncing);
     let idle_icon = app
         .default_window_icon()
         .map(|i| tauri::image::Image::new_owned(i.rgba().to_vec(), i.width(), i.height()));
@@ -358,10 +365,11 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             let _ = status_item.set_text(&text);
             let _ = tray.set_tooltip(Some(format!("Castcorder: {text}")));
             let _ = tray.set_title(live.recording.map(|t| format!("REC {t}")));
-            let icon = if live.recording.is_some() {
-                recording_icon.clone()
-            } else {
-                idle_icon.clone()
+            let icon = match tray_badge(&live) {
+                Some(Badge::Recording) => recording_icon.clone(),
+                Some(Badge::NeedsAttention) => attention_icon.clone(),
+                Some(Badge::Syncing) => syncing_icon.clone(),
+                None => idle_icon.clone(),
             };
             if icon.is_some() {
                 let _ = tray.set_icon(icon);
@@ -371,8 +379,9 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     Ok(())
 }
 
-/// `icon` with a red dot in its lower right corner: the tray while recording.
-fn recording_variant(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
+/// `icon` with a dot of colour `rgb` in its lower right corner: the tray's
+/// state badge (red recording, amber needs a look, blue syncing).
+fn badge_variant(icon: &tauri::image::Image<'_>, rgb: [u8; 3]) -> tauri::image::Image<'static> {
     let (w, h) = (icon.width() as i64, icon.height() as i64);
     let mut rgba = icon.rgba().to_vec();
     let r = (w.min(h) / 3).max(2);
@@ -381,7 +390,7 @@ fn recording_variant(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'sta
         for x in 0..w {
             if (x - cx).pow(2) + (y - cy).pow(2) <= r * r {
                 let i = ((y * w + x) * 4) as usize;
-                rgba[i..i + 4].copy_from_slice(&[220, 30, 30, 255]);
+                rgba[i..i + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
             }
         }
     }

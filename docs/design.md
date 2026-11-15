@@ -160,8 +160,8 @@ The design pass (cast-72g) is the "Castcorder UX" canvas; `castcorder-client/sty
 - **Red means REC and nothing else.** The REC pill (take number and elapsed time, counted from the host's take start so a mid-take joiner agrees), a red rule under the top bar for the whole take, the red own-track waveform, the tab title (`REC take 3 - Castcorder`) and favicon, and the tray dot. Muted is an inverted button with a slashed mic, never red. Amber is for things to check; warnings say what still works and never block.
 - **Mute is call-only.** It disables the live stream's microphone track; the raw microphone, which is the track, keeps recording. The first mute explains this once per browser profile, and the dock's own-track waveform keeps moving while muted.
 - **Two signals per person, kept apart:** live (are we hearing them?) and track (is their machine recording?). Only signals backed by real data are drawn: per-participant levels, track status and remote mute are open (cast-vr3, cast-2y4, cast-xe2).
-- **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge: red recording, blue syncing, amber needs a look.
-- **Open.** Device selection and recorded vs live sources (cast-94c), the host app home with calls (cast-brj), tray syncing badges (cast-0f0), the live transcript (cast-7hm).
+- **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge painted at runtime: red recording, amber needs a look (a device short of disk, the library volume included, or a source that cannot meet the recording profile), blue while guests sync; red wins over amber, amber over blue.
+- **Open.** Device selection and recorded vs live sources (cast-94c), the host app home with calls (cast-brj), the live transcript (cast-7hm).
 
 ## Not in v1
 

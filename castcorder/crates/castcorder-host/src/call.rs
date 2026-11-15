@@ -37,6 +37,10 @@ pub struct LiveStatus {
     pub last_take: u32,
     /// Guests whose outbox is still syncing to the library.
     pub syncing: usize,
+    /// Things that need a look: devices short of disk (the library volume
+    /// included) and guests with a source that cannot be recorded as the
+    /// profile asks. The call goes on; the tray shows an amber badge.
+    pub attention: usize,
 }
 
 /// A request from the HTTP side to the host thread.
@@ -248,6 +252,10 @@ pub struct Call {
     disk_due_us: i64,
     /// The [`Event::DeviceDisk`] each producer connection was last sent.
     disk_sent: BTreeMap<u64, Vec<DeviceDisk>>,
+    /// Guests that said a source cannot meet the recording profile this take
+    /// or the last ([`Request::ProfileUnmet`]); cleared when the next take
+    /// starts or the guest leaves.
+    unmet: std::collections::BTreeSet<GuestId>,
 }
 
 /// How often the library volume's free space is read (host timeline, us).
@@ -355,6 +363,7 @@ impl Call {
             library_free_due_us: 0,
             disk_due_us: 0,
             disk_sent: BTreeMap::new(),
+            unmet: Default::default(),
         }
     }
 
@@ -434,6 +443,7 @@ impl Call {
     /// A device cannot meet the recording profile: warn, and tell every
     /// producer. The take goes on.
     fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
+        self.unmet.insert(id);
         let name = self.names.get(&id).cloned().unwrap_or_default();
         warn!(guest = id.0, name = %name, take = issue.take.0, source = %issue.source.0,
             kind = ?issue.kind, reason = %issue.reason, "device cannot meet the recording profile");
@@ -865,6 +875,7 @@ impl Call {
         let take = TakeId(self.last_take);
         // Read the library volume afresh for this take.
         self.library_free_due_us = 0;
+        self.unmet.clear();
         // The recording profile as it stands now holds for the whole take.
         let video = self.room.record_video();
         let host_us = self.timeline.now_us();
@@ -939,6 +950,7 @@ impl Call {
             },
             last_take: self.last_take,
             syncing: self.pullers.values().filter(|p| !p.is_idle()).count(),
+            attention: self.device_disk().iter().filter(|d| d.low).count() + self.unmet.len(),
         }
     }
 
@@ -1125,6 +1137,7 @@ impl Call {
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
                                 self.disk.remove(&guest);
+                                self.unmet.remove(&guest);
                                 self.drop_puller(guest);
                                 self.safety.guest_gone(guest.0);
                                 self.hear(Heard::Gone(guest));
