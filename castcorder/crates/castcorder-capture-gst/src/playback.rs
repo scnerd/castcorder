@@ -78,13 +78,7 @@ impl Playback {
     }
 
     fn add(&mut self, key: u64) -> io::Result<()> {
-        let desc = format!(
-            "appsrc name=src is-live=true format=time do-timestamp=false \
-             caps=audio/x-opus,channel-mapping-family=0,channels=2,rate=48000 \
-             ! opusdec plc=true ! audioconvert ! audioresample ! {MIX_CAPS}"
-        );
-        let bin = gst::parse::bin_from_description(&desc, true)
-            .map_err(|e| err(format!("playback stream: {e}")))?;
+        let bin = stream_bin()?;
         let src = bin
             .by_name("src")
             .and_then(|e| e.downcast::<gst_app::AppSrc>().ok())
@@ -168,5 +162,37 @@ impl Playback {
 impl Drop for Playback {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+/// One remote stream's bin: Opus in through an appsrc named "src", mixer caps
+/// out through a ghost "src" pad. The caps end in a capsfilter: a bare caps
+/// string is only valid between two elements, not at the end of a bin.
+fn stream_bin() -> io::Result<gst::Bin> {
+    let desc = format!(
+        "appsrc name=src is-live=true format=time do-timestamp=false \
+         caps=audio/x-opus,channel-mapping-family=0,channels=2,rate=48000 \
+         ! opusdec plc=true ! audioconvert ! audioresample \
+         ! capsfilter caps={MIX_CAPS}"
+    );
+    gst::parse::bin_from_description(&desc, true).map_err(|e| err(format!("playback stream: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_bin_builds_and_links_to_a_mixer() {
+        init().unwrap();
+        let bin = stream_bin().unwrap();
+        assert!(bin.by_name("src").is_some());
+        let pipeline = gst::Pipeline::new();
+        let mixer = gst::ElementFactory::make("audiomixer").build().unwrap();
+        let sink = gst::ElementFactory::make("fakesink").build().unwrap();
+        pipeline.add_many([&mixer, &sink]).unwrap();
+        mixer.link(&sink).unwrap();
+        pipeline.add(&bin).unwrap();
+        bin.link(&mixer).unwrap();
     }
 }
