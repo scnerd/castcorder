@@ -61,7 +61,7 @@ use web_sys::{
 };
 
 use crate::js::{call, describe, get, num, object, set, string};
-use crate::session::{ClockWatch, TimestampWatch};
+use crate::session::{ClockWatch, TimestampJump, TimestampWatch};
 use crate::wav::{
     HEADER_LEN, frame_offset, frames_in_file, header_frames, interleave_le, parse_header, peak,
     wav_header,
@@ -222,6 +222,12 @@ const MAX_DISCONTINUITIES: u32 = 1000;
 impl Active {
     /// Record `frames` inserted (`inserted`) or dropped at the current position.
     fn discontinuity(&mut self, inserted: bool, frames: u64, cause: &str) {
+        self.discontinuity_ago(inserted, frames, 0, cause);
+    }
+
+    /// As [`Self::discontinuity`], for one that began `ago` frames back.
+    fn discontinuity_ago(&mut self, inserted: bool, frames: u64, ago: u64, cause: &str) {
+        let at = self.frames.saturating_sub(ago);
         if inserted {
             self.inserted_frames += frames;
         } else {
@@ -229,7 +235,7 @@ impl Active {
         }
         let kind = if inserted { "inserted" } else { "dropped" };
         self.timing_line(&TimingLine::Discontinuity {
-            frame: self.frames,
+            frame: at,
             kind: kind.into(),
             frames,
             cause: cause.into(),
@@ -237,13 +243,13 @@ impl Active {
         if self.discontinuities.length() < MAX_DISCONTINUITIES {
             let o = object();
             set(&o, "kind", kind);
-            set(&o, "atFrame", self.frames as f64);
+            set(&o, "atFrame", at as f64);
             set(&o, "frames", frames as f64);
             set(&o, "cause", cause);
             self.discontinuities.push(&o);
         }
         if self.discontinuities.length() <= 10 {
-            warn!(call = %self.call, device = %self.device, take = self.take, kind, frames, cause, at_frame = self.frames, "capture discontinuity");
+            warn!(call = %self.call, device = %self.device, take = self.take, kind, frames, cause, at_frame = at, "capture discontinuity");
         }
     }
 
@@ -527,9 +533,15 @@ const MAX_HELD_SECONDS: u64 = 30;
 /// Record a discontinuity at the current position of the recording track, or
 /// of the audio held for the one opening. False if nothing is recording yet.
 fn note_discontinuity(inserted: bool, frames: u64, cause: &'static str) -> bool {
+    note_discontinuity_ago(inserted, frames, 0, cause)
+}
+
+/// As [`note_discontinuity`], for one that began `ago` frames back (ignored
+/// while the audio is held: it is placed at the end of what is held).
+fn note_discontinuity_ago(inserted: bool, frames: u64, ago: u64, cause: &'static str) -> bool {
     let recorded = ACTIVE.with(|a| match a.borrow_mut().as_mut() {
         Some(a) if a.format.is_some() => {
-            a.discontinuity(inserted, frames, cause);
+            a.discontinuity_ago(inserted, frames, ago, cause);
             true
         }
         _ => false,
@@ -771,13 +783,14 @@ pub(crate) fn mstp_init(track: &JsValue) -> JsValue {
 /// was lost before this worker read it (positive), or a buffer overlapped the
 /// one before (negative). Never silent: logged, and written into a recording
 /// track's timing metadata and sidecar as a discontinuity.
-fn timestamp_jump(path: &str, frames: i64, ts_us: f64) {
+fn timestamp_jump(path: &str, jump: TimestampJump, ts_us: f64) {
+    let TimestampJump { frames, frames_ago } = jump;
     let cause = if frames > 0 {
         "audio timestamps skipped: frames lost before the worker read them"
     } else {
         "audio timestamps overlapped the previous buffer"
     };
-    if !note_discontinuity(frames < 0, frames.unsigned_abs(), cause) {
+    if !note_discontinuity_ago(frames < 0, frames.unsigned_abs(), frames_ago, cause) {
         warn!(
             capture_path = path,
             frames, ts_us, "raw audio timestamps jumped (no track recording)"
