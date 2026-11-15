@@ -196,6 +196,10 @@ struct Engine {
     /// when (performance ms) the next is due.
     pings: Vec<RequestId>,
     pings_sent: u32,
+    /// Microphone reports (`MicState`) awaiting their answer, and when
+    /// (Date.now() ms) the last was sent.
+    mic_requests: Vec<RequestId>,
+    mic_sent_at: f64,
     /// Disk reports awaiting their answer, and when (Date.now() ms) the next
     /// is due while nothing else triggers one.
     disk_requests: Vec<RequestId>,
@@ -465,6 +469,10 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
             "level" => {
                 let peak = num(&d, "peak");
                 ui.level.set(peak);
+                if ui.muted.get_untracked() {
+                    // Muted: the others still see this microphone move.
+                    report_mic(ui);
+                }
                 ui.levels.update(|v| {
                     v.push_back(peak);
                     while v.len() > WAVE_LEN {

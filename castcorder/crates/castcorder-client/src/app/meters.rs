@@ -10,6 +10,14 @@
 //! (its peak) into [`TileLevel`] and sets only the bars' heights and the
 //! tile's `speaking` class; it stops while there is nothing to meter. The
 //! tile carries the newest reading as `data-live-level` (tests read it).
+//!
+//! Mute (cast-xe2) is call-only: a muted participant's live audio is silence,
+//! but their device reports its raw microphone's level about ten times a
+//! second ([`mic`], from `Event::MicState`). While that report is fresh the
+//! tile shows a slashed mic (class `mic-muted`) and its waveform follows the
+//! reported level, dimmed, with no speaking ring: they are not heard, and
+//! still recording. The tile carries that level as `data-mic-level` and when
+//! it arrived as `data-mic-at`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,7 +27,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{AnalyserNode, AudioContext, AudioContextState, Element, MediaStream};
 
 use super::{quiet, window};
-use crate::levels::{TICKS_PER_SECOND, TileLevel, WAVE_BARS, peak};
+use crate::levels::{MicReport, TICKS_PER_SECOND, TileLevel, WAVE_BARS, byte_to_level, peak};
 
 /// Samples per analyser read: about 11 ms at 48 kHz.
 const WINDOW: u32 = 512;
@@ -29,6 +37,8 @@ const BAR_PX: f64 = 18.0;
 /// One remote participant being metered.
 struct Meter {
     origin: String,
+    /// Their participant id (the stream id ends in `-<id>`).
+    participant: Option<u64>,
     analyser: AnalyserNode,
     /// Kept to disconnect it when the track is replaced.
     source: web_sys::MediaStreamAudioSourceNode,
@@ -45,6 +55,8 @@ struct Meters {
     running: bool,
     last_tick: f64,
     buf: Vec<f32>,
+    /// What each participant last reported about its microphone.
+    reports: Vec<(u64, MicReport)>,
 }
 
 /// The loop's requestAnimationFrame callback.
@@ -105,6 +117,7 @@ pub(super) fn watch(origin: &str, tile: &Element, stream: &MediaStream) {
         }
         m.meters.push(Meter {
             origin: origin.to_string(),
+            participant: origin.rsplit_once('-').and_then(|(_, id)| id.parse().ok()),
             analyser,
             source,
             tile: tile.clone(),
@@ -126,6 +139,7 @@ pub(super) fn watch(origin: &str, tile: &Element, stream: &MediaStream) {
 pub(super) fn close() {
     let ctx = METERS.with(|m| {
         let mut m = m.borrow_mut();
+        m.reports.clear();
         for x in m.meters.drain(..) {
             let _ = x.source.disconnect();
         }
@@ -145,6 +159,40 @@ pub(super) fn resume() {
     {
         quiet(c.resume(), "meters AudioContext resume");
     }
+}
+
+/// Another participant reported its microphone (`Event::MicState`): the
+/// loop shows it on their tile while it is fresh, even if the tile comes later.
+pub(super) fn mic(participant: u64, muted: bool, level: u8) {
+    let report = MicReport {
+        muted,
+        level: byte_to_level(level),
+        at_ms: js_sys::Date::now(),
+    };
+    METERS.with(|m| {
+        let mut m = m.borrow_mut();
+        match m.reports.iter_mut().find(|(p, _)| *p == participant) {
+            Some((_, r)) => *r = report,
+            None => m.reports.push((participant, report)),
+        }
+    });
+}
+
+/// The slashed mic a remote tile shows while that participant is muted.
+pub(super) fn tile_mic(doc: &web_sys::Document) -> Option<Element> {
+    let svg = doc
+        .create_element_ns(Some("http://www.w3.org/2000/svg"), "svg")
+        .ok()?;
+    let _ = svg.set_attribute("class", "ico sm tile-mic");
+    let _ = svg.set_attribute("viewBox", "0 0 24 24");
+    let _ = svg.set_attribute("role", "img");
+    let _ = svg.set_attribute("aria-label", "Muted in the call (still recording)");
+    // The dock's "mic-off" icon (view.rs).
+    svg.set_inner_html(concat!(
+        r#"<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/>"#,
+        r#"<path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/><path d="M3 3l18 18"/>"#
+    ));
+    Some(svg)
 }
 
 fn schedule() {
@@ -173,12 +221,27 @@ fn frame(t: f64) {
         }
         m.last_tick = t;
         let now = js_sys::Date::now();
-        let Meters { meters, buf, .. } = &mut *m;
+        let Meters {
+            meters,
+            buf,
+            reports,
+            ..
+        } = &mut *m;
         buf.resize(WINDOW as usize, 0.0);
         for x in meters.iter_mut() {
             x.analyser.get_float_time_domain_data(buf);
-            x.level.push(peak(buf), true, now);
-            draw(x);
+            let live = peak(buf);
+            let muted = x
+                .participant
+                .and_then(|p| reports.iter().find(|(q, _)| *q == p))
+                .map(|(_, r)| *r)
+                .filter(|r| r.muted_at(now));
+            match muted {
+                // Muted: the waveform follows their raw microphone, dimmed.
+                Some(r) => x.level.push(r.level, false, now),
+                None => x.level.push(live, true, now),
+            }
+            draw(x, live, muted);
         }
         true
     });
@@ -187,16 +250,27 @@ fn frame(t: f64) {
     }
 }
 
-fn draw(x: &Meter) {
+fn draw(x: &Meter, live: f64, muted: Option<MicReport>) {
     for (i, bar) in x.bars.iter().enumerate() {
         let h = (2.0 + x.level.bar(i) * BAR_PX).round();
         let _ = bar.set_attribute("style", &format!("height: {h}px"));
     }
+    let classes = x.tile.class_list();
+    let _ = classes.toggle_with_force("speaking", x.level.speaking());
+    let _ = classes.toggle_with_force("mic-muted", muted.is_some());
     let _ = x
         .tile
-        .class_list()
-        .toggle_with_force("speaking", x.level.speaking());
-    let _ = x
-        .tile
-        .set_attribute("data-live-level", &format!("{:.4}", x.level.latest()));
+        .set_attribute("data-live-level", &format!("{live:.4}"));
+    match muted {
+        Some(r) => {
+            let _ = x
+                .tile
+                .set_attribute("data-mic-level", &format!("{:.4}", r.level));
+            let _ = x.tile.set_attribute("data-mic-at", &format!("{}", r.at_ms));
+        }
+        None => {
+            let _ = x.tile.remove_attribute("data-mic-level");
+            let _ = x.tile.remove_attribute("data-mic-at");
+        }
+    }
 }

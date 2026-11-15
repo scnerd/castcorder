@@ -15,7 +15,9 @@
 //    on again is decoded again, with no renegotiation. Each guest's tile for the
 //    other shows the level of the audio arriving and its speaking ring
 //    (lib/levels.mjs).
-// 3. A's producer controls start a take; ~5 s later they stop it.
+// 3. A's producer controls start a take; ~8 s later they stop it. Mid-take A
+//    mutes and unmutes in the call (lib/levels.mjs muteChecks); its track is
+//    still checked bit-exact below.
 // 4. Each guest's outbox syncs its track and JSON sidecar into the host's
 //    library (--library test-results/library), verified; only then is the
 //    OPFS copy deleted, and the test waits until both guests' OPFS is empty.
@@ -23,7 +25,7 @@
 //    A's recording track as busy (files held by A's worker), with no error.
 // 5. A's track, as the host received it, must be bit-exact against the input
 //    (Chrome's int16 -> float scaling, every frame aligned, no dropped,
-//    duplicated or inserted frames), about 5 s long, 44.1 kHz stereo.
+//    duplicated or inserted frames), about 8 s long, 44.1 kHz stereo.
 //
 // 6. Take 2 (every mode): guest B's RTCPeerConnection is closed mid-take; B
 //    keeps recording into the same file, shows "reconnecting", rejoins, then
@@ -95,7 +97,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
 const WORKSPACE = join(CRATE, '..', '..');
 const RESULTS = join(HERE, 'test-results');
-const TAKE_SECONDS = 5;
+const TAKE_SECONDS = 8;
 const MODE = process.argv[2] || 'chromium';
 if (!['chromium', 'fallback', 'firefox'].includes(MODE)) { console.log('FAIL unknown mode ' + MODE); process.exit(1); }
 const FULL = MODE === 'chromium';
@@ -149,7 +151,7 @@ const BASE_ARGS = [
   '--allow-loopback-in-peer-connection',
   '--autoplay-policy=no-user-gesture-required',
   '--disable-background-timer-throttling',
-  // Automated runs stay silent. The fallback run's 5 s take still records
+  // Automated runs stay silent. The fallback run's 8 s take still records
   // bit-exact with this flag; longer-run render-clock effects are not covered.
   '--mute-audio',
 ];

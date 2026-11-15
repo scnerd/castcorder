@@ -6,7 +6,8 @@
 //! muted, the level of their raw microphone as they report it). It keeps the
 //! last [`WAVE_BARS`] readings for the waveform and decides whether they are
 //! speaking, with hysteresis and a hold so the ring does not flicker between
-//! syllables.
+//! syllables. A participant's reported mute state expires unless refreshed
+//! ([`MicReport`]): a muted device reports at about 10 Hz.
 
 use std::collections::VecDeque;
 
@@ -20,6 +21,9 @@ pub const SPEAKING_ON: f64 = 0.016;
 pub const SPEAKING_OFF: f64 = 0.005;
 /// How long the ring stays on after the last reading above [`SPEAKING_OFF`].
 pub const SPEAKING_HOLD_MS: f64 = 400.0;
+/// A mute report older than this no longer counts (the device stopped
+/// reporting: it left, or lost its connection).
+pub const MIC_REPORT_TTL_MS: f64 = 1500.0;
 
 /// Where a linear level sits on the waveform's scale, 0.0 (-60 dBFS or less)
 /// to 1.0 (full scale).
@@ -34,6 +38,19 @@ pub fn peak(samples: &[f32]) -> f64 {
         .map(|s| f64::from(s.abs()))
         .filter(|s| !s.is_nan())
         .fold(0.0, f64::max)
+}
+
+/// A level quantised to one byte for the wire (0 silence, 255 full scale).
+pub fn level_to_byte(level: f64) -> u8 {
+    if level.is_nan() {
+        return 0;
+    }
+    (level.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The level a wire byte stands for.
+pub fn byte_to_level(b: u8) -> f64 {
+    f64::from(b) / 255.0
 }
 
 /// One tile's recent levels and speaking state.
@@ -92,6 +109,24 @@ impl TileLevel {
     }
 }
 
+/// What a participant last reported about its microphone.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MicReport {
+    /// Muted in the call.
+    pub muted: bool,
+    /// Its raw microphone's level (what it records), linear.
+    pub level: f64,
+    /// When the report arrived (ms).
+    pub at_ms: f64,
+}
+
+impl MicReport {
+    /// Muted, by a report recent enough to trust at `now_ms`.
+    pub fn muted_at(&self, now_ms: f64) -> bool {
+        self.muted && now_ms - self.at_ms < MIC_REPORT_TTL_MS
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +148,19 @@ mod tests {
         assert_eq!(peak(&[]), 0.0);
         assert_eq!(peak(&[0.1, -0.5, 0.25]), 0.5);
         assert_eq!(peak(&[f32::NAN, -0.25]), 0.25);
+    }
+
+    #[test]
+    fn level_bytes_round_trip_within_half_a_step() {
+        assert_eq!(level_to_byte(0.0), 0);
+        assert_eq!(level_to_byte(1.0), 255);
+        assert_eq!(level_to_byte(2.0), 255);
+        assert_eq!(level_to_byte(-1.0), 0);
+        assert_eq!(level_to_byte(f64::NAN), 0);
+        for b in [0u8, 1, 17, 128, 254, 255] {
+            assert_eq!(level_to_byte(byte_to_level(b)), b);
+        }
+        assert!((byte_to_level(level_to_byte(0.3)) - 0.3).abs() <= 0.5 / 255.0);
     }
 
     #[test]
@@ -175,5 +223,19 @@ mod tests {
         assert_eq!(t.bar(WAVE_BARS - 1), norm_db(0.5));
         t.push(f64::NAN, true, 2.0 * TICK);
         assert_eq!(t.latest(), 0.0);
+    }
+
+    #[test]
+    fn a_mute_report_expires_unless_refreshed() {
+        let r = MicReport {
+            muted: true,
+            level: 0.2,
+            at_ms: 1000.0,
+        };
+        assert!(r.muted_at(1000.0));
+        assert!(r.muted_at(1000.0 + MIC_REPORT_TTL_MS - 1.0));
+        assert!(!r.muted_at(1000.0 + MIC_REPORT_TTL_MS));
+        let unmuted = MicReport { muted: false, ..r };
+        assert!(!unmuted.muted_at(1000.0));
     }
 }

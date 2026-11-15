@@ -75,6 +75,7 @@ pub(super) fn on_tick(ui: Ui, epoch: u32) {
     send_signal(&Signal::Hb);
     check_connection(ui, epoch);
     check_media(ui, epoch);
+    report_mic_if_due(ui);
     update_elapsed(ui);
     if js_sys::Date::now() >= with_engine(|e| e.next_disk_report)
         && with_engine(|e| e.participant.is_some())
@@ -177,6 +178,7 @@ pub(super) fn disconnect() {
         e.rpc = None;
         e.offered.clear();
         e.offer_requests.clear();
+        e.mic_requests.clear();
         e.join_request = None;
         e.status_request = None;
         e.participant = None;

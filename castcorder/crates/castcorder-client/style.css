@@ -174,6 +174,11 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 #remote .tile::after { content: ""; position: absolute; inset: 0; z-index: 3; border-radius: inherit;
   box-shadow: inset 0 0 0 3px var(--ok); opacity: 0; transition: opacity 0.15s; pointer-events: none; }
 #remote .tile.speaking::after { opacity: 1; }
+/* Muted in the call (meters.rs): a slashed mic and the waveform dimmed but still moving with
+   their raw microphone, which keeps recording. Not red: red is REC. */
+.tile-mic { display: none; }
+.tile.mic-muted .tile-mic { display: block; }
+.tile.mic-muted .tile-wave { opacity: 0.45; }
 
 /* Side panel */
 .side { width: 360px; flex: none; border-left: 1px solid var(--border); background: var(--surface);

@@ -130,6 +130,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 statuses.push(s);
             }
         }
+        for id in std::mem::take(&mut e.mic_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "microphone report refused"),
+                None => e.mic_requests.push(id),
+            }
+        }
         for id in std::mem::take(&mut e.disk_requests) {
             match rpc.take_response(id) {
                 Some(Response::Done) => {}
@@ -241,6 +248,11 @@ pub(super) fn pump_rpc(ui: Ui) {
                     relabel = true;
                 }
                 Event::Meters(_) => {}
+                Event::MicState {
+                    participant,
+                    muted,
+                    level,
+                } => super::meters::mic(participant.0, muted, level),
             }
         }
         (statuses, ctx)
@@ -496,6 +508,9 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     // Their live level (filled by `meters`), beside the name.
     let level = doc.create_element("div").ok()?;
     level.set_class_name("tile-level");
+    if let Some(mic) = super::meters::tile_mic(&doc) {
+        let _ = level.append_child(&mic);
+    }
     if let Some(wave) = super::meters::tile_wave(&doc) {
         let _ = level.append_child(&wave);
     }

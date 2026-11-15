@@ -185,8 +185,49 @@ pub(super) fn toggle_mute(ui: Ui) {
     let muted = !ui.muted.get_untracked();
     ui.muted.set(muted);
     apply_mute(ui);
+    let ctx = with_engine(|e| e.ctx.clone());
+    info!(call = %ctx.call, device = %ctx.device, muted, "mute in the call toggled (the track keeps recording)");
+    report_mic(ui);
     if muted && !mute_tip_seen() {
         ui.mute_tip.set(true);
+    }
+}
+
+/// How long a muted participant may go without reporting before it reports
+/// again (its raw level readings normally come ten times a second).
+const MIC_REPORT_EVERY_MS: f64 = 500.0;
+
+/// Tell the others this participant's microphone state
+/// ([`Request::MicState`]): muted or not, and its raw microphone's level
+/// (never audio). Sent when mute toggles, and while muted with every raw level
+/// reading, or from the tick if those stop.
+pub(super) fn report_mic(ui: Ui) {
+    let muted = ui.muted.get_untracked();
+    let level = crate::levels::level_to_byte(ui.level.get_untracked());
+    with_engine(|e| {
+        if e.participant.is_none() {
+            return;
+        }
+        let Some(rpc) = e.rpc.as_mut() else {
+            return;
+        };
+        match rpc.send(Request::MicState { muted, level }) {
+            Ok(id) => {
+                e.mic_requests.push(id);
+                e.mic_sent_at = js_sys::Date::now();
+            }
+            Err(err) => warn!(error = ?err, "microphone report not sent"),
+        }
+    });
+}
+
+/// From the tick: a muted participant whose level readings stopped (no
+/// local capture) still says it is muted.
+pub(super) fn report_mic_if_due(ui: Ui) {
+    if ui.muted.get_untracked()
+        && js_sys::Date::now() - with_engine(|e| e.mic_sent_at) >= MIC_REPORT_EVERY_MS
+    {
+        report_mic(ui);
     }
 }
 
