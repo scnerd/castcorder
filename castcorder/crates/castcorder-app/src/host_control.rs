@@ -156,6 +156,43 @@ fn status(r: &Running) -> HostStatus {
     }
 }
 
+/// The corner badge on the tray icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Badge {
+    /// A take is recording: red (the design's only red).
+    Recording,
+    /// Something needs a look: a device is short of disk or cannot meet the
+    /// recording profile. Amber.
+    NeedsAttention,
+    /// Guests are still syncing their tracks to the library. Blue.
+    Syncing,
+}
+
+impl Badge {
+    /// The badge's colour: the client's `--rec`, `--warn` and `--accent` tokens.
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            Badge::Recording => [220, 38, 38],
+            Badge::NeedsAttention => [251, 191, 36],
+            Badge::Syncing => [138, 180, 248],
+        }
+    }
+}
+
+/// Which badge the tray icon wears for `live`, if any. When several apply the
+/// most urgent wins: red recording, then amber needs a look, then blue syncing.
+pub fn tray_badge(live: &LiveStatus) -> Option<Badge> {
+    if live.recording.is_some() {
+        Some(Badge::Recording)
+    } else if live.attention > 0 {
+        Some(Badge::NeedsAttention)
+    } else if live.syncing > 0 {
+        Some(Badge::Syncing)
+    } else {
+        None
+    }
+}
+
 /// The one line the tray shows for `live`: guests, the recording take (or
 /// idle) and outboxes still syncing.
 pub fn tray_text(live: &LiveStatus) -> String {
@@ -170,6 +207,9 @@ pub fn tray_text(live: &LiveStatus) -> String {
     let mut text = format!("{guests}, {take}");
     if live.syncing > 0 {
         text.push_str(&format!(", syncing {}", live.syncing));
+    }
+    if live.attention > 0 {
+        text.push_str(&format!(", {} to check", live.attention));
     }
     text
 }
@@ -189,5 +229,38 @@ mod tests {
         live.recording = None;
         live.syncing = 1;
         assert_eq!(tray_text(&live), "2 guests, not recording, syncing 1");
+    }
+
+    #[test]
+    fn the_badge_follows_the_most_urgent_state() {
+        let mut live = LiveStatus::default();
+        assert_eq!(tray_badge(&live), None);
+        live.guests = 2;
+        assert_eq!(tray_badge(&live), None);
+        live.syncing = 1;
+        assert_eq!(tray_badge(&live), Some(Badge::Syncing));
+        live.attention = 1;
+        assert_eq!(tray_badge(&live), Some(Badge::NeedsAttention));
+        assert_eq!(
+            tray_text(&live),
+            "2 guests, not recording, syncing 1, 1 to check"
+        );
+        live.recording = Some(4);
+        assert_eq!(tray_badge(&live), Some(Badge::Recording));
+        live.syncing = 0;
+        live.attention = 0;
+        assert_eq!(tray_badge(&live), Some(Badge::Recording));
+        live.recording = None;
+        assert_eq!(tray_badge(&live), None);
+    }
+
+    #[test]
+    fn badge_colours_are_distinct() {
+        let all = [Badge::Recording, Badge::NeedsAttention, Badge::Syncing];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.rgb(), b.rgb());
+            }
+        }
     }
 }

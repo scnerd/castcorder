@@ -84,6 +84,7 @@ import { securityChecks } from './lib/security.mjs';
 import { identityChecks } from './lib/identity.mjs';
 import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
+import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
 
@@ -311,6 +312,7 @@ try {
   if (MODE !== 'fallback') await identityChecks();
   if (MODE !== 'fallback') await capChecks();
   if (MODE !== 'fallback') await namesChecks();
+  if (MODE !== 'fallback') await takeInfoChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -322,6 +324,7 @@ try {
   if (ctx.host3) ctx.host3.kill();
   if (ctx.host4) ctx.host4.kill();
   if (ctx.host5) ctx.host5.kill();
+  if (ctx.host6) ctx.host6.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);

@@ -25,6 +25,18 @@ impl FsStorage {
         &self.root
     }
 
+    /// Free bytes on the volume of the storage directory.
+    fn volume_free_space(&self) -> io::Result<u64> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fs4::available_space(&self.root)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
     fn path(&self, name: &str) -> io::Result<PathBuf> {
         validate_name(name)?;
         Ok(self.root.join(name))
@@ -84,6 +96,10 @@ impl Storage for FsStorage {
 
     fn sync_dir(&self) -> io::Result<()> {
         sync_directory(&self.root)
+    }
+
+    fn free_space(&self) -> io::Result<u64> {
+        self.volume_free_space()
     }
 }
 

@@ -128,6 +128,17 @@ pub enum Request {
     /// producer ([`Event::ProfileUnmet`]). Never blocks the take. Answered
     /// with [`Response::Done`].
     ProfileUnmet(ProfileIssue),
+    /// How much room this device has for recording: the free bytes where it
+    /// writes its tracks (a browser's storage quota less its usage; the
+    /// library volume on the host machine). Sent when joining, when a take
+    /// starts and every so often; the host warns producers when a device has
+    /// under about an hour left at the recording profile's data rate
+    /// ([`Event::DeviceDisk`]). Never blocks a take. Answered with
+    /// [`Response::Done`].
+    DiskFree {
+        /// Free bytes for new recordings.
+        free_bytes: u64,
+    },
 }
 
 /// One source of one device that cannot be recorded as the recording profile
@@ -232,6 +243,11 @@ pub enum TakeStatus {
         /// Devices record their webcams too: the call's recording profile
         /// when the take started.
         video: bool,
+        /// When the take started, on the host timeline (microseconds since the
+        /// Unix epoch; the `host_us` of [`Response::TakeStartedAt`]). A device
+        /// maps it to its own clock with its clock estimate to show how long
+        /// the take has run, also when it joined mid-take.
+        started_us: i64,
     },
 }
 
@@ -361,6 +377,26 @@ pub enum Event {
     /// Every take's tracks and where each stands on its way into the host's
     /// library (sent to producers only, whenever it changes).
     Tracks(TracksState),
+    /// How much recording room each device has, with the host's own library
+    /// volume (sent to producers only, whenever it changes).
+    DeviceDisk(Vec<DeviceDisk>),
+}
+
+/// One device's room for recording, as the host works it out from the device's
+/// report and the recording profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceDisk {
+    /// The participant; `None` is the host's library volume (where its own
+    /// recordings and every guest's synced tracks go).
+    pub participant: Option<ParticipantId>,
+    /// Their display name (for the library, "Host library").
+    pub name: String,
+    /// Free bytes, rounded down to 100 MB so a change is news.
+    pub free_bytes: u64,
+    /// How long a take of the current recording profile fits in it, in seconds.
+    pub seconds_left: u64,
+    /// Under about an hour: producers are warned (the take still starts).
+    pub low: bool,
 }
 
 /// Where one track stands on its way into the host's library.
@@ -520,6 +556,9 @@ mod tests {
                 kind: SourceKind::Video,
                 reason: "no MediaRecorder codec".into(),
             }),
+            Request::DiskFree {
+                free_bytes: 5_000_000_000,
+            },
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -569,6 +608,7 @@ mod tests {
             CoreMessage::Event(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(2),
                 video: true,
+                started_us: 0,
             })),
             CoreMessage::Event(Event::ProfileUnmet {
                 participant: ParticipantId(3),
@@ -580,6 +620,13 @@ mod tests {
                     reason: "no codec".into(),
                 },
             }),
+            CoreMessage::Event(Event::DeviceDisk(vec![DeviceDisk {
+                participant: Some(ParticipantId(2)),
+                name: "Bea".into(),
+                free_bytes: 1_300_000_000,
+                seconds_left: 3000,
+                low: true,
+            }])),
             CoreMessage::Event(Event::Participants(vec![ParticipantName {
                 participant: ParticipantId(2),
                 name: "Bea Smith".into(),
@@ -747,12 +794,14 @@ mod tests {
         assert_eq!(encode(&Event::Room(room)), vec![3, 0, 1, 0, 0, 0, 0]);
         // Video recording (appended): the take status says whether devices
         // record video; a producer sets it; a device that cannot comply says so.
+        // TakeStatus::Recording.started_us (appended): a zigzag varint, -1 is 1.
         assert_eq!(
             encode(&Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(3),
-                video: true
+                video: true,
+                started_us: -1,
             })),
-            vec![1, 1, 3, 1]
+            vec![1, 1, 3, 1, 1]
         );
         assert_eq!(
             encode(&Request::Room(RoomAction::SetRecordVideo(true))),
@@ -804,6 +853,18 @@ mod tests {
                 }],
             })),
             vec![6, 0, 1, 1, 0, 1, 0, 0, 0, 3]
+        );
+        // Free disk (appended): a device's report and what the host tells producers.
+        assert_eq!(encode(&Request::DiskFree { free_bytes: 1 }), vec![10, 1]);
+        assert_eq!(
+            encode(&Event::DeviceDisk(vec![DeviceDisk {
+                participant: None,
+                name: String::new(),
+                free_bytes: 2,
+                seconds_left: 3,
+                low: true,
+            }])),
+            vec![7, 1, 0, 0, 2, 3, 1]
         );
     }
 

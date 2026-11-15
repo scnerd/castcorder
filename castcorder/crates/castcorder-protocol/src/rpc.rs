@@ -274,6 +274,7 @@ mod tests {
             .emit(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(1),
                 video: false,
+                started_us: 0,
             }))
             .unwrap();
         client.poll().unwrap();
@@ -282,7 +283,8 @@ mod tests {
             client.next_event(),
             Some(Event::TakeStatusChanged(TakeStatus::Recording {
                 take: TakeId(1),
-                video: false
+                video: false,
+                started_us: 0,
             }))
         );
         assert_eq!(client.next_event(), None);

@@ -63,6 +63,11 @@ pub trait Storage: Send + Sync {
     /// Make every create and remove of a file in this directory so far durable:
     /// the directory-entry counterpart of [`StorageFile::sync`].
     fn sync_dir(&self) -> io::Result<()>;
+    /// Bytes a new file here could still grow by: the free space of the volume
+    /// holding this directory, for the warning that a recording is about to
+    /// run out of room. An estimate (other programs write too); fails with
+    /// `Unsupported` where the platform cannot say.
+    fn free_space(&self) -> io::Result<u64>;
 }
 
 /// One open file.

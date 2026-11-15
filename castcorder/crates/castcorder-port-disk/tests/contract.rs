@@ -88,6 +88,10 @@ macro_rules! contract_tests {
                 contract::subdirs_are_separate(&$harness);
             }
             #[test]
+            fn free_space_is_reported() {
+                contract::free_space_is_reported(&$harness);
+            }
+            #[test]
             fn sync_dir_keeps_what_reads_see() {
                 contract::sync_dir_keeps_what_reads_see(&$harness);
             }
@@ -97,3 +101,17 @@ macro_rules! contract_tests {
 
 contract_tests!(real, Real::new());
 contract_tests!(sim, Sim(SimDisk::new(1)));
+
+#[test]
+fn sim_free_space_follows_capacity_and_files() {
+    use castcorder_port_disk::{Storage, StorageFile};
+    let disk = SimDisk::new(1);
+    disk.set_capacity(1000);
+    assert_eq!(disk.free_space().unwrap(), 1000);
+    disk.open("a").unwrap().write_at(0, &[0; 300]).unwrap();
+    assert_eq!(disk.free_space().unwrap(), 700);
+    // A subdirectory sees the whole disk.
+    assert_eq!(disk.subdir("d").unwrap().free_space().unwrap(), 700);
+    disk.set_capacity(100);
+    assert_eq!(disk.free_space().unwrap(), 0);
+}

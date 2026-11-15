@@ -13,16 +13,54 @@ pub enum RecorderCommand {
     Stop(TakeId),
 }
 
+/// Free space for a person's row in People: "12.4 GB", "800 MB" (decimal units,
+/// as disks are sold).
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes / 1_000_000)
+    }
+}
+
+/// How long a take fits in the free space: "under 1 min", "about 40 min",
+/// "about 9 h".
+pub fn format_time_left(secs: u64) -> String {
+    match secs {
+        0..60 => "under 1 min".into(),
+        60..5400 => format!("about {} min", (secs + 30) / 60),
+        _ => format!("about {} h", (secs + 1800) / 3600),
+    }
+}
+
+/// A take's running time for the REC pill: "0:07", "12:05", "1:02:03" (negative
+/// or non-finite counts as zero: the clock estimate is not exact).
+pub fn format_elapsed(secs: f64) -> String {
+    let s = if secs.is_finite() {
+        secs.max(0.0) as u64
+    } else {
+        0
+    };
+    let (h, m, s) = (s / 3600, s % 3600 / 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 /// The recorder commands that bring a guest recording `current` in line with
 /// the host's `status`. A guest that joins mid-take starts at once; a take that
 /// replaces another (a missed stop) stops the old track first.
 pub fn on_take_status(current: Option<TakeId>, status: TakeStatus) -> Vec<RecorderCommand> {
     match (current, status) {
         (None, TakeStatus::Idle) => vec![],
-        (None, TakeStatus::Recording { take, video }) => vec![RecorderCommand::Start(take, video)],
+        (None, TakeStatus::Recording { take, video, .. }) => {
+            vec![RecorderCommand::Start(take, video)]
+        }
         (Some(old), TakeStatus::Idle) => vec![RecorderCommand::Stop(old)],
         (Some(old), TakeStatus::Recording { take, .. }) if old == take => vec![],
-        (Some(old), TakeStatus::Recording { take, video }) => {
+        (Some(old), TakeStatus::Recording { take, video, .. }) => {
             vec![
                 RecorderCommand::Stop(old),
                 RecorderCommand::Start(take, video),
@@ -407,10 +445,29 @@ mod tests {
     }
 
     #[test]
+    fn free_space_and_time_left_read_plainly() {
+        assert_eq!(format_bytes(12_449_000_000), "12.4 GB");
+        assert_eq!(format_bytes(800_999_999), "800 MB");
+        assert_eq!(format_time_left(20), "under 1 min");
+        assert_eq!(format_time_left(2400), "about 40 min");
+        assert_eq!(format_time_left(32_400), "about 9 h");
+    }
+
+    #[test]
+    fn elapsed_time_reads_like_a_stopwatch() {
+        assert_eq!(format_elapsed(-0.4), "0:00");
+        assert_eq!(format_elapsed(7.9), "0:07");
+        assert_eq!(format_elapsed(725.0), "12:05");
+        assert_eq!(format_elapsed(3723.0), "1:02:03");
+        assert_eq!(format_elapsed(f64::NAN), "0:00");
+    }
+
+    #[test]
     fn take_status_drives_the_recorder() {
         let rec = |n| TakeStatus::Recording {
             take: TakeId(n),
             video: n == 2,
+            started_us: 0,
         };
         assert_eq!(on_take_status(None, TakeStatus::Idle), vec![]);
         assert_eq!(on_take_status(None, rec(1)), vec![Start(TakeId(1), false)]);

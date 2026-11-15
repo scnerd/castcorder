@@ -31,7 +31,7 @@ A free, open-source desktop app for recording podcasts, at `castcorder.app`. Par
 - A producer starts a take: 3-second countdown, every device starts its recorded sources and acknowledges each one. A source that fails raises a warning and never blocks the take.
 - Only a producer stops a take. It otherwise continues until every participant has left. The host has a configurable maximum take length (default 4 hours, may be off).
 - A participant who joins or rejoins mid-take starts recording immediately.
-- Before a take each device reports free disk space; the producer is warned when a device has under about an hour's worth. Recording is never stopped pre-emptively.
+- Before a take each device reports free disk space; the producer is warned when a device has under about an hour's worth. Recording is never stopped pre-emptively. Devices report free disk when joining, at each take start and every minute (a browser: storage quota less usage; the host: the library volume through the disk port); the host warns producers in an amber banner and per person in People when a device holds under an hour at the recording profile's data rate (audio 384 kB/s, plus 1 MB/s with video), and the take still starts.
 
 ## Never losing data
 
@@ -157,11 +157,11 @@ What they changed or left open:
 The design pass (cast-72g) is the "Castcorder UX" canvas; `castcorder-client/style.css` carries its tokens and components.
 
 - **Layout.** A lobby before joining (name, password, camera choice, the recording notice). In the call: a top bar with the recording state, the stage (one tile per participant, own tile first), one optional side panel (People and call controls, Recordings, Transcript) and a bottom dock (Mute, Camera, Hide me, Start/Stop take for producers, Leave). The conversation fills the window; producers get the People panel open by default.
-- **Red means REC and nothing else.** The REC pill (take number), a red rule under the top bar for the whole take, the red own-track waveform, the tab title (`REC take 3 - Castcorder`) and favicon, and the tray dot. Muted is an inverted button with a slashed mic, never red. Amber is for things to check; warnings say what still works and never block.
+- **Red means REC and nothing else.** The REC pill (take number and elapsed time, counted from the host's take start so a mid-take joiner agrees), a red rule under the top bar for the whole take, the red own-track waveform, the tab title (`REC take 3 - Castcorder`) and favicon, and the tray dot. Muted is an inverted button with a slashed mic, never red. Amber is for things to check; warnings say what still works and never block.
 - **Mute is call-only.** It disables the live stream's microphone track; the raw microphone, which is the track, keeps recording. The first mute explains this once per browser profile, and the dock's own-track waveform keeps moving while muted.
-- **Two signals per person, kept apart:** live (are we hearing them?) and track (is their machine recording?). Only signals backed by real data are drawn: per-participant levels, track status, remote mute and the elapsed take time are open (cast-vr3, cast-2y4, cast-xe2, cast-wuk).
-- **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge: red recording, blue syncing, amber needs a look.
-- **Open.** Device selection and recorded vs live sources (cast-94c), disk-space warnings (cast-ycn), the host app home with calls (cast-brj), tray syncing badges (cast-0f0), the live transcript (cast-7hm).
+- **Two signals per person, kept apart:** live (are we hearing them?) and track (is their machine recording?). Only signals backed by real data are drawn: per-participant levels, track status and remote mute are open (cast-vr3, cast-2y4, cast-xe2).
+- **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge painted at runtime: red recording, amber needs a look (a device short of disk, the library volume included, or a source that cannot meet the recording profile), blue while guests sync; red wins over amber, amber over blue.
+- **Open.** Device selection and recorded vs live sources (cast-94c), the host app home with calls (cast-brj), the live transcript (cast-7hm).
 
 ## Not in v1
 

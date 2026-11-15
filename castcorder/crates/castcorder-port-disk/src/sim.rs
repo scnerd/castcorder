@@ -28,6 +28,8 @@ struct DiskState {
     /// Bumped by every crash; handles from an older generation are dead.
     generation: u64,
     rng: u64,
+    /// Bytes the disk holds in all (see [`SimDisk::set_capacity`]).
+    capacity: u64,
 }
 
 impl DiskState {
@@ -40,6 +42,9 @@ impl DiskState {
         z ^ (z >> 31)
     }
 }
+
+/// What a new [`SimDisk`] holds in all: 1 TiB.
+const DEFAULT_CAPACITY: u64 = 1 << 40;
 
 /// An in-memory disk. Cloning shares the same disk (and the same directory).
 #[derive(Clone, Debug)]
@@ -58,9 +63,17 @@ impl SimDisk {
                 ghosts: BTreeMap::new(),
                 generation: 0,
                 rng: seed,
+                capacity: DEFAULT_CAPACITY,
             })),
             prefix: String::new(),
         }
+    }
+
+    /// Make the disk hold `bytes` in all, files included: [`Storage::free_space`]
+    /// reports what is left (zero when the files already fill it). Writes are
+    /// not refused: this simulates what a warning looks at, not a full disk.
+    pub fn set_capacity(&self, bytes: u64) {
+        self.lock().capacity = bytes;
     }
 
     fn lock(&self) -> MutexGuard<'_, DiskState> {
@@ -200,6 +213,12 @@ impl Storage for SimDisk {
             state: self.state.clone(),
             prefix: format!("{key}/"),
         })
+    }
+
+    fn free_space(&self) -> io::Result<u64> {
+        let s = self.lock();
+        let used: u64 = s.files.values().map(|f| f.data.len() as u64).sum();
+        Ok(s.capacity.saturating_sub(used))
     }
 
     fn sync_dir(&self) -> io::Result<()> {

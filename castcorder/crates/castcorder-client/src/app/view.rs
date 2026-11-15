@@ -132,6 +132,9 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                     if p.host_machine { " [host machine]" } else { "" },
                                     if p.producer && !p.host_machine { " [producer]" } else { "" },
                                     if p.trusted { " [trusted]" } else { " [untrusted]" })}</span></span>
+                                {move || ui.disk.get().into_iter().find(|d| d.participant == Some(p.participant)).map(|d| view! {
+                                    <span class="pdisk" class:low=d.low>{format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))}</span>
+                                })}
                             </span>
                             <Show when=move || ui.role.get().host_machine && !p.host_machine && p.trusted>
                                 <button class="grant btn tiny" on:click=move |_| act(RoomAction::SetProducer { participant: p.participant, producer: !p.producer })>
@@ -180,6 +183,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                 </div>
                 <span class="small muted">"Take: " <span id="take-status">{move || take.get()}</span>
                     " " <code id="take-result">{move || ui.producer_result.get()}</code></span>
+                <span class="small muted">"Host library: " <span id="library-disk">{move || ui.disk.get().into_iter().find(|d| d.participant.is_none()).map(|d| format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))).unwrap_or_else(|| "not known".into())}</span></span>
                 <ul id="profile-warnings" class="list">
                     <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
                         <li class="warn-text">{w}</li>
@@ -362,6 +366,7 @@ fn Call(ui: Ui) -> impl IntoView {
                 </div>
                 <div class="pill rec" role="status" hidden=move || !take_rec()>
                     <span class="dot"></span>"REC"<span>{move || take_label(&ui.take.get())}</span>
+                    <span class="rec-time" id="rec-elapsed" hidden=move || ui.elapsed.get().is_empty()>{move || ui.elapsed.get()}</span>
                 </div>
                 <div class="pill idle" role="status" hidden=take_rec>
                     <span class="dot"></span>"Not recording"
@@ -393,6 +398,12 @@ fn Call(ui: Ui) -> impl IntoView {
                 <main class="main">
                     <div id="warning" class="banner" role="alert" hidden=move || ui.warning.get().is_empty()>
                         {move || ui.warning.get()}</div>
+                    <div id="disk-warning" class="banner" role="status" hidden=move || !ui.disk.get().iter().any(|d| d.low)>
+                        <Icon name="alert" small=true/>
+                        <span><strong>"Low disk space"</strong>
+                            {move || ui.disk.get().into_iter().filter(|d| d.low).map(|d| format!("{}: {} of recording left. ", d.name, format_time_left(d.seconds_left))).collect::<String>()}
+                            "Recording goes on; free some space if you can."</span>
+                    </div>
                     {move || connection_note().map(|(head, more)| view! {
                         <div class="banner" role="status"><span><strong>{head}</strong>{more}</span></div>
                     })}
@@ -559,6 +570,9 @@ pub(super) fn App() -> impl IntoView {
         role: RwSignal::new(Role::default()),
         room: RwSignal::new(None),
         take: RwSignal::new(String::new()),
+        disk: RwSignal::new(Vec::new()),
+        take_started_us: RwSignal::new(None),
+        elapsed: RwSignal::new(String::new()),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),
         // `?camera=off` joins with the camera off.

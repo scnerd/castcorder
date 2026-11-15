@@ -83,7 +83,8 @@ use web_sys::{
 
 use crate::js::{call, describe, get, num, object, set, string, stringify};
 use crate::session::{
-    RecorderCommand, clean_name, default_name, on_take_status, reconnect_delay_ms, track_name,
+    RecorderCommand, clean_name, default_name, format_bytes, format_elapsed, format_time_left,
+    on_take_status, reconnect_delay_ms, track_name,
 };
 use crate::signal::Signal;
 use castcorder_link::CallLink;
@@ -193,7 +194,13 @@ struct Engine {
     /// when (performance ms) the next is due.
     pings: Vec<RequestId>,
     pings_sent: u32,
+    /// Disk reports awaiting their answer, and when (Date.now() ms) the next
+    /// is due while nothing else triggers one.
+    disk_requests: Vec<RequestId>,
+    next_disk_report: f64,
     next_ping: f64,
+    /// This device's clock against the host's, from the pongs (the pill's take time).
+    clock: castcorder_core::clocksync::ClockEstimator,
     /// Device time (us) the latest "control" message arrived: t3 of a pong.
     rx_us: f64,
     /// Producer requests awaiting their response (the panel shows it), and
@@ -321,6 +328,12 @@ struct Ui {
     room: RwSignal<Option<RoomState>>,
     /// The host's take status, as text ("idle", "recording take N").
     take: RwSignal<String>,
+    /// How much room each device has for recording (producers only).
+    disk: RwSignal<Vec<castcorder_protocol::DeviceDisk>>,
+    /// When the recording take started on the host timeline (us), from its status.
+    take_started_us: RwSignal<Option<i64>>,
+    /// How long the take has run ("1:05"), empty until this device knows the host's clock.
+    elapsed: RwSignal<String>,
     /// The last producer request's result.
     producer_result: RwSignal<String>,
     /// The last debug request's result.

@@ -132,7 +132,11 @@ impl Call {
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
-        self.status = TakeStatus::Recording { take, video: false };
+        self.status = TakeStatus::Recording {
+            take,
+            video: false,
+            started_us: 0,
+        };
         info!(call = "browser-test", take = take.0, "take started");
         self.broadcast();
         Ok(take)
@@ -229,6 +233,7 @@ impl Call {
                         kind: ErrorKind::Other,
                         message: "no recording profile in this example".into(),
                     },
+                    Request::DiskFree { .. } => Response::Done,
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);
