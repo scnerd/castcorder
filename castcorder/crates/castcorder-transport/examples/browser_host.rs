@@ -233,6 +233,7 @@ impl Call {
                         kind: ErrorKind::Other,
                         message: "no recording profile in this example".into(),
                     },
+                    Request::DiskFree { .. } => Response::Done,
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);

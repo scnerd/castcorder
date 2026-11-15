@@ -247,6 +247,11 @@ impl<S: Storage> Library<S> {
         })
     }
 
+    /// Free bytes on the volume holding the library.
+    pub fn free_space(&self) -> io::Result<u64> {
+        self.dir.free_space()
+    }
+
     /// The call's directory name.
     pub fn call(&self) -> &str {
         &self.call

@@ -106,6 +106,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                     info!(call = %ctx.call, device = %ctx.device, participant = participant.0, rejoined, recording = ?e.recording, "joined");
                     e.participant = Some(participant);
                     e.pings_sent = 0;
+                    e.next_disk_report = 0.0;
                     e.clock = Default::default();
                     e.next_ping = 0.0;
                     ui.participant.set(participant.0.to_string());
@@ -127,6 +128,13 @@ pub(super) fn pump_rpc(ui: Ui) {
             e.status_request = None;
             if let Response::TakeStatus(s) = r {
                 statuses.push(s);
+            }
+        }
+        for id in std::mem::take(&mut e.disk_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "disk report refused"),
+                None => e.disk_requests.push(id),
             }
         }
         for id in std::mem::take(&mut e.offer_requests) {
@@ -201,6 +209,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                     ui.role.set(role);
                     if !role.producer {
                         ui.room.set(None);
+                        ui.disk.set(Vec::new());
                         ui.takes.set(None);
                     } else if let Ok(id) = rpc.send(Request::GetRoom) {
                         e.producer_requests.push((id, false));
@@ -208,6 +217,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                 }
                 Event::Room(s) => ui.room.set(Some(s)),
                 Event::Tracks(s) => ui.takes.set(Some(s)),
+                Event::DeviceDisk(list) => ui.disk.set(list),
                 Event::ProfileUnmet {
                     participant,
                     name,
@@ -277,6 +287,10 @@ pub(super) fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
         }
     });
     update_elapsed(ui);
+    if matches!(s, TakeStatus::Recording { .. }) && current.is_none() {
+        // A take is starting here: say how much room this device has now.
+        report_disk();
+    }
     for c in on_take_status(current, s) {
         match c {
             RecorderCommand::Start(take, video) => start_track(ui, take, video),

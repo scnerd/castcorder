@@ -13,6 +13,26 @@ pub enum RecorderCommand {
     Stop(TakeId),
 }
 
+/// Free space for a person's row in People: "12.4 GB", "800 MB" (decimal units,
+/// as disks are sold).
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes / 1_000_000)
+    }
+}
+
+/// How long a take fits in the free space: "under 1 min", "about 40 min",
+/// "about 9 h".
+pub fn format_time_left(secs: u64) -> String {
+    match secs {
+        0..60 => "under 1 min".into(),
+        60..5400 => format!("about {} min", (secs + 30) / 60),
+        _ => format!("about {} h", (secs + 1800) / 3600),
+    }
+}
+
 /// A take's running time for the REC pill: "0:07", "12:05", "1:02:03" (negative
 /// or non-finite counts as zero: the clock estimate is not exact).
 pub fn format_elapsed(secs: f64) -> String {
@@ -422,6 +442,15 @@ mod tests {
         let r = feed(20, |b| if b == 470 { -480 } else { 0 });
         assert_eq!(r.len(), 1, "{r:?}");
         assert!((r[0] + 480).abs() <= 48, "{r:?}");
+    }
+
+    #[test]
+    fn free_space_and_time_left_read_plainly() {
+        assert_eq!(format_bytes(12_449_000_000), "12.4 GB");
+        assert_eq!(format_bytes(800_999_999), "800 MB");
+        assert_eq!(format_time_left(20), "under 1 min");
+        assert_eq!(format_time_left(2400), "about 40 min");
+        assert_eq!(format_time_left(32_400), "about 9 h");
     }
 
     #[test]

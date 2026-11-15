@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
+use castcorder_core::diskspace;
 use castcorder_core::library::{Library, Puller};
 use castcorder_core::safety::{self, SafetyRecorder, SafetyWriter};
 use castcorder_port_clock::{Clock, SystemClock};
@@ -15,8 +16,8 @@ use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
-    ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue, Request,
-    Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer, TracksState,
+    DeviceDisk, ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue,
+    Request, Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer, TracksState,
 };
 use std::path::PathBuf;
 
@@ -236,7 +237,21 @@ pub struct Call {
     tracks_sent: BTreeMap<u64, TracksState>,
     /// When the tracks state is next worked out (host timeline, us).
     tracks_due_us: i64,
+    /// Free bytes each guest last reported ([`Request::DiskFree`]).
+    disk: BTreeMap<GuestId, u64>,
+    /// The library volume's free bytes as last read, and when it is read next
+    /// (host timeline, us): a syscall per half second would be needless, and
+    /// this thread answers clock pings.
+    library_free: Option<u64>,
+    library_free_due_us: i64,
+    /// When the disk state is next worked out (host timeline, us).
+    disk_due_us: i64,
+    /// The [`Event::DeviceDisk`] each producer connection was last sent.
+    disk_sent: BTreeMap<u64, Vec<DeviceDisk>>,
 }
+
+/// How often the library volume's free space is read (host timeline, us).
+const LIBRARY_FREE_EVERY_US: i64 = 30_000_000;
 
 /// How often producers' tracks state is worked out (and sent if changed).
 const TRACKS_EVERY_US: i64 = 500_000;
@@ -335,6 +350,11 @@ impl Call {
             aligned_seeded: false,
             tracks_sent: BTreeMap::new(),
             tracks_due_us: 0,
+            disk: BTreeMap::new(),
+            library_free: None,
+            library_free_due_us: 0,
+            disk_due_us: 0,
+            disk_sent: BTreeMap::new(),
         }
     }
 
@@ -737,6 +757,72 @@ impl Call {
         }
     }
 
+    /// Room for recording, per device that reported and for the library
+    /// volume, for the recording profile as it stands.
+    fn device_disk(&self) -> Vec<DeviceDisk> {
+        let video = self.room.record_video();
+        let entry = |participant, name: String, free: u64| {
+            let free_bytes = diskspace::rounded_free(free);
+            DeviceDisk {
+                participant,
+                name,
+                free_bytes,
+                seconds_left: diskspace::seconds_left(free_bytes, video),
+                low: diskspace::is_low(free_bytes, video),
+            }
+        };
+        let mut out: Vec<DeviceDisk> = self
+            .names
+            .iter()
+            .filter_map(|(id, name)| {
+                let free = *self.disk.get(id)?;
+                Some(entry(Some(ParticipantId(id.0)), name.clone(), free))
+            })
+            .collect();
+        if let Some(free) = self.library_free {
+            out.push(entry(None, "Host library".into(), free));
+        }
+        out
+    }
+
+    /// Every half second: read the library volume (every 30 s) and send each
+    /// producer the devices' room for recording if it changed for it.
+    fn publish_disk(&mut self) {
+        let now = self.timeline.now_us();
+        if now < self.disk_due_us {
+            return;
+        }
+        self.disk_due_us = now + TRACKS_EVERY_US;
+        if now >= self.library_free_due_us {
+            self.library_free_due_us = now + LIBRARY_FREE_EVERY_US;
+            match self.library.free_space() {
+                Ok(free) => self.library_free = Some(free),
+                Err(e) => {
+                    self.library_free = None;
+                    warn!(error = %e, "free space of the library volume unknown");
+                }
+            }
+        }
+        let producers = self.room.producers();
+        self.disk_sent.retain(|c, _| producers.contains(c));
+        if producers.is_empty() {
+            return;
+        }
+        let list = self.device_disk();
+        for id in producers {
+            if self.disk_sent.get(&id) == Some(&list) {
+                continue;
+            }
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(id)) {
+                if rpc.emit(Event::DeviceDisk(list.clone())).is_err() {
+                    warn!(guest = id, "disk state not sent: channel closed");
+                    continue;
+                }
+                self.disk_sent.insert(id, list.clone());
+            }
+        }
+    }
+
     fn drop_puller(&mut self, id: GuestId) {
         if let Some(p) = self.pullers.remove(&id)
             && let Err(e) = p.disconnect()
@@ -777,6 +863,8 @@ impl Call {
         }
         self.last_take += 1;
         let take = TakeId(self.last_take);
+        // Read the library volume afresh for this take.
+        self.library_free_due_us = 0;
         // The recording profile as it stands now holds for the whole take.
         let video = self.room.record_video();
         let host_us = self.timeline.now_us();
@@ -987,6 +1075,10 @@ impl Call {
                     }
                     Request::Room(action) => self.room_action(id, &action),
                     Request::ProfileUnmet(issue) => self.profile_unmet(id, issue),
+                    Request::DiskFree { free_bytes } => {
+                        self.disk.insert(id, free_bytes);
+                        Response::Done
+                    }
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);
@@ -1032,6 +1124,7 @@ impl Call {
                                 self.rpc.remove(&guest);
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
+                                self.disk.remove(&guest);
                                 self.drop_puller(guest);
                                 self.safety.guest_gone(guest.0);
                                 self.hear(Heard::Gone(guest));
@@ -1065,6 +1158,7 @@ impl Call {
                     }
                     self.sync();
                     self.publish_tracks();
+                    self.publish_disk();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
                     let wait = deadline.saturating_sub(clock.monotonic());

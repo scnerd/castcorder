@@ -8,7 +8,7 @@ import { openGuest } from './guest.mjs';
 // What the pages tell about a take beyond its number, on a host of its own
 // (chromium and firefox): the REC pill's running time (cast-wuk), whose start
 // comes from the host's take status so a guest joining mid-take shows the
-// same time, and the free-disk warnings (cast-ycn, added below).
+// same time, and the free-disk warnings (cast-ycn).
 const secs = (t) => t.split(':').map(Number).reduce((a, n) => a * 60 + n, 0);
 
 export async function takeInfoChecks() {
@@ -59,5 +59,32 @@ export async function takeInfoChecks() {
   await P.click('#take-stop');
   await waitFor(async () => (await pill(P)) === '' && (await pill(Z)) === '', 'the take time leaves the pill after the stop', 15000);
   check(true, 'the take time leaves the pill when the take stops');
-  for (const p of [P, G, Z]) await p.click('#leave').catch(() => {});
+  await Z.click('#leave').catch(() => {});
+
+  // Free disk (cast-ycn): a guest with little room (the page's own override,
+  // ?freebytes=) is flagged to the producer, in a banner and in People; the
+  // take still starts and the guest records it.
+  const L = await openGuest('L', [], HTTPS6, undefined, 'L', '&freebytes=800000000');
+  await L.click('#join');
+  await waitFor(async () => (await text(L, '#participant')).length > 0, 'L joined', 30000);
+  await waitFor(async () => P.evaluate(() => {
+    const e = document.querySelector('#disk-warning');
+    return e && !e.hidden && e.textContent.includes('L:');
+  }), 'the producer is warned that L is low on disk', 30000);
+  check(true, 'the producer\'s banner warns that L has little room: ' + (await text(P, '#disk-warning')));
+  const row = await P.evaluate(() => {
+    const e = document.querySelector('#guests li[data-name="L"] .pdisk');
+    return e ? e.className + ' | ' + e.textContent : 'missing';
+  });
+  check(/low/.test(row) && /800 MB free/.test(row), 'People shows L flagged with its free space: ' + row);
+  await waitFor(async () => (await text(P, '#library-disk')) !== 'not known', 'the host library\'s room is shown', 15000);
+  check(true, 'the producer sees the host library\'s room: ' + (await text(P, '#library-disk')));
+  check(await P.isEnabled('#take-start'), 'a low-disk warning leaves Start take enabled');
+  await P.click('#take-start');
+  await waitFor(async () => (await text(L, '#recording')).includes('recording take'), 'L records the take despite the warning', 15000);
+  check((await text(P, '#take-status')).startsWith('recording'), 'the take started with a device low on disk');
+  await sleep(1500);
+  await P.click('#take-stop');
+  await waitFor(async () => (await text(P, '#take-status')).startsWith('idle'), 'the take stopped', 15000);
+  for (const p of [P, G, L]) await p.click('#leave').catch(() => {});
 }

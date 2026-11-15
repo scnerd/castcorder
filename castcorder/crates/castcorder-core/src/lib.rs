@@ -23,6 +23,7 @@
 //! - [`safety`]: the host's copy of each guest's live Opus stream, per take.
 
 pub mod clocksync;
+pub mod diskspace;
 pub mod library;
 pub mod logging;
 pub mod names;

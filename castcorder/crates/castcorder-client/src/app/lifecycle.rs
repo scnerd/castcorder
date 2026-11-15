@@ -76,6 +76,11 @@ pub(super) fn on_tick(ui: Ui, epoch: u32) {
     check_connection(ui, epoch);
     check_media(ui, epoch);
     update_elapsed(ui);
+    if js_sys::Date::now() >= with_engine(|e| e.next_disk_report)
+        && with_engine(|e| e.participant.is_some())
+    {
+        report_disk();
+    }
     spawn_local(async move {
         if let Err(e) = refresh_inbound(ui).await {
             warn!(error = %describe(&e), "stats failed");
@@ -413,4 +418,48 @@ pub(super) fn producer_request(ui: Ui, request: Request, debug: bool) {
         };
         s.set("not connected to the host".into());
     }
+}
+
+/// How often an idle device tells the host its free disk again.
+const DISK_REPORT_EVERY_MS: f64 = 60_000.0;
+
+/// Tell the host how much room this device has for recording
+/// ([`Request::DiskFree`]); the host warns the producers when it is short.
+/// Called when joining, when a take starts here and every minute.
+pub(super) fn report_disk() {
+    with_engine(|e| e.next_disk_report = js_sys::Date::now() + DISK_REPORT_EVERY_MS);
+    spawn_local(async move {
+        let Some(free_bytes) = free_disk_bytes().await else {
+            return;
+        };
+        with_engine(|e| {
+            if e.participant.is_none() {
+                return;
+            }
+            let Some(rpc) = e.rpc.as_mut() else {
+                return;
+            };
+            match rpc.send(Request::DiskFree { free_bytes }) {
+                Ok(id) => e.disk_requests.push(id),
+                Err(err) => warn!(error = ?err, "disk report not sent"),
+            }
+        });
+    });
+}
+
+/// Free bytes for recordings: the browser's storage quota less what the page
+/// uses (`navigator.storage.estimate()`, where tracks are written), or the
+/// `?freebytes=N` override (a test hook: a device running short on room).
+async fn free_disk_bytes() -> Option<u64> {
+    if let Some(n) = query_param("freebytes").and_then(|v| v.parse().ok()) {
+        return Some(n);
+    }
+    let navigator: JsValue = window().navigator().into();
+    let storage = get(&navigator, "storage");
+    let promise = call(&storage, "estimate", &[]).ok()?;
+    let estimate = JsFuture::from(promise.dyn_into::<Promise>().ok()?)
+        .await
+        .ok()?;
+    let (quota, usage) = (num(&estimate, "quota"), num(&estimate, "usage"));
+    (quota.is_finite() && quota > 0.0).then(|| (quota - usage.max(0.0)).max(0.0) as u64)
 }

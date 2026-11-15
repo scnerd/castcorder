@@ -169,3 +169,12 @@ pub fn rename_moves_and_replaces<H: DiskHarness>(h: &H) {
     assert_eq!(kind, Some(ErrorKind::InvalidInput));
     s.sync_dir().unwrap();
 }
+
+/// `free_space` reports a volume with room (more than a byte) where the
+/// platform can say; where it cannot, it says `Unsupported`.
+pub fn free_space_is_reported<H: DiskHarness>(h: &H) {
+    match h.storage().free_space() {
+        Ok(bytes) => assert!(bytes > 0, "no free space reported"),
+        Err(e) => assert_eq!(e.kind(), ErrorKind::Unsupported),
+    }
+}
