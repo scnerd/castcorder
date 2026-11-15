@@ -338,17 +338,15 @@ fn Call(ui: Ui) -> impl IntoView {
     };
     let can_start = move || ui.take.get().starts_with("idle");
     let can_stop = move || ui.take.get().starts_with("recording");
-    let wave = move || {
-        let levels = ui.levels.get();
-        let pad = WAVE_LEN.saturating_sub(levels.len());
-        (0..pad)
-            .map(|_| 0.0)
-            .chain(levels.iter().copied())
-            .map(|p| {
-                let norm = ((p.max(1e-5).log10() * 20.0 + 60.0) / 60.0).clamp(0.0, 1.0);
-                format!("height: {}px", (2.0 + norm * 22.0).round())
-            })
-            .collect::<Vec<_>>()
+    // Bar `i` of the dock waveform (fixed spans; only their heights change,
+    // so a level reading never rebuilds the DOM).
+    let bar = move |i: usize| {
+        let p = ui.levels.with(|v| {
+            let pad = WAVE_LEN.saturating_sub(v.len());
+            if i < pad { 0.0 } else { v[i - pad] }
+        });
+        let norm = ((p.max(1e-5).log10() * 20.0 + 60.0) / 60.0).clamp(0.0, 1.0);
+        format!("height: {}px", (2.0 + norm * 22.0).round())
     };
     let wave_caption = move || match (local_rec(), ui.muted.get()) {
         (true, true) => "Your track: recording while muted",
@@ -470,7 +468,7 @@ fn Call(ui: Ui) -> impl IntoView {
             <footer class="dock">
                 <div class="dock-side">
                     <div class="wave" class:rec=local_rec role="img" aria-label=wave_caption>
-                        {move || wave().into_iter().map(|s| view! { <span style=s></span> }).collect_view()}
+                        {(0..WAVE_LEN).map(|i| view! { <span style=move || bar(i)></span> }).collect_view()}
                     </div>
                     <div class="wave-caption" class:rec=local_rec>
                         <strong>{move || ui.name.get()}</strong>
