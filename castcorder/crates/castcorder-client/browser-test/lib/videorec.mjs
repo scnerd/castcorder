@@ -17,7 +17,13 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, buttons, check, opfsNames } from './helpers.mjs';
+import { sleep, waitFor, text, buttons, check, opfsNames, parseTiming, inputZeroHostUs, loopDiffUs } from './helpers.mjs';
+import { INPUT_RATE, INPUT_SECONDS } from '../gen-wav.mjs';
+
+// How far two takes' timing metadata may disagree about the same input
+// instant: each places frames by their earliest delivery over a second, so
+// the spread of the shortest delivery delay (a few ms) bounds it.
+const INPUT_TRUTH_TOL_MS = 15;
 
 // A minimal EBML look at a WebM: the magic, the DocType, and the largest
 // Cluster Timecode (ms at the default TimecodeScale) as a rough duration.
@@ -180,7 +186,19 @@ export async function videoRecChecks(A, B) {
   const secs = wav.frames / wav.rate;
   check(secs > 5, 'A\x27s take 3 audio is ' + secs.toFixed(2) + ' s');
   if (chromium) {
-    for (const c of analyzeRecording(deinterleave(wav.samples, wav.channels), input)) {
+    const per3 = analyzeRecording(deinterleave(wav.samples, wav.channels), input);
+    // Ground truth (cast-vo4): A's input kept playing on its own clock since
+    // take 1, so take 3's content and timing metadata must place the input's
+    // frame 0 where take 1's did (modulo its loop). Each take's mapping is
+    // its own (reference points from its own deliveries), so a mapping that
+    // misplaces a take shows here, however late either take started.
+    const t3 = parseTiming(readFileSync(join(TAKE3, 'take03_A_mic.timing.jsonl'), 'utf8'));
+    const zero3 = inputZeroHostUs(t3, per3[0], INPUT_RATE);
+    const apart = loopDiffUs(zero3, ctx.inputZeroUs, INPUT_SECONDS * 1e6) / 1000;
+    check(Math.abs(apart) < INPUT_TRUTH_TOL_MS,
+      'A\x27s timing metadata places the same input on the same host time in take 1 and take 3 (' + apart.toFixed(1)
+      + ' ms apart, within ' + INPUT_TRUTH_TOL_MS + ' ms)');
+    for (const c of per3) {
       const clean = c.verdict.startsWith('bit-exact') && c.discontinuities === 0 && c.droppedFrames === 0
         && c.duplicatedFrames === 0 && c.insertedFrames === 0 && c.mismatched === 0;
       check(clean, 'take 3 (with video) channel ' + c.channel + ' vs ' + c.against + ': ' + c.verdict + ' (dropped ' + c.droppedFrames

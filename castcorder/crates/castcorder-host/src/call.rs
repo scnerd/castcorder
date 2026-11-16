@@ -1024,6 +1024,11 @@ impl Call {
             }
         }
         self.broadcast();
+        info!(
+            take = take.0,
+            after_start_us = self.timeline.now_us() - host_us,
+            "take start broadcast"
+        );
         // Everyone is Starting until their device acks: said at once, so
         // producers see it however soon the acks come.
         self.recorders.take_started(take);

@@ -666,6 +666,9 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Loose bound on start and stop latency (logged, not the point).
+    const SANITY_US: i64 = 3_000_000;
+
     /// Real hardware: the default microphone through the full path (tee,
     /// recorder thread, WavWriter in a library take directory, FLAC) while the
     /// live branch makes Opus. Skips without an input device.
@@ -724,6 +727,7 @@ mod tests {
             }
         }
         let (done_tx, done_rx) = mpsc::channel();
+        let take_stop_us = timeline.now_us();
         take_tx
             .send(TakeCtl::Stop {
                 done: Some(done_tx),
@@ -810,9 +814,36 @@ mod tests {
             "frame 0 at {} ms after the take started",
             (start - take_start_us) as f64 / 1000.0
         );
+        // When capture began against the take start is logged, and bounded
+        // only loosely (a recorder that never started fails): a fresh
+        // pulsesrc delivers its first audio a second or more late, and the
+        // metadata must say when it was captured, not pretend it was on time.
         assert!(
-            (start - take_start_us).abs() < 200_000,
+            (start - take_start_us).abs() < SANITY_US,
             "frame 0 at {start}, take at {take_start_us}"
+        );
+        // Ground truth for the mapping: the audio's own sample count. Each
+        // reference point lies as far after the one before on the host
+        // timeline as its frames are (pulsesrc's clock, running ahead and
+        // then standing still, put 1 s of audio over 1.49 s: cast-y52).
+        let refs = &map.segments[0].refs;
+        for w in refs.windows(2) {
+            let ((f0, h0), (f1, h1)) = (w[0], w[1]);
+            let audio_us = (f1 - f0) as f64 / f64::from(header.sample_rate) * 1e6;
+            let host_us = (h1 - h0) as f64;
+            assert!(
+                (host_us - audio_us).abs() < 20_000.0,
+                "frames {f0}..{f1}: {audio_us} us of audio over {host_us} us of host time"
+            );
+        }
+        let end = map.host_us(1, frames).unwrap() as i64;
+        println!(
+            "last frame at {} ms after the take stopped",
+            (end - take_stop_us) as f64 / 1000.0
+        );
+        assert!(
+            (end - take_stop_us).abs() < SANITY_US,
+            "last frame at {end}, stop at {take_stop_us}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

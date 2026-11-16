@@ -107,3 +107,20 @@ export function parseTiming(text) {
   };
   return t;
 }
+
+// Ground truth for timing metadata: the fake microphone plays the
+// deterministic input on its own continuous clock, so a track's content
+// (analyzeChannel `c`: which input frame its first aligned frame holds) and
+// its timing metadata `t` together say when, on the host timeline, the input
+// was at frame 0 (modulo the input's loop). Correct metadata gives every
+// track of the same running input the same answer.
+export function inputZeroHostUs(t, c, rate) {
+  if (c.firstAlignedFrame === null || c.firstInputFrame === null) return NaN;
+  return t.hostUsAt(c.firstAlignedFrame) - c.firstInputFrame / rate * 1e6;
+}
+
+// a - b in us, modulo a loop of `loopUs`, in [-loopUs/2, loopUs/2).
+export function loopDiffUs(a, b, loopUs) {
+  const d = ((a - b) % loopUs + loopUs) % loopUs;
+  return d >= loopUs / 2 ? d - loopUs : d;
+}

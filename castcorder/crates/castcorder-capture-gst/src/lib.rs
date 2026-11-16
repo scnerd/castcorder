@@ -419,6 +419,15 @@ impl GstCapture {
         if src.find_property("low-latency").is_some() {
             src.set_property("low-latency", true);
         }
+        if src.factory().is_some_and(|f| f.name() == "pulsesrc") {
+            // pulsesrc's own clock runs before the server delivers any audio
+            // (about 0.7 s on a fresh null-sink monitor), then stands still
+            // until the buffer timestamps catch up: buffer ages measured on
+            // it place the first second of a fresh stream up to 0.7 s too
+            // early (cast-y52). The system clock runs true; the source slaves
+            // its timestamps to it.
+            src.set_property("provide-clock", false);
+        }
         tracing::info!(
             element = %src.factory().map(|f| f.name().to_string()).unwrap_or_default(),
             device = ?device_name,

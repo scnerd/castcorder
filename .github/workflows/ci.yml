@@ -139,9 +139,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev             libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base             gstreamer1.0-plugins-good gstreamer1.0-pulseaudio
           pkg-config --modversion gstreamer-1.0
 
-      # No sound server on purpose: the real-microphone tests skip themselves without an
-      # input device. A pulseaudio null sink gives them a device whose first frame lags
-      # the take start by ~700 ms, failing the host's 200 ms timing assertion.
+      # The real-microphone tests skip themselves without an input device; a pulseaudio
+      # null sink's monitor gives them one (the default source), as on a fresh desktop.
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+          pactl set-default-source ci.monitor
+          pactl info
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:

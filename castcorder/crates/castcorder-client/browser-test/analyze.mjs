@@ -52,7 +52,7 @@ export function analyzeChannel(out, ref) {
   const q = (i) => Math.max(-32768, Math.min(32767, Math.round(out[i] * 32768)));
   let start = 0;
   while (start < m && out[start] === 0) start++;
-  let pos = null, firstInputPos = null, aligned = 0, exact = 0, exactAsym = 0, mismatched = 0, unlocked = 0, maxErr = 0;
+  let pos = null, firstInputPos = null, firstAlignedFrame = null, aligned = 0, exact = 0, exactAsym = 0, mismatched = 0, unlocked = 0, maxErr = 0;
   let run = 0, runZeros = 0, insertedFrames = 0, insertedZeroFrames = 0;
   const disc = [];
   const f = Math.fround, inv32767 = f(1 / 32767);
@@ -62,7 +62,7 @@ export function analyzeChannel(out, ref) {
       if (i + 2 >= m) { unlocked += m - i; break; }
       const p = idx.get(key3(q(i), q(i + 1), q(i + 2)));
       if (p === undefined) { unlocked++; i++; continue; }
-      pos = p; if (firstInputPos === null) firstInputPos = p;
+      pos = p; if (firstInputPos === null) { firstInputPos = p; firstAlignedFrame = i; }
     }
     const cur = pos % N, s = ref[cur];
     if (q(i) === s) {
@@ -106,7 +106,7 @@ export function analyzeChannel(out, ref) {
   return {
     verdict, frames: m, leadingZeroFrames: start, considered, aligned, exactFloat: exact, exactAsymmetric: exactAsym, mismatched, unlocked,
     insertedFrames, insertedZeroFrames,
-    maxAbsError: maxErr, maxErrorLsb16: maxErr * 32768, firstInputFrame: firstInputPos,
+    maxAbsError: maxErr, maxErrorLsb16: maxErr * 32768, firstInputFrame: firstInputPos, firstAlignedFrame,
     discontinuities: disc.length, droppedFrames: dropped, duplicatedFrames: duplicated, firstDiscontinuities: real.slice(0, 10),
   };
 }

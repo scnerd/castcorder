@@ -380,6 +380,12 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
         "userAgent",
         window().navigator().user_agent().unwrap_or_default(),
     );
+    // When the page asked for the track (device time), against the host's
+    // take start: how late the start reached this device (diagnostic).
+    set(&meta, "startPostedDeviceUs", device_now_us());
+    if let Some(us) = ui.take_started_us.get_untracked() {
+        set(&meta, "takeStartedHostUs", us as f64);
+    }
     let msg = worker_cmd("start");
     set(&msg, "name", name.as_str());
     set(&msg, "meta", meta);
