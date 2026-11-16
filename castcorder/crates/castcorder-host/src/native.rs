@@ -724,6 +724,7 @@ mod tests {
             }
         }
         let (done_tx, done_rx) = mpsc::channel();
+        let take_stop_us = timeline.now_us();
         take_tx
             .send(TakeCtl::Stop {
                 done: Some(done_tx),
@@ -813,6 +814,29 @@ mod tests {
         assert!(
             (start - take_start_us).abs() < 200_000,
             "frame 0 at {start}, take at {take_start_us}"
+        );
+        // The mapping runs at the audio's own pace: consecutive reference
+        // points lie as far apart on the host timeline as their frames are
+        // (a capture clock that runs ahead, then stands still, breaks this:
+        // cast-y52), and the last frame lands at the take stop.
+        let refs = &map.segments[0].refs;
+        for w in refs.windows(2) {
+            let ((f0, h0), (f1, h1)) = (w[0], w[1]);
+            let audio_us = (f1 - f0) as f64 / f64::from(header.sample_rate) * 1e6;
+            let host_us = (h1 - h0) as f64;
+            assert!(
+                (host_us - audio_us).abs() < 20_000.0,
+                "frames {f0}..{f1}: {audio_us} us of audio over {host_us} us of host time"
+            );
+        }
+        let end = map.host_us(1, frames).unwrap() as i64;
+        println!(
+            "last frame at {} ms after the take stopped",
+            (end - take_stop_us) as f64 / 1000.0
+        );
+        assert!(
+            (end - take_stop_us).abs() < 200_000,
+            "last frame at {end}, stop at {take_stop_us}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
