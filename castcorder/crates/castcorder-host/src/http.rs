@@ -6,6 +6,9 @@
 //!   only on the localhost listener, i.e. for a page opened on the host
 //!   machine itself; HOST is this host's id (castcorder-link `HostId`,
 //!   encoded), the audience LAN pages sign their offers for.
+//!   On the localhost listener it also carries `"link"` (the rendezvous call
+//!   link or null) and `"lan"` (the LAN https links the host prints), so the
+//!   host machine's page can show the call link before anyone joins.
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
 //!   "password":P?,"proof":PROOF}` (any content type; PROOF is castcorder-link
 //!   `identity::DeviceProof` with audience HOST; required) and
@@ -63,6 +66,10 @@ pub struct App {
     pub native: Arc<crate::participant::NativeCtl>,
     /// The call's folder (`/folder/open`).
     pub call_dir: PathBuf,
+    /// The call link through the rendezvous, once it is known.
+    pub call_link: Arc<Mutex<Option<String>>>,
+    /// The LAN join links (`https://<ip>:<port>/`), as the host prints them.
+    pub lan_links: Vec<String>,
 }
 
 /// The header a `/native` request must carry. A page on another origin
@@ -372,10 +379,15 @@ fn percent_decode(s: &str) -> String {
 fn handle(app: &App, req: &Request, producer: bool) -> Response {
     let gone = || text(500, "host thread not answering");
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/role") => json(
-            200,
-            serde_json::json!({ "producer": producer, "host": app.host_id }).to_string(),
-        ),
+        ("GET", "/role") => {
+            let mut role = serde_json::json!({ "producer": producer, "host": app.host_id });
+            if producer {
+                // The host machine's page only: the call link to show and copy.
+                role["link"] = serde_json::json!(app.call_link.lock().ok().and_then(|l| l.clone()));
+                role["lan"] = serde_json::json!(app.lan_links);
+            }
+            json(200, role.to_string())
+        }
         ("POST", "/offer") => {
             let name = query_name(&req.query);
             let offer = match serde_json::from_slice::<Sdp>(&req.body) {
@@ -578,6 +590,8 @@ mod tests {
             host_id: "h".into(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
             call_dir: std::env::temp_dir(),
+            call_link: Default::default(),
+            lan_links: Vec::new(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -619,6 +633,35 @@ mod tests {
         stop.store(true, Ordering::SeqCst);
     }
 
+    /// `GET /role` carries the call link and the LAN links on the host
+    /// machine's own listener only: LAN guests are not handed the link.
+    #[test]
+    fn role_shows_the_call_links_to_the_host_machine_only() {
+        let (tx, _rx) = mpsc::channel();
+        let app = Arc::new(App {
+            tx: Mutex::new(tx.clone()),
+            dist: std::env::temp_dir(),
+            host_id: "h".into(),
+            native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+            call_dir: std::env::temp_dir(),
+            call_link: Arc::new(Mutex::new(Some("https://rv/v/1/#h.s".into()))),
+            lan_links: vec!["https://192.168.1.5:27800/".into()],
+        });
+        let local = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lan = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (local_addr, lan_addr) = (local.local_addr().unwrap(), lan.local_addr().unwrap());
+        let stop: Arc<AtomicBool> = Default::default();
+        serve(local, app.clone(), None, true, stop.clone());
+        serve(lan, app, None, false, stop);
+        let (_, body) = request(local_addr, "GET", "/role", "");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["link"], "https://rv/v/1/#h.s");
+        assert_eq!(v["lan"][0], "https://192.168.1.5:27800/");
+        let (_, body) = request(lan_addr, "GET", "/role", "");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.get("link").is_none() && v.get("lan").is_none(), "{body}");
+    }
+
     /// A LAN page learns the host id from `GET /role` and signs its offer
     /// for it; the offer reaches the host thread with that audience, and a
     /// proof signed for anything else (the old constant `lan`) is refused.
@@ -632,6 +675,8 @@ mod tests {
             host_id: host_id.clone(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
             call_dir: std::env::temp_dir(),
+            call_link: Default::default(),
+            lan_links: Vec::new(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

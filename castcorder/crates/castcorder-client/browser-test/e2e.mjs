@@ -84,6 +84,8 @@ import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check
 import { takeChecks } from './lib/take.mjs';
 import { micLostChecks, micRecoveredChecks } from './lib/trackchips.mjs';
 import { liveLevelChecks } from './lib/levels.mjs';
+import { themeChecks } from './lib/theme.mjs';
+import { lobbyLinkChecks, topBarLinkChecks } from './lib/link.mjs';
 import { videoChecks } from './lib/video.mjs';
 import { videoRecChecks } from './lib/videorec.mjs';
 import { securityChecks } from './lib/security.mjs';
@@ -169,6 +171,8 @@ try {
   console.log((MODE === 'firefox' ? 'firefox ' : 'chromium ') + browsers[0].version());
 
   check((await A.locator('#take-start').count()) === 0, 'no producer controls before joining');
+  await themeChecks(A);
+  await lobbyLinkChecks(A);
   const refused = await B.evaluate(async () => (await fetch('/take/start', { method: 'POST' })).status);
   check(refused === 403, 'host refuses take control over HTTPS (' + refused + ')');
 
@@ -183,6 +187,7 @@ try {
   await A.waitForSelector('#take-start', { timeout: 10000 });
   await sleep(1000);
   check((await B.locator('#take-start').count()) === 0, 'producer controls on the localhost page only, not on the HTTPS page');
+  await topBarLinkChecks(A, B);
 
   // B receives A's forwarded audio.
   const flowing = await waitFor(async () => {

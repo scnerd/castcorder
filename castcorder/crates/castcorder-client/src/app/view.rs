@@ -90,6 +90,69 @@ fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl IntoView {
     view! { <svg class=class viewBox="0 0 24 24" aria-hidden="true">{paths}</svg> }
 }
 
+/// The link to this call that can be shared: the rendezvous link when there is
+/// one, else the LAN https link (the host machine's page is told it by
+/// `GET /role`; a producer on a LAN page is on it).
+fn call_link(ui: Ui) -> String {
+    if let Some(link) = ui.room.get().and_then(|r| r.link) {
+        return link;
+    }
+    let told = ui.host_link.get();
+    if !told.is_empty() {
+        return told;
+    }
+    let origin = window().location().origin().unwrap_or_default();
+    if LINK.with(|l| l.borrow().is_none()) && origin.starts_with("https://") {
+        format!("{origin}/")
+    } else {
+        String::new()
+    }
+}
+
+/// The call link, always visible with a Copy button (hidden only while the
+/// page knows no link at all).
+#[component]
+fn LinkBar(ui: Ui, id: &'static str) -> impl IntoView {
+    let copied = RwSignal::new(false);
+    let copy = move |_| {
+        let clip = get(&window().navigator(), "clipboard");
+        quiet(
+            call(&clip, "writeText", &[&JsValue::from_str(&call_link(ui))]),
+            "copy call link",
+        );
+        copied.set(true);
+        spawn_local(async move {
+            crate::mailbox::sleep_ms(2000).await;
+            copied.set(false);
+        });
+    };
+    view! {
+        <div class="linkbar" hidden=move || call_link(ui).is_empty()>
+            <span class="small muted">"Call link"</span>
+            <code id=id title="The link guests open to join this call">{move || call_link(ui)}</code>
+            <button class="btn tiny" data-copy-link on:click=copy>
+                <Icon name="link" small=true/>{move || if copied.get() { "Copied" } else { "Copy" }}</button>
+        </div>
+    }
+}
+
+/// System / Dark / Light, remembered in this browser (or desktop webview).
+#[component]
+fn ThemeToggle(ui: Ui) -> impl IntoView {
+    let choice = move |t: &'static str| {
+        view! {
+            <button class="btn tiny outline" data-theme-set=t aria-pressed=move || if ui.theme.get() == t { "true" } else { "false" }
+                on:click=move |_| { apply_theme(t); ui.theme.set(t.into()); }>
+                {match t { "dark" => "Dark", "light" => "Light", _ => "System" }}</button>
+        }
+    };
+    view! {
+        <div class="theme-toggle" role="group" aria-label="Colour theme">
+            {choice("system")}{choice("dark")}{choice("light")}
+        </div>
+    }
+}
+
 /// The Castcorder mark (a mic inside broadcast arcs), small cut.
 #[component]
 fn Mark() -> impl IntoView {
@@ -224,7 +287,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
     let last_error = move || ui.errors.get().last().cloned().unwrap_or_default();
     view! {
         <div class="lobby" hidden=move || ui.joined.get()>
-            <div class="brand"><Mark/> "Castcorder"</div>
+            <div class="brand"><Mark/> "Castcorder"<ThemeToggle ui=ui/></div>
             <div class="lobby-main">
                 <div class="lobby-preview">
                     <div class="preview-box">
@@ -252,6 +315,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                         <input type="checkbox" prop:checked=move || ui.camera.get() on:change=move |_| toggle_camera(ui) />
                         "Camera on when I join"
                     </label>
+                    <LinkBar ui=ui id="call-link-lobby"/>
                     <div class="notice" role="note">
                         <span class="dot" aria-hidden="true"></span>
                         <span>"This call is recorded. Your microphone, and your camera if it is on, record on this computer at full quality and go to the host after each take. Producers can see and switch which microphone and camera you use."</span>
@@ -289,17 +353,6 @@ fn Call(ui: Ui) -> impl IntoView {
         ui.panel.set(if now == p { Panel::Closed } else { p });
     };
     let pressed = move |p: Panel| if panel() == p { "true" } else { "false" };
-    let copied = RwSignal::new(false);
-    let copy_link = move |_| {
-        if let Some(link) = ui.room.get_untracked().and_then(|r| r.link) {
-            let clip = get(&window().navigator(), "clipboard");
-            quiet(
-                call(&clip, "writeText", &[&JsValue::from_str(&link)]),
-                "copy call link",
-            );
-            copied.set(true);
-        }
-    };
     // This device's tracks not yet confirmed by the host.
     let unsent = move || {
         let delivered = ui.delivered.get();
@@ -366,7 +419,7 @@ fn Call(ui: Ui) -> impl IntoView {
             let pad = WAVE_LEN.saturating_sub(v.len());
             if i < pad { 0.0 } else { v[i - pad] }
         });
-        let norm = ((p.max(1e-5).log10() * 20.0 + 60.0) / 60.0).clamp(0.0, 1.0);
+        let norm = p;
         format!("height: {}px", (2.0 + norm * 22.0).round())
     };
     let wave_caption = move || match (local_rec(), ui.muted.get()) {
@@ -400,10 +453,8 @@ fn Call(ui: Ui) -> impl IntoView {
                     <Icon name="alert" small=true/>
                     {move || { let n = ui.errors.get().len(); format!("{n} problem{}", if n == 1 { "" } else { "s" }) }}</button>
                 <div class="right">
-                    <Show when=move || producer() && ui.room.get().and_then(|r| r.link).is_some()>
-                        <button class="btn" on:click=copy_link><Icon name="link" small=true/>
-                            {move || if copied.get() { "Copied" } else { "Copy call link" }}</button>
-                    </Show>
+                    <ThemeToggle ui=ui/>
+                    <Show when=producer><LinkBar ui=ui id="call-link-top"/></Show>
                     <Show when=producer>
                         <button class="btn" aria-pressed=move || pressed(Panel::People) on:click=move |_| toggle(Panel::People)>
                             <Icon name="people" small=true/>"People"</button>
@@ -611,6 +662,8 @@ pub(super) fn App() -> impl IntoView {
         delivered: RwSignal::new(Default::default()),
         muted: RwSignal::new(false),
         mute_tip: RwSignal::new(false),
+        theme: RwSignal::new(stored_theme()),
+        host_link: RwSignal::new(String::new()),
         panel: RwSignal::new(Panel::Auto),
         self_view: RwSignal::new(true),
         levels: RwSignal::new(VecDeque::new()),
@@ -618,6 +671,9 @@ pub(super) fn App() -> impl IntoView {
     if bad_link {
         ui.warning
             .set("This call link is damaged: ask the host for it again.".into());
+    }
+    if LINK.with(|l| l.borrow().is_none()) {
+        spawn_local(watch_host_link(ui));
     }
     if let Err(e) = start_worker(ui) {
         ui.error("worker", &e);

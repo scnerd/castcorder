@@ -25,7 +25,7 @@ export async function openGuest(name, extraArgs, base, setup, display = name, qu
     ctx = await browser.newContext({ ignoreHTTPSErrors: true });
   } else {
     browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
-    ctx = await browser.newContext({ permissions: ['microphone', 'camera'], ignoreHTTPSErrors: true });
+    ctx = await browser.newContext({ permissions: ['microphone', 'camera', 'clipboard-read', 'clipboard-write'], ignoreHTTPSErrors: true });
   }
   browsers.push(browser);
   if (MODE === 'fallback') {
