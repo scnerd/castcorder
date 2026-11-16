@@ -279,6 +279,18 @@ jobs:
       - name: Relay test (spans a credential renewal)
         run: task test:relay
 
+      # Tier 3 system test: guest joins by call link only through the rendezvous. Shares
+      # the host, rendezvous and client builds (and the null sink) set up for the relay test.
+      - name: System test (call link through the rendezvous)
+        run: task test:system
+
+      - name: Upload system logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-logs
+          path: castcorder/crates/castcorder-client/browser-test/test-results/system-*
+
       - name: Upload relay logs
         if: failure()
         uses: actions/upload-artifact@v4
