@@ -230,6 +230,8 @@ struct Engine {
 
 thread_local! {
     static ENGINE: RefCell<Engine> = RefCell::new(Engine::default());
+    /// The dock waveform's noise floor ([`crate::levels::NoiseFloor`]).
+    static DOCK_FLOOR: RefCell<crate::levels::NoiseFloor> = RefCell::new(Default::default());
     /// What the worker said at `ready`: is MediaStreamTrackProcessor exposed there?
     static MSTP_IN_WORKER: Cell<Option<bool>> = const { Cell::new(None) };
     /// The capture attempt waiting for the worker's `source-ok`/`source-failed`.
@@ -383,7 +385,8 @@ struct Ui {
     panel: RwSignal<Panel>,
     /// Show this participant's own camera in its tile (others see it either way).
     self_view: RwSignal<bool>,
-    /// The last `WAVE_LEN` raw microphone peaks, oldest first: the dock waveform.
+    /// The last `WAVE_LEN` microphone levels above the noise floor (0 to 1),
+    /// oldest first: the dock waveform.
     levels: RwSignal<VecDeque<f64>>,
 }
 
@@ -488,8 +491,10 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                     // Muted: the others still see this microphone move.
                     report_mic(ui);
                 }
+                let shown =
+                    DOCK_FLOOR.with(|f| f.borrow_mut().push(peak, js_sys::Date::now()).norm);
                 ui.levels.update(|v| {
-                    v.push_back(peak);
+                    v.push_back(shown);
                     while v.len() > WAVE_LEN {
                         v.pop_front();
                     }

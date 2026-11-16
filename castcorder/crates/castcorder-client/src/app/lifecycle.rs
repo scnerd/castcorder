@@ -441,6 +441,7 @@ pub(super) fn leave(ui: Ui) {
     ui.role.set(Role::default());
     ui.level.set(0.0);
     ui.levels.set(VecDeque::new());
+    DOCK_FLOOR.with(|f| *f.borrow_mut() = Default::default());
 }
 
 pub(super) fn db(x: f64) -> String {
