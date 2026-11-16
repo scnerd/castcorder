@@ -106,8 +106,13 @@ fn drain_live(mut live: castcorder_capture_gst::LiveOpus) -> (u32, u8, usize) {
 fn muting_silences_the_live_stream_and_never_the_recording() {
     for muted in [true, false] {
         let wav = Wav::new(SampleFormat::I16);
-        let (mut cap, live) =
-            GstCapture::open_file_with_live(&wav.path, &LiveOptions::default()).unwrap();
+        // Muted from the start: the file streams faster than real time, so
+        // muting after it opened would race the first buffers to the encoder.
+        let opts = LiveOptions {
+            muted,
+            ..LiveOptions::default()
+        };
+        let (mut cap, live) = GstCapture::open_file_with_live(&wav.path, &opts).unwrap();
         assert!(live.set_muted(muted), "the live branch has a mute");
         let puller = std::thread::spawn(move || drain_live(live));
         let mut data = vec![];

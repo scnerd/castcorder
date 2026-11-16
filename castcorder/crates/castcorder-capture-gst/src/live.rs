@@ -37,6 +37,10 @@ pub struct LiveOptions {
     /// [`crate::Playback`]); enables echo cancellation. It must exist, in a
     /// running pipeline, before the capture opens.
     pub echo_probe: Option<String>,
+    /// Start with the live stream muted (see [`LiveOpus::set_muted`]). The
+    /// branch is built muted, so no audio reaches the encoder before a later
+    /// `set_muted` could take effect.
+    pub muted: bool,
 }
 
 impl Default for LiveOptions {
@@ -45,6 +49,7 @@ impl Default for LiveOptions {
             bitrate: 32_000,
             noise_suppression: true,
             echo_probe: None,
+            muted: false,
         }
     }
 }
@@ -184,9 +189,9 @@ pub(crate) fn build_tee(
          max-size-time=200000000 ! audioconvert ! audioresample \
          ! capsfilter name=live_caps caps=audio/x-raw,format=S16LE,rate=48000,channels=1 \
          {dsp}! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 \
-         ! volume name=live_mute ! opusenc name=live_enc bitrate={} frame-size=20 \
+         ! volume name=live_mute mute={} ! opusenc name=live_enc bitrate={} frame-size=20 \
          ! appsink name=live_sink sync=false async=false max-buffers=1 drop=false",
-        opts.bitrate
+        opts.muted, opts.bitrate
     );
     let bin = gst::parse::bin_from_description(&desc, true)
         .map_err(|e| err(format!("live branch: {e}")))?;

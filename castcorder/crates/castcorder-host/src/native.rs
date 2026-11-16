@@ -501,7 +501,7 @@ fn run(
     }
     let outcome = raise_current_thread_priority();
     info!(thread = "participant-rec", outcome = %outcome, "recording thread priority");
-    let opts = LiveOptions {
+    let mut opts = LiveOptions {
         echo_probe,
         ..LiveOptions::default()
     };
@@ -520,6 +520,9 @@ fn run(
         files: vec![],
     };
     loop {
+        // Open already muted if the host is: muting only once the live loop
+        // runs would send the first moments of audio to the call.
+        opts.muted = cfg.muted.load(Ordering::Relaxed);
         let opened = match &cfg.input {
             NativeInput::Device(device) => {
                 GstCapture::open_device_with_live(device.as_deref(), Watchdog::default(), &opts)
