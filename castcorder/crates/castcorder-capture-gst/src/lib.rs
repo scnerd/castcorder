@@ -641,21 +641,6 @@ impl CaptureSource for GstCapture {
                             live.got_data = true;
                         }
                         let frame = self.next_frame;
-                        if std::env::var_os("CASTCORDER_TIMING_DEBUG").is_some()
-                            && frame < u64::from(self.format.sample_rate) * 3
-                        {
-                            let clock = self.pipeline.clock();
-                            let name = clock.as_ref().map(|c| c.type_().name().to_string());
-                            let now = clock.as_ref().map(|c| c.time().nseconds());
-                            let base = self.pipeline.base_time().map(|b| b.nseconds());
-                            let pts = sample.buffer().and_then(|b| b.pts()).map(|p| p.nseconds());
-                            let n = sample.buffer().map(|b| b.size()).unwrap_or(0);
-                            let sys = gst::SystemClock::obtain().time().nseconds();
-                            eprintln!(
-                                "TIMINGDBG frame={frame} bytes={n} pts={pts:?} clock={name:?} now={now:?} base={base:?} sys={sys} age={:?}",
-                                sample_age(&self.pipeline, &sample)
-                            );
-                        }
                         self.timing =
                             sample_age(&self.pipeline, &sample).map(|(age, running_time)| {
                                 CaptureTiming {

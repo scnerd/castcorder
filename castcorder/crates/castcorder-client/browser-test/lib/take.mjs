@@ -5,7 +5,7 @@ import { INPUT_RATE } from '../gen-wav.mjs';
 import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { parseOggOpus } from '../ogg.mjs';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming } from './helpers.mjs';
+import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming, inputZeroHostUs } from './helpers.mjs';
 import { muteChecks } from './levels.mjs';
 import { chipsBeforeTake, chipsWhileRecording, chipsAfterTake } from './trackchips.mjs';
 
@@ -156,12 +156,14 @@ export async function takeChecks(A, B) {
     }
     check(!hostFiles.some((f) => f.includes('safety') && f !== 'safety'), 'no safety file in the take directory itself');
   }
-  // Timing metadata (cast-whr): each guest's file parses, and its mapping
-  // places the track's first frame just after the host's take start (loopback:
-  // clocks are shared, so this checks the plumbing, not the estimator).
-  // The worklet capture path (fallback, firefox) starts on the audio thread's own schedule,
-  // and on a loaded CI runner Firefox was seen 44-72 ms late, so those modes allow 150 ms.
-  const FRAME0_TOL_MS = MODE === 'chromium' ? 50 : 150;
+  // Timing metadata (cast-whr): each guest's file parses and maps the track
+  // onto the host timeline. When frame 0 was captured relative to the take
+  // start is not a property of the mapping (a start that reaches a loaded
+  // device 100 ms late records from 100 ms later, and the metadata says so),
+  // so it is logged and only bounded loosely here: a recorder that never
+  // started fails. Whether the mapping is right is checked against ground
+  // truth below (the input's own clock, across takes: cast-vo4).
+  const FRAME0_SANITY_MS = 3000;
   for (const n of ['A', 'B']) {
     const t = parseTiming(readFileSync(join(TAKE_DIR, 'take01_' + n + '_mic.timing.jsonl'), 'utf8'));
     const start = t.hostUsAt(0);
@@ -195,8 +197,8 @@ export async function takeChecks(A, B) {
       + ', worker received ' + rel(side.startReceivedHostUs) + ', first frame arrived ' + rel(side.firstFrameArrivedHostUs)
       + ', frame 0 placed ' + delta.toFixed(1));
     check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
-      && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_TOL_MS,
-      n + '\x27s timing metadata places frame 0 within ' + FRAME0_TOL_MS + ' ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');
+      && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_SANITY_MS,
+      n + '\x27s timing metadata maps the take onto the host timeline, frame 0 ' + delta.toFixed(1) + ' ms after the take start');
   }
   const SUFFIX = FULL ? '' : '-' + MODE;
   const wavBytes = readFileSync(join(TAKE_DIR, 'take01_A_mic.wav'));
@@ -247,6 +249,15 @@ export async function takeChecks(A, B) {
     check(clean, 'channel ' + c.channel + ' vs ' + c.against + ': ' + c.verdict + ' (aligned ' + c.aligned + '/' + c.considered
       + ', leading zeros ' + c.leadingZeroFrames + ', unlocked ' + c.unlocked + ', mismatched ' + c.mismatched
       + ', dropped ' + c.droppedFrames + ', duplicated ' + c.duplicatedFrames + ', inserted ' + c.insertedFrames + ')');
+  }
+  // Ground truth for A's timing metadata: when its input was at frame 0, by
+  // this take's content and mapping; take 3 must agree (videorec.mjs).
+  {
+    const t = parseTiming(readFileSync(join(TAKE_DIR, 'take01_A_mic.timing.jsonl'), 'utf8'));
+    ctx.inputZeroUs = inputZeroHostUs(t, per[0], INPUT_RATE);
+    console.log('info A take 1: input frame ' + per[0].firstInputFrame + ' at track frame ' + per[0].firstAlignedFrame
+      + '; input frame 0 on the host timeline at ' + ctx.inputZeroUs.toFixed(0) + ' us');
+    check(Number.isFinite(ctx.inputZeroUs), 'A\x27s take 1 content and timing metadata place the input on the host timeline');
   }
   // Aligned tracks (cast-pzb): once both tracks and their timing metadata are
   // verified the host renders take01/aligned/, one file per guest, equal

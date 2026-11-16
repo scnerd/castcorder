@@ -157,8 +157,6 @@ jobs:
           key: gst
 
       - name: Clippy and tests with native capture
-        env:
-          CASTCORDER_TIMING_DEBUG: "1"
         run: task test:gst
 
   # Tier 4: Playwright against headless Chromium and Firefox. No Docker: the host, the

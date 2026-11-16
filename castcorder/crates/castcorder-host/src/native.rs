@@ -666,6 +666,9 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    /// Loose bound on start and stop latency (logged, not the point).
+    const SANITY_US: i64 = 3_000_000;
+
     /// Real hardware: the default microphone through the full path (tee,
     /// recorder thread, WavWriter in a library take directory, FLAC) while the
     /// live branch makes Opus. Skips without an input device.
@@ -811,14 +814,18 @@ mod tests {
             "frame 0 at {} ms after the take started",
             (start - take_start_us) as f64 / 1000.0
         );
+        // When capture began against the take start is logged, and bounded
+        // only loosely (a recorder that never started fails): a fresh
+        // pulsesrc delivers its first audio a second or more late, and the
+        // metadata must say when it was captured, not pretend it was on time.
         assert!(
-            (start - take_start_us).abs() < 200_000,
+            (start - take_start_us).abs() < SANITY_US,
             "frame 0 at {start}, take at {take_start_us}"
         );
-        // The mapping runs at the audio's own pace: consecutive reference
-        // points lie as far apart on the host timeline as their frames are
-        // (a capture clock that runs ahead, then stands still, breaks this:
-        // cast-y52), and the last frame lands at the take stop.
+        // Ground truth for the mapping: the audio's own sample count. Each
+        // reference point lies as far after the one before on the host
+        // timeline as its frames are (pulsesrc's clock, running ahead and
+        // then standing still, put 1 s of audio over 1.49 s: cast-y52).
         let refs = &map.segments[0].refs;
         for w in refs.windows(2) {
             let ((f0, h0), (f1, h1)) = (w[0], w[1]);
@@ -835,7 +842,7 @@ mod tests {
             (end - take_stop_us) as f64 / 1000.0
         );
         assert!(
-            (end - take_stop_us).abs() < 200_000,
+            (end - take_stop_us).abs() < SANITY_US,
             "last frame at {end}, stop at {take_stop_us}"
         );
         let _ = std::fs::remove_dir_all(&root);
