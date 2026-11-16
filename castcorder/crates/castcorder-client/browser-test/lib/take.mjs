@@ -180,6 +180,20 @@ export async function takeChecks(A, B) {
       + JSON.stringify(t.lastEstimate) + '; frame 0 at ' + delta.toFixed(1) + ' ms after the take start; last frame '
       + endMs.toFixed(1) + ' ms after the take stop; ref residuals ms [' + resid.map((x) => x.toFixed(1)).join(',')
       + ']; files opened in ' + side.openMs + ' ms, ' + side.heldFrames + ' frames held meanwhile');
+    // Where a late frame 0 comes from: each step of the take start on the
+    // host timeline, in ms after the host stamped it.
+    const rel = (us) => (typeof us === 'number' ? ((us - take1StartUs) / 1000).toFixed(1) : '?');
+    let broadcast = '?';
+    try {
+      for (const f of readdirSync(LOGS_DIR).filter((x) => x.startsWith('host-') && x.endsWith('.jsonl'))) {
+        for (const l of readFileSync(join(LOGS_DIR, f), 'utf8').split('\n')) {
+          if (l.includes('take start broadcast') && l.includes('"take":1')) broadcast = (JSON.parse(l).fields.after_start_us / 1000).toFixed(1);
+        }
+      }
+    } catch { /* diagnostic only */ }
+    console.log('info ' + n + ' start path ms: host broadcast ' + broadcast + ', page posted ' + rel(side.startPostedHostUs)
+      + ', worker received ' + rel(side.startReceivedHostUs) + ', first frame arrived ' + rel(side.firstFrameArrivedHostUs)
+      + ', frame 0 placed ' + delta.toFixed(1));
     check(t.header && t.header.version === 1 && t.header.take === 1 && t.segments === 1 && t.end !== null && t.sync.length > 0
       && t.refs.length >= TAKE_SECONDS - 1 && Math.abs(delta) < FRAME0_TOL_MS,
       n + '\x27s timing metadata places frame 0 within ' + FRAME0_TOL_MS + ' ms of the host\x27s take start (' + delta.toFixed(1) + ' ms)');

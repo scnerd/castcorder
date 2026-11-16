@@ -342,6 +342,9 @@ impl Active {
                 "firstFrameAtMs",
                 js_sys::Date::now() - (now_ms() - arrived.ms),
             );
+            if let Some(h) = host_us_of(arrived.device_us.round() as i64) {
+                set(&self.meta, "firstFrameArrivedHostUs", h as f64);
+            }
             (rate, channels)
         });
         if self.refs.is_none() {
@@ -934,6 +937,24 @@ async fn start(msg: JsValue) -> Result<(), JsValue> {
     }
     STARTING.set(true);
     STOP_PENDING.set(false);
+    let meta = get(&msg, "meta");
+    if meta.is_object() {
+        // Where the start's delay comes from (diagnostic): page post, worker
+        // receipt, first frame, all on the host timeline.
+        for (from, to) in [
+            ("startPostedDeviceUs", "startPostedHostUs"),
+            ("", "startReceivedHostUs"),
+        ] {
+            let d = if from.is_empty() {
+                device_now_us()
+            } else {
+                num(&meta, from)
+            };
+            if let Some(h) = host_us_of(d.round() as i64).filter(|_| d > 0.0) {
+                set(&meta, to, h as f64);
+            }
+        }
+    }
     HELD.with(|h| *h.borrow_mut() = Some((Vec::new(), 0)));
     let r = open_track(msg).await;
     HELD.with(|h| h.borrow_mut().take());
