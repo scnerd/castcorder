@@ -1,8 +1,8 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, check, callDirs } from './helpers.mjs';
+import { sleep, waitFor, text, check, callDirs, opfsNames, readOpfs } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Rooms and calls (cast-brj), chromium and firefox, on a fourth host whose
@@ -14,7 +14,10 @@ import { openGuest } from './guest.mjs';
 // - everyone leaves and rejoins: the same call (same folder, take numbers
 //   continue);
 // - a producer starts a new call from the call: a new folder, takes from 01,
-//   and the guest's next take lands there; the home lists both calls.
+//   and the guest's next take lands there; the home lists both calls;
+// - a guest leaves mid-take and joins a later call: its take syncs into the
+//   call it was recorded in and leaves OPFS; a track for a call it was never
+//   in is refused and stays on the device (cast-6qm).
 export async function roomsChecks() {
   const { MODE, exe, dist, RESULTS } = ctx;
   const LIB = join(RESULTS, 'library-rooms-' + MODE);
@@ -134,4 +137,73 @@ export async function roomsChecks() {
   await rows.nth(1).locator('.continue-call').click();
   await waitFor(async () => (await rooms()).find((r) => r.name === ROOM).current === first, 'Continue makes the old call the current one', 10000);
   check(true, 'Continue this call on the home picks the call the next join lands in');
+
+  // Every call's tracks sync whenever the host is connected (cast-6qm): the
+  // guest leaves mid-take, so its take 3 of the first call never syncs; the
+  // producer moves on to a new call and the guest joins that one. Its take
+  // 3 lands in the first call's folder and leaves OPFS; a track it claims
+  // for a call it was never in (made on disk here) is refused and kept.
+  const FOREIGN = '2001-01-01';
+  const foreignDir = join(LIB, ROOM, FOREIGN);
+  mkdirSync(foreignDir, { recursive: true });
+  writeFileSync(join(foreignDir, 'call.json'), JSON.stringify({ started_ms: 978307200000, last_active_ms: 978307200000 }));
+  await card.locator('.join-room').click();
+  await P.waitForSelector('#join');
+  await P.click('#join');
+  await G.click('#join');
+  await waitFor(async () => (await text(G, '#state')) === 'connected' && (await text(P, '#state')) === 'connected', 'both join the continued call', 40000);
+  await waitFor(async () => (await text(P, '#current-call')) === first, 'the join lands in the continued call', 15000);
+  await waitFor(async () => P.isEnabled('#take-start'), 'P can start take 3', 15000);
+  await P.click('#take-start');
+  await waitFor(async () => (await text(P, '#take-result')).includes('"take":3'), 'take 3 started', 10000);
+  await sleep(2500);
+  await G.click('#leave');
+  await sleep(500);
+  await P.click('#take-stop');
+  await waitFor(async () => (await text(P, '#take-status')).startsWith('idle'), 'take 3 stopped', 10000);
+  const pending = await waitFor(async () => {
+    const n = (await opfsNames(G)).filter((f) => f.startsWith('take0003') && f.endsWith('.json'));
+    return n.length > 0 ? n : null;
+  }, 'G kept its take 3 track', 15000);
+  const meta = JSON.parse((await readOpfs(G, 'tracks', pending[0])).toString('utf8'));
+  check(meta.finalised && meta.call.endsWith('/' + ROOM + '/' + first), 'G\x27s take 3 is finalised and belongs to the first call: ' + meta.call);
+  check(!synced(dirs[0], 'take03', 2), 'G\x27s take 3 is not on the host yet');
+  // A track for a call G was never in.
+  await G.evaluate(async (m) => {
+    const d = await (await navigator.storage.getDirectory()).getDirectoryHandle('tracks', { create: true });
+    for (const [name, data] of [['foreign-take0001.wav', 'RIFF-not-a-real-wav-' + 'x'.repeat(5000)],
+      ['foreign-take0001.json', JSON.stringify(m)]]) {
+      const w = await (await d.getFileHandle(name, { create: true })).createWritable();
+      await w.write(data);
+      await w.close();
+    }
+  }, { ...meta, name: 'foreign-take0001', file: 'foreign-take0001.wav', take: 1,
+    call: meta.call.replace(/[^/]+$/, FOREIGN) });
+  // The producer moves on to a new call (G is gone, so nothing holds it).
+  await P.click('#new-call');
+  await waitFor(async () => {
+    const c = await text(P, '#current-call');
+    if (c.length > 0 && c !== first && c !== second) return true;
+    if ((await text(P, '#take-result')).startsWith('refused')) await P.click('#new-call');
+    return false;
+  }, 'P is moved to a third call', 30000, 1000);
+  const third = await text(P, '#current-call');
+  await G.click('#join');
+  await waitFor(async () => (await text(G, '#state')) === 'connected', 'G joins the third call', 40000);
+  await waitFor(async () => synced(dirs[0], 'take03', 2), 'G\x27s take 3 lands in the first call\x27s folder while G is in the third', 60000);
+  const m3 = readFileSync(join(dirs[0], 'take03', 'manifest.jsonl'), 'utf8');
+  check(m3.split('\n').some((l) => l.startsWith('{"Verified"') && l.includes(meta.device)),
+    'the first call\x27s manifest has G\x27s take 3 verified');
+  const left = await waitFor(async () => {
+    const n = await opfsNames(G);
+    return n.some((f) => f.startsWith('take0003')) ? null : n;
+  }, 'G\x27s take 3 left OPFS after verified receipt', 30000);
+  check(true, 'G\x27s take 3 of call ' + first + ' synced from call ' + third + ' and left the device');
+  await waitFor(async () => /track for another call refused/.test(ctx.host7Log), 'the host refused the foreign track', 15000);
+  check(left.includes('foreign-take0001.wav') && left.includes('foreign-take0001.json'),
+    'a track for a call G was never in stays on the device: ' + left.join(' '));
+  check(!existsSync(join(foreignDir, 'take01')), 'nothing was written into a call G was never in');
+  check(!existsSync(join(callDirs(LIB, ROOM).find((d) => d.endsWith(third)), 'take03')), 'the third call got no take 3');
+  for (const p of [P, G]) await p.click('#leave');
+  await waitFor(async () => !(await live()), 'the room empties once more', 20000);
 }

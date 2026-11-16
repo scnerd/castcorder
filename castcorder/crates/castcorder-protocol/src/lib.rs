@@ -104,7 +104,9 @@ pub enum Request {
     /// Ask for the current take status.
     GetTakeStatus,
     /// Offer a finished track from the outbox (answered with
-    /// [`Response::TrackAccepted`]). A device offers its whole outbox again on
+    /// [`Response::TrackAccepted`]) recorded in the call this connection is in,
+    /// or before rooms (another call's: [`Request::OfferCallTrack`]). A device
+    /// offers its whole outbox again on
     /// every connect; the host pulls each track on the "data" channel whenever no
     /// take is recording, audio before video, oldest take first, and confirms
     /// verified receipt there (castcorder-transfer DONE). Only then may the device
