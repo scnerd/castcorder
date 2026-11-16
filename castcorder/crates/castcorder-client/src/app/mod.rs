@@ -49,6 +49,7 @@
 
 mod capture;
 mod data;
+mod home;
 mod join;
 mod lifecycle;
 mod media;

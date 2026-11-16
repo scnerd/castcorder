@@ -73,7 +73,10 @@ async fn native_request(
 
 /// Join or leave with the native microphone; on the host machine only.
 #[component]
-pub(super) fn NativeMic() -> impl IntoView {
+pub(super) fn NativeMic(
+    /// The room to join (empty: the live room, else the default room).
+    room: String,
+) -> impl IntoView {
     let state = RwSignal::new(NativeView::default());
     let device = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
@@ -93,13 +96,18 @@ pub(super) fn NativeMic() -> impl IntoView {
         });
     }
     let joined = move || state.get().joined.is_some();
+    let room = StoredValue::new(room);
     let act = move |join: bool| {
         busy.set(true);
         message.set(String::new());
         spawn_local(async move {
             let r = if join {
                 let name = device.get_untracked();
-                let body = serde_json::json!({ "device": (!name.is_empty()).then_some(name) });
+                let room = room.get_value();
+                let body = serde_json::json!({
+                    "device": (!name.is_empty()).then_some(name),
+                    "room": (!room.is_empty()).then_some(room),
+                });
                 native_request("POST", "/native/join", Some(body.to_string())).await
             } else {
                 native_request("POST", "/native/leave", None).await

@@ -70,6 +70,11 @@
 //    empty sidecar (recovered from its timing header and synced) and audio
 //    with no sidecar (kept; the scan creates no file).
 //
+// 11. (chromium, firefox) Rooms and calls on a fourth host: the host machine's
+//    home makes a room and copies its link, a guest on a room that is not live
+//    waits, leaving and rejoining keeps the call, a new call gets a new folder:
+//    see roomsChecks() in lib/rooms.mjs.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
@@ -92,6 +97,7 @@ import { securityChecks } from './lib/security.mjs';
 import { identityChecks } from './lib/identity.mjs';
 import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
+import { roomsChecks } from './lib/rooms.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
@@ -332,6 +338,7 @@ try {
   if (MODE !== 'fallback') await capChecks();
   if (MODE !== 'fallback') await namesChecks();
   if (MODE !== 'fallback') await takeInfoChecks();
+  if (MODE !== 'fallback') await roomsChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -344,11 +351,13 @@ try {
   if (ctx.host4) ctx.host4.kill();
   if (ctx.host5) ctx.host5.kill();
   if (ctx.host6) ctx.host6.kill();
+  if (ctx.host7) ctx.host7.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
 if (ctx.host3) writeFileSync(join(RESULTS, 'host-identity-' + MODE + '.log'), ctx.host3Log);
 if (ctx.host4) writeFileSync(join(RESULTS, 'host-cap-' + MODE + '.log'), ctx.host4Log);
+if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.host7Log);
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 if (!passed) {
   console.log('host log tail:');

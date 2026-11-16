@@ -298,3 +298,23 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   font-size: 12px; user-select: all; }
 .lobby .linkbar code { max-width: none; flex: 1; }
 .linkbar[hidden] { display: none; }
+
+/* The host machine's home: rooms, their links and calls. */
+.home-main { width: 100%; max-width: 880px; margin: 0 auto; padding: 8px 24px 32px; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 16px; }
+.home-head { display: flex; flex-direction: column; gap: 4px; }
+.home-head h1 { margin: 0; font-size: 26px; }
+.room-card { display: flex; flex-direction: column; gap: 10px; padding: 14px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border); }
+.room-card.live { border-color: var(--ok); }
+.room-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.room-head h2 { margin: 0; font-size: 17px; }
+.room-card .linkbar code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calls { gap: 4px; }
+.call-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 10px; border-radius: 10px;
+  border: 1px solid var(--border); }
+.call-row.next { border-color: var(--accent); }
+.call-when { font-weight: 600; font-variant-numeric: tabular-nums; }
+.call-actions { margin-left: auto; display: inline-flex; gap: 6px; }
+.chip.ok { color: var(--ok-text); border-color: var(--ok); }
+.lobby-room a { color: var(--accent); }

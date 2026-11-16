@@ -40,7 +40,7 @@ fn shown_panel(panel: Panel, producer: bool) -> Panel {
 
 /// A stroke icon (24 px grid).
 #[component]
-fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl IntoView {
+pub(super) fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl IntoView {
     let class = if small { "ico sm" } else { "ico" };
     let paths = match name {
         "mic" => view! {
@@ -138,7 +138,7 @@ fn LinkBar(ui: Ui, id: &'static str) -> impl IntoView {
 
 /// System / Dark / Light, remembered in this browser (or desktop webview).
 #[component]
-fn ThemeToggle(ui: Ui) -> impl IntoView {
+pub(super) fn ThemeToggle(ui: Ui) -> impl IntoView {
     let choice = move |t: &'static str| {
         view! {
             <button class="btn tiny outline" data-theme-set=t aria-pressed=move || if ui.theme.get() == t { "true" } else { "false" }
@@ -155,7 +155,7 @@ fn ThemeToggle(ui: Ui) -> impl IntoView {
 
 /// The Castcorder mark (a mic inside broadcast arcs), small cut.
 #[component]
-fn Mark() -> impl IntoView {
+pub(super) fn Mark() -> impl IntoView {
     view! {
         <svg viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
             <rect width="64" height="64" rx="14" fill="#1c2027"/>
@@ -236,6 +236,29 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     <button id="clear-password" class="btn outline" on:click=move |_| act(RoomAction::SetPassword(None))>"Clear"</button>
                 </div>
             </div>
+            <div class="section" id="calls-section">
+                <span class="section-title">"Calls in this room"</span>
+                <span class="small muted">"This call: " <code id="current-call">{move || ui.call_ref.get().map(|c| c.call).unwrap_or_default()}</code>
+                    " (a call is one folder; rejoining continues it)"</span>
+                <div class="row">
+                    <button id="new-call" class="btn" title="Everyone moves into a new call: a new folder, takes from 1"
+                        on:click=move |_| act(RoomAction::NewCall)>"Start new call"</button>
+                </div>
+                <ul id="calls" class="list">
+                    <For each=move || { let mut v = ui.calls.get(); v.reverse(); v } key=|c| format!("{c:?}") let:c>
+                        <li class="call-row" data-call=c.id.clone() class:next=c.current>
+                            <span class="call-when">{home::when(c.started_ms)}</span>
+                            <span class="small call-takes">{format!("{} take{}", c.takes, if c.takes == 1 { "" } else { "s" })}</span>
+                            {if c.current {
+                                view! { <span class="chip ok">"This call"</span> }.into_any()
+                            } else {
+                                let id = c.id.clone();
+                                view! { <button class="btn tiny continue-call" on:click=move |_| act(RoomAction::ContinueCall(id.clone()))>"Continue this call"</button> }.into_any()
+                            }}
+                        </li>
+                    </For>
+                </ul>
+            </div>
             <div class="section">
                 <span class="section-title">"Recording"</span>
                 <span class="small">"Profile: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
@@ -298,6 +321,10 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                 <div class="lobby-form">
                     <div>
                         <span class="small muted">"You're joining"</span>
+                        <Show when=move || !ui.room_name.get().is_empty()>
+                            <span class="small muted lobby-room">"Room " <strong id="lobby-room">{move || ui.room_name.get()}</strong>
+                                <Show when=home::is_local_page> " - " <a href="/" id="back-to-rooms">"All rooms"</a></Show></span>
+                        </Show>
                         // One h1 in the page at a time (tests click it as a user gesture).
                         <Show when=move || !ui.joined.get() fallback=|| view! { <p class="lobby-title">"A Castcorder call"</p> }><h1>"A Castcorder call"</h1></Show>
                     </div>
@@ -331,7 +358,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                                 on:input=move |ev| ui.signal_url.set(event_target_value(&ev)) />
                         </div>
                     </details>
-                    <native::NativeMic/>
+                    <native::NativeMic room=ui.room_name.get_untracked()/>
                 </div>
             </div>
         </div>
@@ -730,8 +757,11 @@ pub(super) fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            <Lobby ui=ui placeholder=placeholder/>
-            <Call ui=ui/>
+            {if home::is_home_page() {
+                view! { <home::Home ui=ui/> }.into_any()
+            } else {
+                view! { <Lobby ui=ui placeholder=placeholder/><Call ui=ui/> }.into_any()
+            }}
         </div>
         <p hidden>
             // Debug: send StartTake whatever the role (the host must refuse a
