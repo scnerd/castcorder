@@ -15,7 +15,7 @@ export async function takeInfoChecks() {
   const { MODE, exe, dist, RESULTS } = ctx;
   const LIB = join(RESULTS, 'library-takeinfo-' + MODE);
   rmSync(LIB, { recursive: true, force: true });
-  ctx.host6 = spawn(exe, ['--dist', dist, '--library', LIB, '--call', 'takeinfo-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+  ctx.host6 = spawn(exe, ['--dist', dist, '--library', LIB, '--room', 'takeinfo-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
   ctx.host6Log = '';
   ctx.host6.stderr.on('data', (d) => { ctx.host6Log += d.toString(); });

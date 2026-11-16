@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn host_flags_pass_through_and_app_flags_are_kept() {
         let a = AppArgs::parse(args("--call show --hidden castcorder://x/#y --port 9")).unwrap();
-        assert_eq!(a.config.call, "show");
+        assert_eq!(a.config.room, "show");
         assert_eq!(a.config.https_port, 9);
         assert!(a.hidden && !a.smoke && !a.no_register);
         assert_eq!(a.link.as_deref(), Some("castcorder://x/#y"));

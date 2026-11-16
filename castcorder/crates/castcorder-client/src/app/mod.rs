@@ -49,6 +49,7 @@
 
 mod capture;
 mod data;
+mod home;
 mod join;
 mod lifecycle;
 mod media;
@@ -125,7 +126,13 @@ impl MessageChannel for DcChannel {
 /// browser profile's device id.
 #[derive(Clone, Default)]
 struct Ctx {
+    /// The call's scope: tracks are kept and offered per call. `<host>` until
+    /// the host says which call this is (`Event::Call`), then
+    /// `<host>/<room>/<call>`.
     call: String,
+    /// The host's scope (`link-<host>` or the signaling URL): tracks from
+    /// before rooms carry it and are offered in any call of that host.
+    host_scope: String,
     /// Where offers go: the host's `/offer` URL, or the rendezvous `/ws` URL
     /// for a page opened from a call link.
     url: String,
@@ -346,6 +353,12 @@ struct Ui {
     host_link: RwSignal<String>,
     /// The room as the host last told this producer.
     room: RwSignal<Option<RoomState>>,
+    /// Which call of which room this device is in (`Event::Call`).
+    call_ref: RwSignal<Option<castcorder_protocol::CallRef>>,
+    /// The room's calls, for producers (`Event::Calls`).
+    calls: RwSignal<Vec<castcorder_protocol::CallSummary>>,
+    /// The room this page joins (`?room=` on a LAN or host machine page).
+    room_name: RwSignal<String>,
     /// The host's take status, as text ("idle", "recording take N").
     take: RwSignal<String>,
     /// How much room each device has for recording (producers only).

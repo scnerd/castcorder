@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
+import { callDir } from './lib/helpers.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -108,7 +109,7 @@ try {
   const [, RV_HTTP, RV_STUN] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
   console.log('rendezvous at ' + RV_HTTP + ', stun ' + RV_STUN);
 
-  host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--call', 'system-test', '--bind', '127.0.0.1',
+  host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--room', 'system-test', '--bind', '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP], 'host');
   const [, HTTP] = await line(host, /HOST_READY http=(\S+)/, 'HOST_READY');
   link = (await line(host, /CALL_LINK (\S+)/, 'CALL_LINK'))[1];
@@ -162,7 +163,7 @@ try {
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take stopped', 10000);
   check(true, 'producer recorded take 1 with both guests');
 
-  const TAKE_DIR = join(LIBRARY, 'system-test', 'take01');
+  const TAKE_DIR = join(callDir(LIBRARY, 'system-test'), 'take01');
   const verified = () => {
     const m = join(TAKE_DIR, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;

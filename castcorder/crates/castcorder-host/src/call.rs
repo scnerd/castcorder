@@ -22,7 +22,9 @@ use castcorder_protocol::{
 };
 use std::path::PathBuf;
 
-use crate::rendezvous::{LinkBase, SharedSecret};
+mod routing;
+pub use routing::{CallView, RoomView, Rooms};
+
 use crate::room::{Admission, Effect, Need, Room};
 use castcorder_transport::{GuestAudio, GuestChannel, GuestId, Host, HostEvent, LocalAudio};
 use tracing::{info, warn};
@@ -49,6 +51,9 @@ pub struct LiveStatus {
 pub enum Command {
     /// A guest's first offer; the reply is the answer SDP.
     Offer {
+        /// The room asked for (by the call link's secret, or a LAN page's
+        /// `room=`); `None`: the live room, else the default room.
+        room: Option<String>,
         /// The guest's device name (logs, stream ids).
         name: String,
         /// The offer SDP.
@@ -85,11 +90,42 @@ pub enum Command {
         /// The snapshot.
         reply: mpsc::Sender<LiveStatus>,
     },
-    /// Rotate the call secret, from the host machine (the tray); the reply is
-    /// the new call link, if reachable through a rendezvous.
+    /// Rotate a room's call secret, from the host machine (the tray, the
+    /// home); the reply is the new call link, if reachable through a
+    /// rendezvous.
     RegenerateLink {
+        /// The room (`None`: the live room, else the default room).
+        room: Option<String>,
         /// The new link, or why the secret was not rotated.
         reply: mpsc::Sender<Result<Option<String>, String>>,
+    },
+    /// Every room with its link and calls (the host machine's home).
+    Rooms {
+        /// The rooms, by name.
+        reply: mpsc::Sender<Vec<RoomView>>,
+    },
+    /// Make an empty room (the host machine's home).
+    CreateRoom {
+        /// The name asked for.
+        name: String,
+        /// The room's name as made (its folder), or why not.
+        reply: mpsc::Sender<Result<String, String>>,
+    },
+    /// Pick the call a room's joiners land in (the host machine's home): a
+    /// past call (`Some`) or a new one. Moves everyone in the call when the
+    /// room is live.
+    ChooseCall {
+        /// The room.
+        room: String,
+        /// The call, or `None` for a new one.
+        call: Option<String>,
+        /// The call's id, or why not.
+        reply: mpsc::Sender<Result<String, String>>,
+    },
+    /// The open call (room, call id, folder), if a call is open.
+    Current {
+        /// Where it goes.
+        reply: mpsc::Sender<Option<(String, String, PathBuf)>>,
     },
     Status {
         /// Where the JSON goes.
@@ -148,6 +184,8 @@ pub enum Command {
     /// it before the reply).
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     JoinNative {
+        /// The room (`None`: the live room, else the default room).
+        room: Option<String>,
         /// The participant.
         participant: Participant,
         /// Joined, or why not.
@@ -159,6 +197,15 @@ pub enum Command {
     LeaveNative {
         /// What to wait for, or "not in the call".
         reply: mpsc::Sender<Result<Option<mpsc::Receiver<Vec<String>>>, String>>,
+    },
+    /// The host's own participant's microphone (mute is call-only): relayed
+    /// to everyone in the call as `Event::MicState`, like a browser guest's.
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    NativeMic {
+        /// Muted in the call.
+        muted: bool,
+        /// Peak of the raw microphone, 0 to 255.
+        level: u8,
     },
     /// One Opus frame of the host's own participant.
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
@@ -218,7 +265,8 @@ pub struct Call {
     names: BTreeMap<GuestId, String>,
     /// The participant list last sent to everyone ([`Event::Participants`]).
     names_sent: Vec<ParticipantName>,
-    library: Library<FsStorage>,
+    /// The open call's tracks (`None` until a call of the room is open).
+    library: Option<Library<FsStorage>>,
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
     participant: Option<Participant>,
     local: Option<LocalAudio>,
@@ -228,15 +276,24 @@ pub struct Call {
     safety: SafetyWriter<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
     align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
-    /// Room security: admission, roles, producer actions.
+    /// The loaded room's security: admission, roles, producer actions.
     room: Room,
-    /// Where the room persists (`<call>/room.json`) and the call secret
-    /// lives; `None` in a call without a folder of its own.
+    /// The loaded room's name (its folder in the library).
+    room_name: String,
+    /// The loaded call's id and folder (`<library>/<room>/<call>`), once a
+    /// call of the room is open.
+    call_id: Option<String>,
     call_dir: Option<PathBuf>,
-    /// The call secret the rendezvous thread checks offers against.
-    secret: Option<SharedSecret>,
-    /// The rest of the call link, when reachable through a rendezvous.
-    link: Option<LinkBase>,
+    /// Every room, their links and how joiners are routed to calls.
+    rooms: routing::Rooms,
+    /// When the open call is next marked active while live (host timeline, us).
+    touch_due_us: i64,
+    /// Someone was in the call at the last check (leaving marks it active).
+    was_live: bool,
+    /// The room's calls changed (or producers did): tell producers.
+    calls_dirty: bool,
+    /// The [`Event::Calls`] each producer connection was last sent.
+    calls_sent: BTreeMap<u64, Vec<castcorder_protocol::CallSummary>>,
     /// Connections to drop on the next turn of the host loop (kicked).
     remove: Vec<GuestId>,
     /// Takes whose host microphone files are still being finalised: not
@@ -339,36 +396,43 @@ fn spawn_aligner(
 }
 
 impl Call {
-    /// A call collecting into `library`; take numbers continue after
-    /// `last_take` (the highest take already in the call's directory). Clock
-    /// pongs and take times are on `timeline`.
+    /// The host's rooms, with `room` (the security of the room named
+    /// `room_name`) loaded and no call open yet: the first person to enter a
+    /// room opens its current call ([`routing`]). Clock pongs and take times
+    /// are on `timeline`.
     pub fn new(
-        library: Library<FsStorage>,
-        last_take: u32,
         timeline: HostTimeline<SystemClock>,
+        rooms: routing::Rooms,
+        room: Room,
+        room_name: String,
     ) -> Self {
         let safety = SafetyWriter::spawn(
-            SafetyRecorder::new(library.call(), timeline.id()),
+            SafetyRecorder::new(room_name.clone(), timeline.id()),
             safety::DEFAULT_CAPACITY,
         );
-        Self {
+        let mut call = Self {
             safety,
             status: TakeStatus::Idle,
-            last_take,
+            last_take: 0,
             rpc: BTreeMap::new(),
             data: BTreeMap::new(),
             names: BTreeMap::new(),
             names_sent: Vec::new(),
-            library,
+            library: None,
             pullers: BTreeMap::new(),
             participant: None,
             local: None,
             timeline,
             align: None,
-            room: Room::new(false),
+            room,
+            room_name,
+            call_id: None,
             call_dir: None,
-            secret: None,
-            link: None,
+            rooms,
+            touch_due_us: 0,
+            was_live: false,
+            calls_dirty: false,
+            calls_sent: BTreeMap::new(),
             remove: Vec::new(),
             local_busy: Default::default(),
             aligned: Default::default(),
@@ -385,27 +449,9 @@ impl Call {
             recorders_sent: BTreeMap::new(),
             recorders_dirty: false,
             recorders_due_us: 0,
-        }
-    }
-
-    /// Room security for this call: `room` as loaded from `call_dir`, where
-    /// it is saved again on every change; `secret` is the call secret (rotated
-    /// on "regenerate link"); `link` the rest of the call link, if any.
-    pub fn with_room(
-        mut self,
-        room: Room,
-        call_dir: PathBuf,
-        secret: SharedSecret,
-        link: Option<LinkBase>,
-    ) -> Self {
-        let native = self.participant.is_some();
-        self.room = room;
-        self.room.set_native_producer(native);
-        self.call_dir = Some(call_dir);
-        self.secret = Some(secret);
-        self.link = link;
-        self.save_room();
-        self
+        };
+        call.save_room();
+        call
     }
 
     /// Persist the room if it changed.
@@ -413,17 +459,18 @@ impl Call {
         if !self.room.take_dirty() {
             return;
         }
-        if let Some(dir) = &self.call_dir
-            && let Err(e) = std::fs::write(dir.join("room.json"), self.room.to_json())
+        let dir = self.rooms.room_dir(&self.room_name);
+        if let Err(e) = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::write(dir.join("room.json"), self.room.to_json()))
         {
-            warn!(error = %e, "room.json not saved; devices and settings will not survive a restart");
+            warn!(room = %self.room_name, error = %e, "room.json not saved; devices and settings will not survive a restart");
         }
     }
 
-    /// The current call link, if the host is reachable through a rendezvous.
+    /// The loaded room's call link, if the host is reachable through a
+    /// rendezvous.
     fn current_link(&self) -> Option<String> {
-        let secret = self.secret.as_ref()?.lock().ok()?.clone();
-        Some(self.link.as_ref()?.link(&secret))
+        self.rooms.link(&self.room_name)
     }
 
     /// Tell every producer the room state, and everyone who is in the call
@@ -616,11 +663,18 @@ impl Call {
                 self.send_roles(&conns);
                 Response::Done
             }
-            Ok(Effect::RegenerateLink) => match self.regenerate_link() {
+            Ok(Effect::RegenerateLink) => match self.regenerate_link(&self.room_name.clone()) {
                 Ok(link) => Response::Link(link),
                 Err(e) => Response::Error {
                     kind: ErrorKind::Other,
                     message: e,
+                },
+            },
+            Ok(Effect::SwitchCall(target)) => match self.switch_call(target) {
+                Ok(_) => Response::Done,
+                Err(message) => Response::Error {
+                    kind: ErrorKind::InvalidState,
+                    message,
                 },
             },
         };
@@ -655,11 +709,11 @@ impl Call {
             {
                 continue;
             }
-            let ready = self
-                .library
-                .entries(take)
-                .map(|e| castcorder_align::ready(&e));
-            match (ready, self.library.take_dir(take)) {
+            let Some(library) = self.library.as_mut() else {
+                return;
+            };
+            let ready = library.entries(take).map(|e| castcorder_align::ready(&e));
+            match (ready, library.take_dir(take)) {
                 (Ok(true), Ok(dir)) => {
                     if tx.send((take, dir.clone())).is_err() {
                         warn!(take = take.0, "align thread gone; take not aligned");
@@ -687,8 +741,10 @@ impl Call {
         if self.participant.is_some() {
             return Err("the host microphone is already in the call".into());
         }
-        if let TakeStatus::Recording { take, .. } = self.status {
-            match self.library.take_dir(take) {
+        if let TakeStatus::Recording { take, .. } = self.status
+            && let Some(library) = self.library.as_mut()
+        {
+            match library.take_dir(take) {
                 Ok(dir) => {
                     let _ = p.takes.send(TakeCtl::Start {
                         take,
@@ -757,8 +813,11 @@ impl Call {
         let recording = matches!(self.status, TakeStatus::Recording { .. });
         let mut gone = Vec::new();
         let mut completed: Vec<TakeId> = Vec::new();
+        let Some(library) = self.library.as_mut() else {
+            return;
+        };
         for (id, p) in &mut self.pullers {
-            if let Err(e) = p.poll(&mut self.library, recording) {
+            if let Err(e) = p.poll(library, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
                 gone.push(*id);
             } else if p.is_closed() {
@@ -827,7 +886,10 @@ impl Call {
         let mut out = Vec::new();
         for t in takes {
             let take = TakeId(t);
-            let entries = match self.library.entries(take) {
+            let Some(library) = self.library.as_mut() else {
+                break;
+            };
+            let entries = match library.entries(take) {
                 Ok(e) => e,
                 Err(e) => {
                     warn!(take = t, error = %e, "take manifest unreadable; not shown to producers");
@@ -929,7 +991,7 @@ impl Call {
         self.disk_due_us = now + TRACKS_EVERY_US;
         if now >= self.library_free_due_us {
             self.library_free_due_us = now + LIBRARY_FREE_EVERY_US;
-            match self.library.free_space() {
+            match self.rooms.free_space() {
                 Ok(free) => self.library_free = Some(free),
                 Err(e) => {
                     self.library_free = None;
@@ -979,7 +1041,13 @@ impl Call {
             device,
             ..offer.clone()
         };
-        match p.offer(&mut self.library, offer) {
+        let Some(library) = self.library.as_mut() else {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "no call is open".into(),
+            };
+        };
+        match p.offer(library, offer) {
             Ok(e) => Response::TrackAccepted {
                 file: e.file,
                 received: e.verified,
@@ -995,6 +1063,9 @@ impl Call {
         if let TakeStatus::Recording { take, .. } = self.status {
             return Err(format!("take {} is already recording", take.0));
         }
+        if self.library.is_none() {
+            return Err("no call is open: join a room first".into());
+        }
         self.last_take += 1;
         let take = TakeId(self.last_take);
         // Read the library volume afresh for this take.
@@ -1008,8 +1079,15 @@ impl Call {
             video,
             started_us: host_us,
         };
-        info!(call = %self.library.call(), take = take.0, host_us, video, "take started");
-        match self.library.take_dir(take) {
+        info!(room = %self.room_name, call = ?self.call_id, take = take.0, host_us, video, "take started");
+        self.calls_dirty = true;
+        self.touch_due_us = 0;
+        let dir = match self.library.as_mut().map(|l| l.take_dir(take).cloned()) {
+            Some(Ok(d)) => Ok(d),
+            Some(Err(e)) => Err(e),
+            None => Err(std::io::Error::other("no call is open")),
+        };
+        match dir {
             Ok(dir) => {
                 self.safety.start_take(take.0, dir.clone());
                 if let Some(p) = &self.participant {
@@ -1043,7 +1121,8 @@ impl Call {
         };
         self.status = TakeStatus::Idle;
         let host_us = self.timeline.now_us();
-        info!(call = %self.library.call(), take = take.0, host_us, "take stopped");
+        info!(room = %self.room_name, call = ?self.call_id, take = take.0, host_us, "take stopped");
+        self.touch_due_us = 0;
         self.safety.stop_take();
         if let Some(p) = &self.participant
             && p.takes.send(TakeCtl::Stop { done: None }).is_ok()
@@ -1059,20 +1138,32 @@ impl Call {
     }
 
     /// Rotate the call secret; the new link, if reachable through a rendezvous.
-    fn regenerate_link(&mut self) -> Result<Option<String>, String> {
-        let (Some(dir), Some(secret)) = (&self.call_dir, &self.secret) else {
-            return Err("this call has no call secret".into());
-        };
-        if let Err(e) = crate::rendezvous::regenerate_secret(dir, secret) {
-            warn!(error = %e, "call link not regenerated");
+    fn regenerate_link(&mut self, room: &str) -> Result<Option<String>, String> {
+        if !self.rooms.exists(room) {
+            return Err(format!("no room named {room}"));
+        }
+        if let Err(e) = crate::rendezvous::regenerate_secret(
+            &self.rooms.room_dir(room),
+            room,
+            &self.rooms.secrets,
+        ) {
+            warn!(room = %room, error = %e, "call link not regenerated");
             return Err(e.to_string());
         }
-        let link = self.current_link();
+        let link = self.rooms.link(room);
         if let Some(l) = &link {
             println!();
-            println!("  The call link was regenerated; the old one no longer works:");
+            println!(
+                "  The call link of room {room} was regenerated; the old one no longer works:"
+            );
             println!("    {l}");
-            println!("CALL_LINK {l}");
+            if room == self.rooms.default_room() {
+                println!("CALL_LINK {l}");
+            }
+            println!("ROOM_LINK {room} {l}");
+        }
+        if room == self.room_name {
+            self.broadcast_room();
         }
         Ok(link)
     }
@@ -1178,7 +1269,7 @@ impl Call {
                             }
                             Ok(_) => {
                                 if let Some(ch) = self.data.get(&id) {
-                                    let call = self.library.call().to_string();
+                                    let call = self.call_id.clone().unwrap_or_default();
                                     self.names.insert(id, display_name.clone());
                                     self.recorders.joined(id.0, &display_name);
                                     self.recorders_dirty = true;
@@ -1239,9 +1330,11 @@ impl Call {
                     let _ = rpc.respond(rid, response);
                 }
                 if joined.last() == Some(&id.0) {
-                    // After Joined: the role, then everyone producing learns
-                    // who is in.
+                    // After Joined: which call this is, the role, then
+                    // everyone producing learns who is in.
+                    self.send_call(&[id]);
                     self.send_roles(&[id.0]);
+                    self.calls_dirty = true;
                     self.save_room();
                     self.broadcast_room();
                 }
@@ -1288,6 +1381,7 @@ impl Call {
                                 self.hear(Heard::Gone(guest));
                                 self.room.left(guest.0);
                                 self.broadcast_room();
+                                self.calls_sent.remove(&guest.0);
                             }
                             HostEvent::GuestConnected { guest } => {
                                 info!(guest = guest.0, "guest connected");
@@ -1318,6 +1412,8 @@ impl Call {
                     self.publish_tracks();
                     self.publish_disk();
                     self.publish_recorders();
+                    self.publish_calls();
+                    self.keep_active();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
                     let wait = deadline.saturating_sub(clock.monotonic());
@@ -1330,6 +1426,7 @@ impl Call {
     fn command(&mut self, host: &mut Host<UdpDatagramSocket, SystemClock>, c: Command) {
         match c {
             Command::Offer {
+                room,
                 name,
                 offer_sdp,
                 device,
@@ -1339,6 +1436,14 @@ impl Call {
                 at_host,
                 reply,
             } => {
+                // Only one call is live at a time: an offer for another room
+                // waits until this one empties; one for a room not loaded
+                // loads its security first.
+                if let Err(e) = self.select_room(room.as_deref()) {
+                    crate::room::decision(&device, "guest", "enter", false, &e);
+                    let _ = reply.send(Err(e));
+                    return;
+                }
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
@@ -1355,9 +1460,11 @@ impl Call {
                 }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
-                    Ok(Admission::Enter) => host
-                        .accept(&crate::http::stream_name(&name), &offer_sdp)
-                        .map_err(|e| e.to_string()),
+                    // The first one in opens the room's current call.
+                    Ok(Admission::Enter) => self.enter_call().and_then(|()| {
+                        host.accept(&crate::http::stream_name(&name), &offer_sdp)
+                            .map_err(|e| e.to_string())
+                    }),
                 };
                 let r = r.map(|(id, answer)| {
                     // Admitted and accepted: only now may it take over an
@@ -1388,7 +1495,14 @@ impl Call {
                     true,
                     "at the host machine",
                 );
-                let _ = reply.send(self.start_take());
+                // The host machine may start a take with no one in: it opens
+                // the default room's current call.
+                let opened = if self.library.is_none() {
+                    self.select_room(None).and_then(|()| self.enter_call())
+                } else {
+                    Ok(())
+                };
+                let _ = reply.send(opened.and_then(|()| self.start_take()));
             }
             Command::StopTake { reply } => {
                 crate::room::decision(
@@ -1403,10 +1517,25 @@ impl Call {
             Command::Live { reply } => {
                 let _ = reply.send(self.live());
             }
-            Command::RegenerateLink { reply } => {
-                let r = self.regenerate_link();
-                self.broadcast_room();
-                let _ = reply.send(r);
+            Command::RegenerateLink { room, reply } => {
+                let room = room.unwrap_or_else(|| self.resolve_room(None));
+                let _ = reply.send(self.regenerate_link(&room));
+            }
+            Command::Rooms { reply } => {
+                let _ = reply.send(self.rooms_view());
+            }
+            Command::CreateRoom { name, reply } => {
+                let _ = reply.send(self.rooms.create_room(&name));
+            }
+            Command::ChooseCall { room, call, reply } => {
+                let _ = reply.send(self.choose_call(&room, call));
+            }
+            Command::Current { reply } => {
+                let current = match (&self.call_id, &self.call_dir) {
+                    (Some(c), Some(d)) => Some((self.room_name.clone(), c.clone(), d.clone())),
+                    _ => None,
+                };
+                let _ = reply.send(current);
             }
             Command::Status { reply } => {
                 let _ = reply.send(self.status_json());
@@ -1420,8 +1549,16 @@ impl Call {
                 items,
                 ack,
             } => {
+                let Some(library) = self.library.as_mut() else {
+                    warn!(
+                        take = take.0,
+                        "no call is open; host track not recorded in the manifest"
+                    );
+                    let _ = ack.send(());
+                    return;
+                };
                 for item in &items {
-                    if let Err(e) = self.library.record_local(
+                    if let Err(e) = library.record_local(
                         &device,
                         &participant,
                         take,
@@ -1443,8 +1580,17 @@ impl Call {
                 self.safety.close();
                 let _ = done.send(());
             }
-            Command::JoinNative { participant, reply } => {
-                let _ = reply.send(self.join_native(host, participant));
+            Command::JoinNative {
+                room,
+                participant,
+                reply,
+            } => {
+                // Whoever is at the host opens the room's current call.
+                let r = self
+                    .select_room(room.as_deref())
+                    .and_then(|()| self.enter_call())
+                    .and_then(|()| self.join_native(host, participant));
+                let _ = reply.send(r);
             }
             Command::LeaveNative { reply } => {
                 let _ = reply.send(self.leave_native(host));
@@ -1455,6 +1601,20 @@ impl Call {
                 }
             }
             Command::NativeSource { state } => self.native_source(state),
+            Command::NativeMic { muted, level } => {
+                if let Some(local) = &self.local {
+                    let event = Event::MicState {
+                        participant: ParticipantId(local.id().0),
+                        muted,
+                        level,
+                    };
+                    for (id, rpc) in &mut self.rpc {
+                        if self.names.contains_key(id) && rpc.emit(event.clone()).is_err() {
+                            warn!(guest = id.0, "microphone state not sent: channel closed");
+                        }
+                    }
+                }
+            }
         }
     }
 }

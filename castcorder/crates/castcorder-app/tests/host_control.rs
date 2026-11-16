@@ -54,7 +54,7 @@ fn config(root: &std::path::Path) -> Config {
     .unwrap();
     let mut c = Config::new(dist);
     c.library = root.join("library");
-    c.call = "app-test".into();
+    c.room = "app-test".into();
     c.bind = std::net::Ipv4Addr::LOCALHOST.into();
     c.https_port = 0;
     c.http_port = 0;
@@ -75,7 +75,7 @@ fn the_in_process_host_serves_role_accepts_a_guest_and_restarts_on_its_ports() {
     let root = scratch("host-control");
     let control = HostControl::new(config(&root));
     let status = control.start().unwrap();
-    assert_eq!(status.call, "app-test");
+    assert_eq!(status.room, "app-test");
     assert!(
         status.producer_url.starts_with("http://localhost:"),
         "{status:?}"
@@ -204,7 +204,8 @@ fn live_status_follows_a_guest_and_a_take() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// "Open recordings folder" (tray and producer page) opens `<library>/<call>`:
+/// "Open recordings folder" (tray and producer page) opens the open call, else
+/// the default room `<library>/<room>`:
 /// the path it resolves, before and after the host starts, absolute and
 /// existing once the host runs. Nothing is opened here.
 #[test]

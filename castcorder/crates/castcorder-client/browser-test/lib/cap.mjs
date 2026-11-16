@@ -24,7 +24,7 @@ export async function capChecks() {
   const CAP = 300;
   const LIB4 = join(RESULTS, 'library-cap-' + MODE);
   rmSync(LIB4, { recursive: true, force: true });
-  ctx.host4 = spawn(exe, ['--dist', dist, '--library', LIB4, '--call', 'cap-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+  ctx.host4 = spawn(exe, ['--dist', dist, '--library', LIB4, '--room', 'cap-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--open', '--bandwidth-cap', String(CAP)], { stdio: ['ignore', 'pipe', 'pipe'] });
   ctx.host4.stderr.on('data', (d) => { ctx.host4Log += d.toString(); });
   const HTTPS4 = await new Promise((resolve, reject) => {

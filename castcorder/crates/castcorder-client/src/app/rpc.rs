@@ -276,9 +276,21 @@ pub(super) fn pump_rpc(ui: Ui) {
                     muted,
                     level,
                 } => super::meters::mic(participant.0, muted, level),
+                Event::Call(c) => {
+                    // Tracks are kept per call from here on, and only this
+                    // call's are offered (with those from before rooms).
+                    let scope = format!("{}/{}/{}", e.ctx.host_scope, c.room, c.call);
+                    if e.ctx.call != scope {
+                        info!(call = %scope, device = %ctx.device, room = %c.room, "in call {}", c.call);
+                        e.ctx.call = scope;
+                        crate::logging::context().set(castcorder_core::logging::CALL, &e.ctx.call);
+                    }
+                    ui.call_ref.set(Some(c));
+                }
+                Event::Calls(list) => ui.calls.set(list),
             }
         }
-        (statuses, ctx)
+        (statuses, e.ctx.clone())
     });
     if relabel {
         relabel_tiles();
@@ -297,6 +309,7 @@ pub(super) fn pump_rpc(ui: Ui) {
             // Host connected and nothing recording: sync the outbox.
             let msg = worker_cmd("outbox");
             set(&msg, "call", ctx.call.as_str());
+            set(&msg, "legacy", ctx.host_scope.as_str());
             post_worker(&msg, None);
         }
     }

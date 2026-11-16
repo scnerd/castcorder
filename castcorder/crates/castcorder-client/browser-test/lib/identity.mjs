@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { waitFor, text, check } from './helpers.mjs';
+import { waitFor, text, check, callDir } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Device identity (cast-p2f), chromium and firefox modes: a third, always-open
@@ -24,7 +24,7 @@ export async function identityChecks() {
   mkdirSync(join(LIB3, 'identity-test'), { recursive: true });
   writeFileSync(join(LIB3, 'identity-test', 'room.json'),
     JSON.stringify({ open: true, devices: { [UUID]: { name: 'M', trusted: true } } }));
-  ctx.host3 = spawn(exe, ['--dist', dist, '--library', LIB3, '--call', 'identity-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+  ctx.host3 = spawn(exe, ['--dist', dist, '--library', LIB3, '--room', 'identity-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
   ctx.host3.stderr.on('data', (d) => { ctx.host3Log += d.toString(); });
   const HTTPS3 = await new Promise((resolve, reject) => {
@@ -102,7 +102,7 @@ export async function identityChecks() {
   const mId = r1.aliases && r1.aliases[UUID];
   check(/^k[0-9a-f]{40}$/.test(mId || '') && !r1.devices[UUID] && r1.devices[mId] && r1.devices[mId].trusted,
     'M joined with its key (' + mId + '); the host bound its old UUID once and moved its trusted record to the key id');
-  const TAKE = join(LIB3, 'identity-test', 'take01');
+  const TAKE = join(callDir(LIB3, 'identity-test'), 'take01');
   await waitFor(() => {
     const m = join(TAKE, 'manifest.jsonl');
     return existsSync(m) && readFileSync(m, 'utf8').split('\n').some((l) => l.startsWith('{"Verified"') && l.includes(UUID));

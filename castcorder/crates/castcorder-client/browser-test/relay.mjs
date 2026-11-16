@@ -40,6 +40,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
+import { callDir } from './lib/helpers.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -220,7 +221,7 @@ try {
   // The host binds the local address that routes to the TURN server (loopback
   // cannot send to a WSL2 VM address).
   const HOST_IP = await localAddressToward(TURN_IP, TURN_PORT);
-  host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--call', 'relay-test', '--bind', HOST_IP,
+  host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--room', 'relay-test', '--bind', HOST_IP,
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP, '--relay-only',
     // Always open: no producer joins here (takes go through the host machine's HTTP endpoint).
     '--open'], 'host');
@@ -273,7 +274,7 @@ try {
   const stopped = await post('/take/stop');
   check(stopped[0] === 200, 'take stopped: ' + stopped.join(' '));
 
-  const TAKE_DIR = join(LIBRARY, 'relay-test', 'take01');
+  const TAKE_DIR = join(callDir(LIBRARY, 'relay-test'), 'take01');
   const verified = () => {
     const m = join(TAKE_DIR, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
@@ -336,7 +337,7 @@ try {
   await sleep(4000);
   const stopped2 = await post('/take/stop');
   check(stopped2[0] === 200, 'take 2 stopped: ' + stopped2.join(' '));
-  const TAKE2 = join(LIBRARY, 'relay-test', 'take02');
+  const TAKE2 = join(callDir(LIBRARY, 'relay-test'), 'take02');
   const verified2 = () => {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;

@@ -13,8 +13,8 @@ use castcorder_host::{Config, LiveStatus, NativeInput, NativeState, Running};
 /// What the window and the tray show about the running host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostStatus {
-    /// The call's name.
-    pub call: String,
+    /// The default room's name.
+    pub room: String,
     /// The producer page the window shows (`http://localhost:<port>/`).
     pub producer_url: String,
     /// The producer page's socket address.
@@ -51,9 +51,9 @@ impl HostControl {
     pub fn start(&self) -> Result<HostStatus, String> {
         let mut running = self.running.lock().map_err(|_| "host lock poisoned")?;
         if running.is_none() {
-            let call = self.config.call.clone();
+            let room = self.config.room.clone();
             let r = castcorder_host::start(self.config.clone(), move |link| {
-                tracing::info!(call = %call, link = %link, "call link ready");
+                tracing::info!(room = %room, link = %link, "call link ready");
             })?;
             *running = Some(r);
         }
@@ -87,6 +87,16 @@ impl HostControl {
         }
     }
 
+    /// Mute (true) or unmute the native microphone in the call (call-only:
+    /// its track keeps recording). False if it is not in the call.
+    pub fn mute_native(&self, muted: bool) -> bool {
+        self.running
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|r| r.mute_native(muted)))
+            .unwrap_or(false)
+    }
+
     /// The inputs the host can join with and whether it is joined, if running.
     pub fn native_state(&self) -> Option<NativeState> {
         self.running
@@ -96,15 +106,15 @@ impl HostControl {
             .map(Running::native_state)
     }
 
-    /// Where the call's tracks are saved: `<library>/<call>`, absolute (the
-    /// running host's folder, else the one the config names).
+    /// Where the open call's tracks are saved: `<library>/<room>/<call>`,
+    /// absolute (else the default room's folder, else the library).
     pub fn recordings_folder(&self) -> PathBuf {
         let dir = self
             .running
             .lock()
             .ok()
-            .and_then(|r| r.as_ref().map(|r| r.call_dir().to_path_buf()))
-            .unwrap_or_else(|| self.config.library.join(&self.config.call));
+            .and_then(|r| r.as_ref().map(|r| r.call_dir()))
+            .unwrap_or_else(|| self.config.library.join(&self.config.room));
         std::path::absolute(&dir).unwrap_or(dir)
     }
 
@@ -147,7 +157,7 @@ impl Drop for HostControl {
 
 fn status(r: &Running) -> HostStatus {
     HostStatus {
-        call: r.call().to_string(),
+        room: r.room().to_string(),
         producer_url: r.producer_url(),
         http_addr: r.http_addr(),
         lan_links: r.lan_links().to_vec(),

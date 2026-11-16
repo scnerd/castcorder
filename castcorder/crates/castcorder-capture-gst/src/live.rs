@@ -6,7 +6,7 @@
 //!   disk is absorbed there, not pushed back into the tee) `! appsink`, pulled as
 //!   the [`CaptureSource`](castcorder_port_capture::CaptureSource);
 //! - live: `queue` (leaky downstream, 200 ms) `! audioconvert ! audioresample !
-//!   S16LE 48 kHz mono ! webrtcdsp ! audioconvert ! opusenc ! appsink`, pulled
+//!   S16LE 48 kHz mono ! webrtcdsp ! audioconvert ! volume ! opusenc ! appsink`, pulled
 //!   with [`LiveOpus::next_packet`].
 //!
 //! A live consumer that stops pulling blocks only its own appsink; the leaky
@@ -16,7 +16,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use gst::prelude::*;
@@ -65,9 +65,41 @@ pub struct LiveOpus {
     overruns: Arc<AtomicU64>,
     /// Ticks handed out last, for frames without a timestamp.
     last: u64,
+    /// The `volume` before the encoder: muting it silences the live stream
+    /// only (the recording branch is untouched).
+    mute: Option<gst::Element>,
+    /// Peak of the last buffer before any processing (absolute S16), and of
+    /// the last buffer the encoder got.
+    raw_peak: Arc<AtomicU32>,
+    sent_peak: Arc<AtomicU32>,
 }
 
 impl LiveOpus {
+    /// Mute (true) or unmute the live stream: the encoder gets silence while
+    /// muted; the recording branch never changes. False if the branch has no
+    /// volume element.
+    pub fn set_muted(&self, muted: bool) -> bool {
+        match &self.mute {
+            Some(v) => {
+                v.set_property("mute", muted);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The microphone's level as it arrived (before echo cancellation, noise
+    /// suppression and mute): the last buffer's peak, 0 to 255, linear.
+    pub fn raw_level(&self) -> u8 {
+        (self.raw_peak.load(Ordering::Relaxed) / 128).min(255) as u8
+    }
+
+    /// The last buffer's peak as the encoder got it (absolute S16): zero
+    /// while muted.
+    pub fn sent_peak(&self) -> u32 {
+        self.sent_peak.load(Ordering::Relaxed)
+    }
+
     /// The next Opus frame, waiting at most `timeout`. `None` on timeout or
     /// once the branch has ended (see [`LiveOpus::is_eos`]).
     pub fn next_packet(&mut self, timeout: Duration) -> Option<OpusPacket> {
@@ -150,8 +182,9 @@ pub(crate) fn build_tee(
     let desc = format!(
         "queue name=live_queue leaky=downstream max-size-buffers=0 max-size-bytes=0 \
          max-size-time=200000000 ! audioconvert ! audioresample \
-         ! audio/x-raw,format=S16LE,rate=48000,channels=1 {dsp}! audioconvert \
-         ! opusenc bitrate={} frame-size=20 \
+         ! capsfilter name=live_caps caps=audio/x-raw,format=S16LE,rate=48000,channels=1 \
+         {dsp}! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 \
+         ! volume name=live_mute ! opusenc name=live_enc bitrate={} frame-size=20 \
          ! appsink name=live_sink sync=false async=false max-buffers=1 drop=false",
         opts.bitrate
     );
@@ -173,12 +206,42 @@ pub(crate) fn build_tee(
         .and_then(|e| e.downcast::<gst_app::AppSink>().ok())
         .ok_or_else(|| err("live branch has no appsink"))?;
 
+    let raw_peak = Arc::new(AtomicU32::new(0));
+    let sent_peak = Arc::new(AtomicU32::new(0));
+    if let Some(pad) = bin.by_name("live_caps").and_then(|e| e.static_pad("src")) {
+        peak_probe(&pad, raw_peak.clone());
+    }
+    if let Some(pad) = bin.by_name("live_enc").and_then(|e| e.static_pad("sink")) {
+        peak_probe(&pad, sent_peak.clone());
+    }
     raise_recording_thread(pipeline);
     Ok(LiveOpus {
         sink,
         overruns,
         last: 0,
+        mute: bin.by_name("live_mute"),
+        raw_peak,
+        sent_peak,
     })
+}
+
+/// Keep the peak (absolute S16LE) of every buffer through `pad` in `slot`.
+fn peak_probe(pad: &gst::Pad, slot: Arc<AtomicU32>) {
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(b) = info.buffer()
+            && let Ok(m) = b.map_readable()
+        {
+            let peak = m
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u32::from(i16::from_le_bytes(*c).unsigned_abs()))
+                .max()
+                .unwrap_or(0);
+            slot.store(peak, Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Ok
+    });
 }
 
 /// Raise the recording queue's streaming thread as it starts. The message is

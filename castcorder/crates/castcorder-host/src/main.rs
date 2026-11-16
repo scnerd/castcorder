@@ -7,10 +7,13 @@
 //! producer controls (start and stop a take, the connected guests). Guests'
 //! audio and video are forwarded by castcorder-transport on one fixed UDP port;
 //! their finished tracks and log files are pulled into the library:
-//! `<library>/<call>/takeNN/...` and `<library>/<call>/logs/...`, beside the
-//! host's own rotating JSON-lines log.
+//! `<library>/<room>/<call>/takeNN/...` and `<library>/<room>/<call>/logs/...`;
+//! the host's own rotating JSON-lines log is in `<library>/logs/`. `--room`
+//! names the default room (`--call` is the same, from before rooms); a LAN
+//! page joins another room with `?room=NAME`. `--idle-gap` is how long a
+//! room's last call stays the one joiners land in (default 120 minutes).
 //!
-//! Usage: `castcorder-host --dist DIR [--library DIR] [--call NAME]
+//! Usage: `castcorder-host --dist DIR [--library DIR] [--room NAME] [--idle-gap MINUTES]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
 //! [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]
 //! [--record-video true|false]`
@@ -93,9 +96,9 @@ fn main() {
     println!();
     println!("Castcorder host is running. Press Ctrl+C to stop.");
     println!();
-    println!("  Call:      {}", running.call());
-    println!("  Library:   {}", running.call_dir().display());
-    println!("  Logs:      {}", running.call_dir().join("logs").display());
+    println!("  Room:      {}", running.room());
+    println!("  Library:   {}", running.library().display());
+    println!("  Logs:      {}", running.library().join("logs").display());
     println!();
     println!("  On THIS machine, open (producer controls, and join to be heard):");
     println!("    {}", running.producer_url());

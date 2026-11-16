@@ -82,3 +82,51 @@ fn a_stalled_live_branch_does_not_affect_the_recording() {
     println!("live queue overruns: {}", live.overruns());
     assert!(live.overruns() > 0, "the live branch never stalled");
 }
+
+/// Pull the live branch to its end; the most the encoder got (absolute S16)
+/// and the highest raw level reported, with the packet count.
+fn drain_live(mut live: castcorder_capture_gst::LiveOpus) -> (u32, u8, usize) {
+    let (mut sent, mut raw, mut packets) = (0, 0, 0);
+    let end = std::time::Instant::now() + Duration::from_secs(10);
+    while !live.is_eos() && std::time::Instant::now() < end {
+        if live.next_packet(Duration::from_millis(50)).is_some() {
+            packets += 1;
+            sent = sent.max(live.sent_peak());
+            raw = raw.max(live.raw_level());
+        }
+    }
+    (sent, raw, packets)
+}
+
+/// Call-only mute (the native microphone's Mute): the live stream's encoder
+/// gets digital silence while the raw level is still measured, and the
+/// recording branch stays bit-exact. Unmuted, the same input reaches the
+/// encoder.
+#[test]
+fn muting_silences_the_live_stream_and_never_the_recording() {
+    for muted in [true, false] {
+        let wav = Wav::new(SampleFormat::I16);
+        let (mut cap, live) =
+            GstCapture::open_file_with_live(&wav.path, &LiveOptions::default()).unwrap();
+        assert!(live.set_muted(muted), "the live branch has a mute");
+        let puller = std::thread::spawn(move || drain_live(live));
+        let mut data = vec![];
+        while let Some(b) = cap.next_buffer().unwrap() {
+            data.extend_from_slice(&b.data);
+        }
+        assert!(
+            data == wav.pcm,
+            "recording differs from input (muted {muted})"
+        );
+        let (sent, raw, packets) = puller.join().unwrap();
+        drop(cap);
+        println!("muted {muted}: {packets} packets, encoder peak {sent}, raw level {raw}");
+        assert!(packets > 0, "no live packets");
+        assert!(raw > 0, "the raw level is measured (muted {muted})");
+        if muted {
+            assert_eq!(sent, 0, "muted: the encoder got only silence");
+        } else {
+            assert!(sent > 0, "unmuted: the encoder got the audio");
+        }
+    }
+}

@@ -264,6 +264,13 @@ pub enum RoomAction {
     /// Record video (webcams) in the call's takes (true) or not. Independent
     /// of live video; applies from the next take start.
     SetRecordVideo(bool),
+    /// Move everyone in the call into a new call of the room (a new folder;
+    /// take numbers start again). Only while no take records and every
+    /// device has synced (appended).
+    NewCall,
+    /// Move everyone in the call into this past call of the room (its folder
+    /// name, [`CallSummary::id`]); its take numbers continue (appended).
+    ContinueCall(String),
 }
 
 /// This connection's role in the call, sent as [`Event::Role`] after joining
@@ -473,6 +480,37 @@ pub enum Event {
     /// ([`Request::SourceAck`]): every participant to producers, only its own
     /// to anyone else. Sent whenever it changes for the receiver.
     Recorders(Vec<Recorder>),
+    /// Which call of which room this connection is in: right after joining
+    /// and whenever a producer moves the call to another one. A device keeps
+    /// its tracks per call and offers each call's only to it (appended).
+    Call(CallRef),
+    /// The room's calls, oldest first (sent to producers only, after joining
+    /// and whenever they change; appended).
+    Calls(Vec<CallSummary>),
+}
+
+/// A call of a room on a host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallRef {
+    /// The room's name (its folder in the host's library).
+    pub room: String,
+    /// The call's id (its folder in the room, `YYYY-MM-DD[-N]`).
+    pub call: String,
+}
+
+/// One call of a room, for producers choosing which call to be in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallSummary {
+    /// The call's id (its folder in the room).
+    pub id: String,
+    /// When it was made, ms since the Unix epoch.
+    pub started_ms: u64,
+    /// When someone was last in it, ms since the Unix epoch.
+    pub last_active_ms: u64,
+    /// How many takes it has.
+    pub takes: u32,
+    /// It is the call everyone is in now.
+    pub current: bool,
 }
 
 /// One device's room for recording, as the host works it out from the device's
@@ -1023,6 +1061,29 @@ mod tests {
                 video_unmet: true,
             }])),
             vec![9, 1, 3, 0, 3, 1]
+        );
+        // Rooms and calls (appended).
+        assert_eq!(encode(&RoomAction::NewCall), vec![7]);
+        assert_eq!(
+            encode(&RoomAction::ContinueCall("a".into())),
+            vec![8, 1, b'a']
+        );
+        assert_eq!(
+            encode(&Event::Call(CallRef {
+                room: "r".into(),
+                call: "c".into(),
+            })),
+            vec![10, 1, b'r', 1, b'c']
+        );
+        assert_eq!(
+            encode(&Event::Calls(vec![CallSummary {
+                id: String::new(),
+                started_ms: 1,
+                last_active_ms: 2,
+                takes: 3,
+                current: true,
+            }])),
+            vec![11, 1, 0, 1, 2, 3, 1]
         );
     }
 

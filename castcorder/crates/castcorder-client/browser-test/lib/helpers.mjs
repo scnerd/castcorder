@@ -1,3 +1,34 @@
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+// The call folder of a room in a host library that was active last
+// (<library>/<room>/<YYYY-MM-DD>[-N], holding call.json); the room folder
+// itself if it has no call yet.
+export function callDir(library, room) {
+  const dir = join(library, room);
+  if (!existsSync(dir)) return join(dir, 'no-call-yet');
+  let best = null;
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const meta = join(dir, e.name, 'call.json');
+    if (!e.isDirectory() || !existsSync(meta)) continue;
+    const m = JSON.parse(readFileSync(meta, 'utf8'));
+    const key = [m.last_active_ms, m.started_ms, e.name];
+    if (!best || key[0] > best[0][0] || (key[0] === best[0][0] && (key[1] > best[0][1] || (key[1] === best[0][1] && key[2] > best[0][2])))) best = [key, e.name];
+  }
+  return best ? join(dir, best[1]) : join(dir, 'no-call-yet');
+}
+
+// Every call folder of a room, oldest first by start.
+export function callDirs(library, room) {
+  const dir = join(library, room);
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && existsSync(join(dir, e.name, 'call.json')))
+    .map((e) => [JSON.parse(readFileSync(join(dir, e.name, 'call.json'), 'utf8')).started_ms, e.name])
+    .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1))
+    .map(([, n]) => join(dir, n));
+}
+
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function waitFor(fn, what, timeout = 30000, interval = 200) {
   const t0 = Date.now();

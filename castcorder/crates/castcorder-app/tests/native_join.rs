@@ -51,7 +51,7 @@ fn config(root: &Path) -> Config {
     .unwrap();
     let mut c = Config::new(dist);
     c.library = root.join("library");
-    c.call = "native-join".into();
+    c.room = "native-join".into();
     c.bind = std::net::Ipv4Addr::LOCALHOST.into();
     c.https_port = 0;
     c.http_port = 0;
@@ -123,10 +123,16 @@ fn the_host_joins_and_leaves_natively_at_runtime_and_records_bit_exact() {
     let state = control.native_state().unwrap();
     assert!(state.available, "{state:?}");
     assert_eq!(state.joined, None);
-    let call_dir = root.join("library").join("native-join");
-
     // Round 1: join after the take started; the take stops, then leave.
     take(http, "start");
+    // The take opened the default room's current call: <room>/<date>.
+    let call_dir = control.recordings_folder();
+    assert_eq!(
+        call_dir.parent().and_then(|p| p.file_name()),
+        Some(std::ffi::OsStr::new("native-join")),
+        "{}",
+        call_dir.display()
+    );
     control
         .join_native(NativeInput::File(source.clone()))
         .unwrap();
@@ -146,12 +152,18 @@ fn the_host_joins_and_leaves_natively_at_runtime_and_records_bit_exact() {
     assert_eq!(code, 403, "no native header");
     let (code, _) = request(http, "POST", "/native/leave", "");
     assert_eq!(code, 403, "no native header");
+    // Muted in the call for the rest of take 1: only the live stream goes
+    // silent (capture-gst `tee` tests the encoder input); the track below
+    // stays bit-exact.
+    assert!(control.mute_native(true), "muted while joined");
+    assert!(control.native_state().unwrap().muted);
     let wav1 = call_dir.join("take01").join("take01_host_mic.wav");
     wait_for_track(&wav1, pcm.len() as u64);
     take(http, "stop");
     assert!(control.leave_native().unwrap(), "was joined");
     assert!(!control.leave_native().unwrap(), "left twice");
     assert_eq!(control.native_state().unwrap().joined, None);
+    assert!(!control.mute_native(true), "nothing to mute once left");
     let bytes = std::fs::read(&wav1).unwrap();
     assert!(
         wav_data(&bytes) == pcm.as_slice(),

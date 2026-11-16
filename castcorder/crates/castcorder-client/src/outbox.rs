@@ -48,6 +48,8 @@ thread_local! {
     static NEXT_ID: Cell<u32> = const { Cell::new(1) };
     static OUTBOX: RefCell<Option<GuestOutbox<OpfsFile>>> = const { RefCell::new(None) };
     static CALL: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The host's scope: tracks from before rooms carry it.
+    static LEGACY: RefCell<String> = const { RefCell::new(String::new()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static PREPARE_AGAIN: Cell<bool> = const { Cell::new(false) };
     /// The transfer progress last posted to the page.
@@ -135,10 +137,28 @@ fn release(file: &str) {
 /// every offer the host has not confirmed.
 pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
     let call = string(&msg, "call");
+    LEGACY.with(|l| *l.borrow_mut() = string(&msg, "legacy"));
     if !call.is_empty() {
-        CALL.with(|c| *c.borrow_mut() = call);
+        let changed = CALL.with(|c| c.replace(call.clone()) != call);
+        if changed && !is_busy() {
+            // Another call: only its tracks are offered from now on. What
+            // the outbox held for the last one stays in OPFS, offered again
+            // when that call is rejoined.
+            OUTBOX.with(|o| *o.borrow_mut() = None);
+            HANDLES.with(|m| {
+                for (_, h) in std::mem::take(&mut *m.borrow_mut()).into_values() {
+                    h.close();
+                }
+            });
+        }
     }
     prepare_current().await
+}
+
+/// Whether a track's sidecar `call` belongs in this call's outbox: this
+/// call's, or one from before rooms of the same host (`legacy`).
+fn in_scope(meta_call: &str, call: &str) -> bool {
+    meta_call == call || (!meta_call.is_empty() && LEGACY.with(|l| *l.borrow() == meta_call))
 }
 
 /// Prepare for the call last named by `outbox` (none yet: do nothing). Runs
@@ -218,7 +238,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
         };
         let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
         let meta = JSON::parse(&text).unwrap_or_else(|_| object());
-        if string(&meta, "call") != call || !get(&meta, "finalised").is_truthy() {
+        if !in_scope(&string(&meta, "call"), call) || !get(&meta, "finalised").is_truthy() {
             h.close();
             continue;
         }
@@ -456,7 +476,7 @@ async fn add_video_tracks(
         let timing = opened[2].clone();
         let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
         let meta = JSON::parse(&text).unwrap_or_else(|_| object());
-        if string(&meta, "call") != call {
+        if !in_scope(&string(&meta, "call"), call) {
             close_all(&opened);
             continue;
         }

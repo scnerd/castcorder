@@ -90,25 +90,82 @@ pub fn host_key(dir: &Path) -> io::Result<HostKey> {
     Ok(key)
 }
 
-/// The call secret, shared by the rendezvous thread (which checks offers
-/// against it) and the host thread (which rotates it on "regenerate link").
-pub type SharedSecret = Arc<Mutex<CallSecret>>;
+/// Every room's call secret, by room, shared by the rendezvous thread (which
+/// picks an offer's room by the secret it carries) and the host thread
+/// (which adds rooms and rotates secrets on "regenerate link").
+#[derive(Clone, Debug, Default)]
+pub struct Secrets {
+    /// The secret of each room.
+    pub rooms: std::collections::BTreeMap<String, CallSecret>,
+    /// The room whose link is printed at start (`--room`).
+    pub default: String,
+}
 
-/// Rotate the call's secret: write a fresh one to `call_dir` and make it the
-/// one offers are checked against. Guests already in the call stay; new
-/// joins need the new link.
-pub fn regenerate_secret(call_dir: &Path, shared: &SharedSecret) -> io::Result<CallSecret> {
+impl Secrets {
+    /// The room whose secret `offered` is, if any.
+    pub fn room_of(&self, offered: &str) -> Option<String> {
+        self.rooms
+            .iter()
+            .find(|(_, s)| s.admits(offered))
+            .map(|(r, _)| r.clone())
+    }
+}
+
+/// [`Secrets`], shared.
+pub type SharedSecrets = Arc<Mutex<Secrets>>;
+
+/// Rotate a room's secret: write a fresh one to `room_dir` and make it the
+/// one offers for `room` are checked against. Guests already in the call
+/// stay; new joins need the new link.
+pub fn regenerate_secret(
+    room_dir: &Path,
+    room: &str,
+    shared: &SharedSecrets,
+) -> io::Result<CallSecret> {
     let secret = CallSecret(random()?);
-    std::fs::create_dir_all(call_dir)?;
+    std::fs::create_dir_all(room_dir)?;
     std::fs::write(
-        call_dir.join("call-secret"),
+        room_dir.join("call-secret"),
         format!("{}\n", secret.encode()),
     )?;
-    *shared
+    shared
         .lock()
-        .map_err(|_| io::Error::other("call secret lock poisoned"))? = secret.clone();
-    info!(call_dir = %call_dir.display(), "call secret regenerated: the old call link no longer admits anyone");
+        .map_err(|_| io::Error::other("call secret lock poisoned"))?
+        .rooms
+        .insert(room.to_string(), secret.clone());
+    info!(room = %room, "call secret regenerated: the old call link no longer admits anyone");
     Ok(secret)
+}
+
+/// Every room's call link once the host is registered with a rendezvous
+/// (shared by the HTTP side, the app and the host thread).
+#[derive(Clone)]
+pub struct Links {
+    /// Every room's secret.
+    pub secrets: SharedSecrets,
+    /// The rest of the links (`None`: no rendezvous).
+    pub base: Option<LinkBase>,
+    /// Registered at least once (links work).
+    pub registered: Arc<AtomicBool>,
+}
+
+impl Links {
+    /// A room's call link, once registered.
+    pub fn link(&self, room: &str) -> Option<String> {
+        if !self.registered.load(Ordering::SeqCst) {
+            return None;
+        }
+        let secret = self.secrets.lock().ok()?.rooms.get(room)?.clone();
+        Some(self.base.as_ref()?.link(&secret))
+    }
+
+    /// The room `--room` names.
+    pub fn default_room(&self) -> String {
+        self.secrets
+            .lock()
+            .map(|s| s.default.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// What a call link is made of besides the secret.
@@ -133,7 +190,7 @@ impl LinkBase {
     }
 }
 
-/// Load the call's secret from `call_dir`, making one first if there is none.
+/// Load a room's secret from `room_dir`, making one first if there is none.
 pub fn call_secret(call_dir: &Path) -> io::Result<CallSecret> {
     let path = call_dir.join("call-secret");
     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -152,20 +209,21 @@ pub struct Config {
     pub base: String,
     /// The host key.
     pub key: HostKey,
-    /// The call secret (rotated by the host thread).
-    pub secret: SharedSecret,
+    /// Every room's secret (rotated by the host thread).
+    pub secret: SharedSecrets,
     /// The client version links pin.
     pub version: String,
 }
 
 impl Config {
-    /// The call link guests open.
-    pub fn link(&self) -> String {
-        self.link_base().link(&self.secret())
+    /// The default room's call link (printed at start), if it has a secret.
+    pub fn link(&self) -> Option<String> {
+        let s = self.secrets();
+        Some(self.link_base().link(s.rooms.get(&s.default)?))
     }
 
-    /// The current call secret.
-    pub fn secret(&self) -> CallSecret {
+    /// Every room's secret as it stands.
+    pub fn secrets(&self) -> Secrets {
         match self.secret.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
@@ -419,8 +477,10 @@ fn session(
             "relay credentials will be renewed"
         );
     }
-    if let Some(f) = on_link.take() {
-        f(&cfg.link());
+    if let Some(link) = cfg.link()
+        && let Some(f) = on_link.take()
+    {
+        f(&link);
     }
     loop {
         let Some(msg) = read_msg_until(&mut ws, renew_at, Some(stop))? else {
@@ -511,20 +571,23 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         );
         return None;
     };
-    let result = match serde_json::from_slice::<OfferPlain>(&plain) {
+    let parsed =
+        serde_json::from_slice::<OfferPlain>(&plain).map(|o| (cfg.secrets().room_of(&o.secret), o));
+    let result = match parsed {
         Err(e) => AnswerPlain::Rejected(format!("bad offer: {e}")),
-        Ok(o) if !cfg.secret().admits(&o.secret) => {
+        Ok((None, o)) => {
             warn!(guest_conn = from, "offer rejected: wrong call secret");
             crate::room::decision(&o.device, "guest", "enter", false, "wrong call secret");
             AnswerPlain::Rejected("wrong call secret (ask the host for a fresh link)".into())
         }
         // The device key proof is checked by the host thread (room), before
         // any room decision, with this host's id as its audience.
-        Ok(o) => {
+        Ok((Some(room), o)) => {
             let name = crate::http::clean_name(&o.name);
-            info!(guest_conn = from, name = %name, "offer through the rendezvous");
+            info!(guest_conn = from, name = %name, room = %room, "offer through the rendezvous");
             let (reply_tx, rx) = mpsc::channel();
             let sent = tx.send(Command::Offer {
+                room: Some(room),
                 name,
                 offer_sdp: o.sdp,
                 device: o.device,
@@ -649,7 +712,14 @@ mod tests {
         let cfg = Config {
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
-            secret: Arc::new(Mutex::new(CallSecret([7; 16]))),
+            secret: Arc::new(Mutex::new(Secrets {
+                rooms: [
+                    ("other".to_string(), CallSecret([6; 16])),
+                    ("show".to_string(), CallSecret([7; 16])),
+                ]
+                .into(),
+                default: "show".into(),
+            })),
             version: "0.0.0".into(),
         };
         let (tx, rx) = mpsc::channel();
@@ -689,6 +759,7 @@ mod tests {
         let key_id = key.id();
         let host = thread::spawn(move || match rx.recv().unwrap() {
             Command::Offer {
+                room,
                 name,
                 offer_sdp,
                 device,
@@ -699,6 +770,8 @@ mod tests {
                 reply,
             } => {
                 assert_eq!((name.as_str(), offer_sdp.as_str()), ("B!", "v=0"));
+                // The secret picked the room.
+                assert_eq!(room.as_deref(), Some("show"));
                 // The proof reaches the host thread, for this host id.
                 assert_eq!(audience, key_id.encode());
                 assert!(proof.is_some_and(|p| {
@@ -731,17 +804,23 @@ mod tests {
         let cfg = Config {
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
-            secret: Arc::new(Mutex::new(old.clone())),
+            secret: Arc::new(Mutex::new(Secrets {
+                rooms: [("show".to_string(), old.clone())].into(),
+                default: "show".into(),
+            })),
             version: "0.0.0".into(),
         };
         let old_link = cfg.link();
-        let new = regenerate_secret(&dir, &cfg.secret).unwrap();
+        let new = regenerate_secret(&dir, "show", &cfg.secret).unwrap();
         assert_ne!(new, old);
-        assert!(!cfg.secret().admits(&old.encode()));
-        assert!(cfg.secret().admits(&new.encode()));
+        assert_eq!(cfg.secrets().room_of(&old.encode()), None);
+        assert_eq!(
+            cfg.secrets().room_of(&new.encode()).as_deref(),
+            Some("show")
+        );
         assert_eq!(call_secret(&dir).unwrap(), new);
         assert_ne!(cfg.link(), old_link);
-        assert_eq!(cfg.link(), cfg.link_base().link(&new));
+        assert_eq!(cfg.link(), Some(cfg.link_base().link(&new)));
         // A guest with the old link is rejected through the real sealing.
         let (tx, rx) = mpsc::channel();
         let plain = OfferPlain {

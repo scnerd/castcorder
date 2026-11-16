@@ -27,6 +27,7 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
         None => url.clone(),
     };
     let ctx = Ctx {
+        host_scope: call.clone(),
         call,
         url: url.clone(),
         device,
@@ -466,7 +467,15 @@ pub(super) async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<Stri
 /// arrives a moment after the host starts. Other pages are not handed a link
 /// by `/role` and stop at once.
 pub(super) async fn watch_host_link(ui: Ui) {
-    let url = crate::signal::role_url(&ui.signal_url.get_untracked());
+    let mut url = crate::signal::role_url(&ui.signal_url.get_untracked());
+    let room = ui.room_name.get_untracked();
+    if !room.is_empty() {
+        // The home's lobby of one room: that room's link.
+        url = format!(
+            "{url}?room={}",
+            String::from(js_sys::encode_uri_component(&room))
+        );
+    }
     loop {
         if ui.joined.get_untracked() {
             return;

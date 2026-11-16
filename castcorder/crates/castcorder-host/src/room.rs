@@ -213,6 +213,8 @@ pub enum Effect {
     Roles(Vec<ConnId>),
     /// Rotate the call secret.
     RegenerateLink,
+    /// Move everyone into another call of the room (`None`: a new one).
+    SwitchCall(Option<String>),
 }
 
 /// What a request needs.
@@ -233,7 +235,9 @@ pub fn need(action: &RoomAction) -> Need {
         | RoomAction::SetPassword(_)
         | RoomAction::Kick { .. }
         | RoomAction::RegenerateLink
-        | RoomAction::SetRecordVideo(_) => Need::Producer,
+        | RoomAction::SetRecordVideo(_)
+        | RoomAction::NewCall
+        | RoomAction::ContinueCall(_) => Need::Producer,
         RoomAction::SetProducer { .. } | RoomAction::SetOpen(_) => Need::HostMachine,
     }
 }
@@ -255,6 +259,8 @@ pub fn action_name(action: &RoomAction) -> &'static str {
         RoomAction::SetOpen(false) => "make producer-gated",
         RoomAction::SetRecordVideo(true) => "record video",
         RoomAction::SetRecordVideo(false) => "stop recording video",
+        RoomAction::NewCall => "start a new call",
+        RoomAction::ContinueCall(_) => "continue a past call",
     }
 }
 
@@ -710,6 +716,8 @@ impl Room {
                 Ok(Effect::Changed)
             }
             RoomAction::RegenerateLink => Ok(Effect::RegenerateLink),
+            RoomAction::NewCall => Ok(Effect::SwitchCall(None)),
+            RoomAction::ContinueCall(id) => Ok(Effect::SwitchCall(Some(id.clone()))),
             RoomAction::Kick { participant } => {
                 let target = self.target(&by, role, name, *participant)?;
                 if target.at_host {

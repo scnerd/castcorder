@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::Config;
 
 /// The host flags, for a usage line.
-pub const USAGE: &str = "--dist DIR [--library DIR] [--call NAME] [--bind IP] \
+pub const USAGE: &str = "--dist DIR [--library DIR] [--room NAME] [--idle-gap MINUTES] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] \
 [--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open] \
 [--record-video true|false]";
@@ -38,7 +38,16 @@ impl Config {
             match flag.as_str() {
                 "--dist" => a.dist = PathBuf::from(value()?),
                 "--library" => a.library = PathBuf::from(value()?),
-                "--call" => a.call = value()?,
+                // `--call` is the name from before rooms: a room of that name.
+                "--room" | "--call" => a.room = value()?,
+                "--idle-gap" => {
+                    let minutes: f64 = value()?
+                        .parse()
+                        .ok()
+                        .filter(|m: &f64| m.is_finite() && *m >= 0.0)
+                        .ok_or_else(|| "--idle-gap is minutes (a number)".to_string())?;
+                    a.idle_gap = std::time::Duration::from_secs_f64(minutes * 60.0);
+                }
                 "--bind" => a.bind = ip(value()?)?,
                 "--port" => a.https_port = port(value()?)?,
                 "--http-port" => a.http_port = port(value()?)?,
@@ -123,11 +132,15 @@ mod tests {
         let mut c = Config::new("d");
         let rest = c
             .apply_args(args(
-                "--smoke --call show --http-port 0 --open x --align off --record-video true",
+                "--smoke --call show --idle-gap 1.5 --http-port 0 --open x --align off --record-video true",
             ))
             .unwrap();
         assert_eq!(rest, args("--smoke x"));
-        assert_eq!(c.call, "show");
+        assert_eq!(c.room, "show");
+        assert_eq!(c.idle_gap, std::time::Duration::from_secs(90));
+        let mut r = Config::new("d");
+        r.apply_args(args("--room studio")).unwrap();
+        assert_eq!(r.room, "studio");
         assert_eq!(c.http_port, 0);
         assert!(c.open);
         assert!(c.align.is_none());
@@ -136,7 +149,13 @@ mod tests {
 
     #[test]
     fn bad_values_are_errors() {
-        for bad in ["--port x", "--call", "--keep-wav maybe", "--name !!"] {
+        for bad in [
+            "--port x",
+            "--call",
+            "--keep-wav maybe",
+            "--name !!",
+            "--idle-gap soon",
+        ] {
             assert!(Config::new("d").apply_args(args(bad)).is_err(), "{bad}");
         }
     }

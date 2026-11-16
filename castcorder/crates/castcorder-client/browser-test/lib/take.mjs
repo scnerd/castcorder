@@ -5,7 +5,7 @@ import { INPUT_RATE } from '../gen-wav.mjs';
 import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { parseOggOpus } from '../ogg.mjs';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming, inputZeroHostUs } from './helpers.mjs';
+import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming, inputZeroHostUs, callDir } from './helpers.mjs';
 import { muteChecks } from './levels.mjs';
 import { chipsBeforeTake, chipsWhileRecording, chipsAfterTake } from './trackchips.mjs';
 
@@ -70,7 +70,7 @@ export async function takeChecks(A, B) {
 
   // The outbox: after the take, each guest's track (and its JSON sidecar) is
   // pulled into the host's library, verified, and only then deleted from OPFS.
-  const TAKE_DIR = join(LIBRARY, 'browser-test', 'take01');
+  const TAKE_DIR = join(callDir(LIBRARY, 'browser-test'), 'take01');
   const verifiedCount = () => {
     const m = join(TAKE_DIR, 'manifest.jsonl');
     if (!existsSync(m)) return 0;
@@ -84,7 +84,9 @@ export async function takeChecks(A, B) {
   // Logs (cast-zoa): each guest closed its log file when the take stopped and
   // offered it as the lowest-priority outbox item; the host stores it under
   // <call>/logs/<device>-<name>.jsonl beside its own host-<start>.jsonl.
-  const LOGS_DIR = join(LIBRARY, 'browser-test', 'logs');
+  const LOGS_DIR = join(callDir(LIBRARY, 'browser-test'), 'logs');
+  // The host's own log is per process, in <library>/logs (it serves every room).
+  const HOST_LOGS = join(LIBRARY, 'logs');
   if (FULL) {
   const guestLogFiles = () => (existsSync(LOGS_DIR) ? readdirSync(LOGS_DIR) : [])
     .filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl' && !f.startsWith('host-'));
@@ -100,7 +102,7 @@ export async function takeChecks(A, B) {
   console.log('host logs: ' + logFiles.join(' '));
   check(devicesWithLogs().size >= 2 && !logFiles.some((f) => f.endsWith('.obao') || f.endsWith('.journal')),
     'log files of ' + devicesWithLogs().size + ' guest devices arrived in <call>/logs, with no transfer state left');
-  check(logFiles.some((f) => f.startsWith('host-') && f.endsWith('.jsonl')), 'the host wrote its own host-<start>.jsonl');
+  check(readdirSync(HOST_LOGS).some((f) => f.startsWith('host-') && f.endsWith('.jsonl')), 'the host wrote its own host-<start>.jsonl in <library>/logs');
   let withBoth = 0, parsed = 0;
   for (const f of logFiles.filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl')) {
     const lines = readFileSync(join(LOGS_DIR, f), 'utf8').split('\n').filter((l) => l.length > 0);
@@ -120,7 +122,7 @@ export async function takeChecks(A, B) {
   check(parsed === logFiles.filter((f) => f.endsWith('.jsonl') && f !== 'manifest.jsonl').length,
     'every log file is valid JSON lines in the shared shape');
   check(withBoth > 0, 'guest log lines carry the call and device fields (' + withBoth + ' lines)');
-  const merged = spawnSync('cargo', ['run', '--quiet', '-p', 'castcorder-core', '--example', 'merge-logs', '--', LOGS_DIR],
+  const merged = spawnSync('cargo', ['run', '--quiet', '-p', 'castcorder-core', '--example', 'merge-logs', '--', LOGS_DIR, HOST_LOGS],
     { cwd: join(WORKSPACE), encoding: 'utf8', shell: process.platform === 'win32' });
   const mergedLines = (merged.stdout || '').split('\n').filter((l) => l.length > 0);
   writeFileSync(join(RESULTS, 'merged-logs.txt'), merged.stdout || '');
@@ -187,8 +189,8 @@ export async function takeChecks(A, B) {
     const rel = (us) => (typeof us === 'number' ? ((us - take1StartUs) / 1000).toFixed(1) : '?');
     let broadcast = '?';
     try {
-      for (const f of readdirSync(LOGS_DIR).filter((x) => x.startsWith('host-') && x.endsWith('.jsonl'))) {
-        for (const l of readFileSync(join(LOGS_DIR, f), 'utf8').split('\n')) {
+      for (const f of readdirSync(HOST_LOGS).filter((x) => x.startsWith('host-') && x.endsWith('.jsonl'))) {
+        for (const l of readFileSync(join(HOST_LOGS, f), 'utf8').split('\n')) {
           if (l.includes('take start broadcast') && l.includes('"take":1')) broadcast = (JSON.parse(l).fields.after_start_us / 1000).toFixed(1);
         }
       }
