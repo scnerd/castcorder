@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { parseWav, deinterleave, analyzeRecording } from './analyze.mjs';
 import { ctx } from './lib/ctx.mjs';
-import { sleep, waitFor, text, buttons, opfsNames } from './lib/helpers.mjs';
+import { sleep, waitFor, text, buttons, opfsNames, callDir } from './lib/helpers.mjs';
 import { openGuest } from './lib/guest.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +43,7 @@ const input = makeInput();
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
 writeWav16(INPUT_WAV, input);
 
-const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--call', 'browser-test', '--bind', '127.0.0.1',
+const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--room', 'browser-test', '--bind', '127.0.0.1',
   '--port', '0', '--http-port', '0', '--udp-port', '0', '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
 let hostLog = '';
 host.stderr.on('data', (d) => { hostLog += d.toString(); });
@@ -101,7 +101,7 @@ try {
     await A.click('#take-stop');
     await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), name + ' stopped', 10000);
     await waitFor(async () => ((await opfsNames(A)).length === 0 ? true : null), name + ' synced (A OPFS empty)', 120000, 500);
-    const dir = join(LIBRARY, 'browser-test', name);
+    const dir = join(callDir(LIBRARY, 'browser-test'), name);
     const wav = parseWav(readFileSync(join(dir, name + '_A_mic.wav')));
     const timing = readFileSync(join(dir, name + '_A_mic.timing.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
     const disc = timing.filter((l) => l.type === 'discontinuity');

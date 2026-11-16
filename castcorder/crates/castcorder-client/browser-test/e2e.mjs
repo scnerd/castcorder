@@ -80,7 +80,7 @@ import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { parseWav } from './analyze.mjs';
 import { fileURLToPath } from 'node:url';
 import { ctx } from './lib/ctx.mjs';
-import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check, opfsNames } from './lib/helpers.mjs';
+import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check, opfsNames, callDir } from './lib/helpers.mjs';
 import { takeChecks } from './lib/take.mjs';
 import { micLostChecks, micRecoveredChecks } from './lib/trackchips.mjs';
 import { liveLevelChecks } from './lib/levels.mjs';
@@ -124,7 +124,7 @@ rmSync(LIBRARY, { recursive: true, force: true });
 writeWav16(INPUT_WAV, input);
 
 
-const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--call', 'browser-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+const host = spawn(exe, ['--dist', dist, '--library', LIBRARY, '--room', 'browser-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
   '--port', '0', '--http-port', '0', '--udp-port', '0',
   // Always open: the leave/rejoin checks rejoin B after A (the producer) left.
   '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -264,7 +264,7 @@ try {
   await sleep(2000);
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 2 stopped', 10000);
-  const TAKE2 = join(LIBRARY, 'browser-test', 'take02');
+  const TAKE2 = join(callDir(LIBRARY, 'browser-test'), 'take02');
   const verified2 = () => {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
@@ -284,7 +284,7 @@ try {
   check(s2 > 1, 'B\'s second segment holds ' + s2.toFixed(2) + ' s');
   await recordingsAfterSync(A, B, seg1Name);
   // Video recording is off by default: takes 1 and 2 have no video track.
-  check(['take01', 'take02'].every((t) => !readdirSync(join(LIBRARY, 'browser-test', t)).some((f) => f.includes('_cam'))),
+  check(['take01', 'take02'].every((t) => !readdirSync(join(callDir(LIBRARY, 'browser-test'), t)).some((f) => f.includes('_cam'))),
     'with video recording off (the default) takes 1 and 2 have no video track');
   // Take 3 records video (chromium and firefox): see lib/videorec.mjs.
   if (MODE !== 'fallback') await videoRecChecks(A, B);

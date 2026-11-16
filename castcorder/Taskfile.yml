@@ -127,8 +127,8 @@ tasks:
       which prints the join links and the library path. Open the localhost link
       on this machine for the producer controls; guests on the same network open
       the https link. Stop with Ctrl+C. Pass host flags after --, e.g.
-      task host -- --call my-show --library D:\Podcasts
-      Files land in %USERPROFILE%\Castcorder\<call>\ by default.
+      task host -- --room my-show --library D:\Podcasts
+      Files land in %USERPROFILE%\Castcorder\<room>\<call>\ by default.
       Built with the native-capture feature (needs GStreamer, as test:gst):
       add --participate [DEVICE] --name NAME to take part from this machine
       without a browser (see README).

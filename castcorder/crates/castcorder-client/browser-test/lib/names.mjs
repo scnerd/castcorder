@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, check } from './helpers.mjs';
+import { sleep, waitFor, text, check, callDir } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Display names (cast-2e3), chromium and firefox: a guest named with a space
@@ -16,7 +16,7 @@ export async function namesChecks() {
   const NAME = 'Zo\u00eb Lee';
   const LIB5 = join(RESULTS, 'library-names-' + MODE);
   rmSync(LIB5, { recursive: true, force: true });
-  ctx.host5 = spawn(exe, ['--dist', dist, '--library', LIB5, '--call', 'names-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
+  ctx.host5 = spawn(exe, ['--dist', dist, '--library', LIB5, '--room', 'names-test', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--open'], { stdio: ['ignore', 'pipe', 'pipe'] });
   ctx.host5Log = '';
   ctx.host5.stderr.on('data', (d) => { ctx.host5Log += d.toString(); });
@@ -50,7 +50,7 @@ export async function namesChecks() {
   await waitFor(async () => (await text(X, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
   await sleep(2500);
   await X.click('#take-stop');
-  const TAKE = join(LIB5, 'names-test', 'take01');
+  const TAKE = join(callDir(LIB5, 'names-test'), 'take01');
   const mine = () => (existsSync(TAKE) ? readdirSync(TAKE) : []).filter((f) => f.endsWith('_mic.wav'));
   await waitFor(async () => mine().length >= 2 && !readdirSync(TAKE).some((f) => f.endsWith('.journal') || f.endsWith('.obao')), 'both tracks synced', 40000);
   const files = readdirSync(TAKE);

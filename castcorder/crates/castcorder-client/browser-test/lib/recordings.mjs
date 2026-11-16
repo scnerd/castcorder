@@ -9,7 +9,7 @@
 // - B made a producer sees the same takes and states but not the folder.
 import { resolve } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { waitFor, check, sleep } from './helpers.mjs';
+import { waitFor, check, sleep, callDir } from './helpers.mjs';
 
 const rows = (p, take) => p.evaluate((take) => [...document.querySelectorAll('#recordings li.take[data-take="' + take + '"] li.track')]
   .map((li) => ({ who: li.dataset.participant, file: li.dataset.file, state: li.dataset.state, text: li.textContent })), take);
@@ -34,7 +34,7 @@ export async function recordingsWhileRecording(A, B, seg1) {
 
 // After take 2 synced.
 export async function recordingsAfterSync(A, B, seg1Name) {
-  const want = norm(resolve(ctx.LIBRARY, 'browser-test'));
+  const want = norm(resolve(callDir(ctx.LIBRARY, 'browser-test')));
   const folder = await waitFor(async () => {
     const t = await A.locator('#recordings-folder').textContent({ timeout: 1000 }).catch(() => '');
     return t && norm(t) === want ? t : null;

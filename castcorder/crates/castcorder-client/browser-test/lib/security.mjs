@@ -16,7 +16,7 @@ export async function securityChecks() {
   const { exe, dist, RESULTS, host, logs } = ctx;
   const LIB2 = join(RESULTS, 'library-security');
   rmSync(LIB2, { recursive: true, force: true });
-  ctx.host2 = spawn(exe, ['--dist', dist, '--library', LIB2, '--call', 'security-test', '--bind', '127.0.0.1',
+  ctx.host2 = spawn(exe, ['--dist', dist, '--library', LIB2, '--room', 'security-test', '--bind', '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
   ctx.host2.stderr.on('data', (d) => { ctx.host2Log += d.toString(); });
   const [HTTP2, HTTPS2] = await new Promise((resolve, reject) => {
