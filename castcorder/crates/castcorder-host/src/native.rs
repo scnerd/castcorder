@@ -335,6 +335,14 @@ impl Rec {
         }
     }
 
+    /// Tell the call where the microphone's track stands (the tiles' track
+    /// chip), while a take records.
+    fn source(&self, state: castcorder_protocol::SourceState) {
+        if self.take.is_some() {
+            let _ = self.commands.send(Command::NativeSource { state });
+        }
+    }
+
     /// Write a buffer, opening a segment first if a take is recording.
     /// `captured`: its first frame's capture time on the host timeline and its
     /// running time (us), from GStreamer; else it is placed by its arrival.
@@ -377,9 +385,11 @@ impl Rec {
                     info!(file = %file, segment = self.segment, ?format, "host microphone segment started");
                     self.start_timing(take, dir.clone(), &file, format);
                     self.writer = Some((file, w));
+                    self.source(castcorder_protocol::SourceState::Recording);
                 }
                 Err(e) => {
                     error!(file = %file, error = %e, "cannot create the track; this take is not recorded");
+                    self.source(castcorder_protocol::SourceState::Unavailable);
                     self.take = None;
                     return;
                 }
@@ -583,6 +593,11 @@ fn run(
             }
         };
         rec.end_segment();
+        if !quit && matches!(cfg.input, NativeInput::Device(_)) {
+            // The device went away mid-take: Mic lost until it is reopened
+            // and a new segment records.
+            rec.source(castcorder_protocol::SourceState::Lost);
+        }
         stop.store(true, Ordering::Relaxed);
         cap.stop();
         if let Some(t) = live_thread {

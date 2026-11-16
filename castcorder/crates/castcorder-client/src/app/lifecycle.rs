@@ -187,6 +187,8 @@ pub(super) fn disconnect() {
         e.mid_origin.clear();
         e.last_rx = 0.0;
         e.video_sender = None;
+        e.ack_requests.clear();
+        e.recorders.clear();
         e.pc.take()
     });
     if let Some(pc) = pc {
@@ -251,13 +253,20 @@ pub(super) async fn restart_media(ui: Ui, epoch: u32) {
         )
     });
     warn!(call = %ctx.call, device = %ctx.device, recording = ?take, "microphone track ended; reopening it (a recording take continues in a new segment)");
-    if take.is_some() {
+    if let Some(take) = take {
+        // Mic lost: producers see it until the new segment records.
+        super::rpc::ack_source(take, "mic", SourceKind::Audio, SourceState::Lost);
         flush_logs(false);
         post_worker(&worker_cmd("stop"), None);
     }
     post_worker(&worker_cmd("close-source"), None);
     stop_tracks(&[raw, live], &sources);
     close_audio(audio, worklet);
+    // Test hook: while the page sets `window.__castcorderHoldMic`, the
+    // microphone stays lost (an e2e checks what producers see meanwhile).
+    while get(&window(), "__castcorderHoldMic").is_truthy() && !stale(epoch) {
+        crate::mailbox::sleep_ms(200).await;
+    }
     match open_media().await {
         Ok((raw, live)) if !stale(epoch) => {
             with_engine(|e| {

@@ -179,6 +179,20 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 .tile-mic { display: none; }
 .tile.mic-muted .tile-mic { display: block; }
 .tile.mic-muted .tile-wave { opacity: 0.45; }
+/* Track status (rpc.rs, view.rs): is their machine recording? Kept apart from the live level.
+   A word for every state; red only while their track records (it is REC), amber to check. */
+.tile-track { position: absolute; left: 10px; top: 10px; z-index: 2; display: inline-flex;
+  align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px; background: rgba(0, 0, 0, 0.6);
+  font-size: 12px; font-weight: 600; color: #e8eaed; white-space: nowrap; }
+.tile-track[hidden] { display: none; }
+.tile-track .dot { width: 8px; height: 8px; border-radius: 50%; border: 2px solid #a3a9b3; box-sizing: border-box; }
+.tile-track[data-state="starting"] .dot { border-color: #8ab4f8; }
+.tile-track[data-state="recording"] { color: #fca5a5; }
+.tile-track[data-state="recording"] .dot { background: #dc2626; border-color: #dc2626; }
+.tile-track[data-state="mic-lost"], .tile-track[data-state="no-video"],
+.tile-track[data-state="unavailable"] { color: #fbbf24; }
+.tile-track[data-state="mic-lost"] .dot, .tile-track[data-state="no-video"] .dot,
+.tile-track[data-state="unavailable"] .dot { background: #fbbf24; border-color: #fbbf24; }
 
 /* Side panel */
 .side { width: 360px; flex: none; border-left: 1px solid var(--border); background: var(--surface);

@@ -17,7 +17,8 @@ use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
     DeviceDisk, ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue,
-    Request, Response, RoomAction, SourceKind, TakeId, TakeStatus, TrackOffer, TracksState,
+    Recorder, Request, Response, RoomAction, SourceAck, SourceKind, SourceState, TakeId,
+    TakeStatus, TrackOffer, TracksState,
 };
 use std::path::PathBuf;
 
@@ -38,8 +39,9 @@ pub struct LiveStatus {
     /// Guests whose outbox is still syncing to the library.
     pub syncing: usize,
     /// Things that need a look: devices short of disk (the library volume
-    /// included) and guests with a source that cannot be recorded as the
-    /// profile asks. The call goes on; the tray shows an amber badge.
+    /// included), guests with a source that cannot be recorded as the
+    /// profile asks, and participants whose microphone is lost mid-take. The
+    /// call goes on; the tray shows an amber badge.
     pub attention: usize,
 }
 
@@ -124,6 +126,13 @@ pub enum Command {
     LocalTracksDone {
         /// The take.
         take: TakeId,
+    },
+    /// The host's own recorder's microphone: recording (a segment opened) or
+    /// lost (the device went away; a new segment follows when it returns).
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    NativeSource {
+        /// Where it stands.
+        state: SourceState,
     },
     /// End the call's thread (after `Shutdown`): the host and its sockets
     /// are dropped.
@@ -256,6 +265,14 @@ pub struct Call {
     /// or the last ([`Request::ProfileUnmet`]); cleared when the next take
     /// starts or the guest leaves.
     unmet: std::collections::BTreeSet<GuestId>,
+    /// Each participant's recording, from their source acks.
+    recorders: crate::recorders::Recorders,
+    /// The [`Event::Recorders`] each joined connection was last sent, and
+    /// whether the recorders changed since.
+    recorders_sent: BTreeMap<u64, Vec<Recorder>>,
+    recorders_dirty: bool,
+    /// When the recorders are next checked anyway (roles change too).
+    recorders_due_us: i64,
 }
 
 /// How often the library volume's free space is read (host timeline, us).
@@ -364,6 +381,10 @@ impl Call {
             disk_due_us: 0,
             disk_sent: BTreeMap::new(),
             unmet: Default::default(),
+            recorders: Default::default(),
+            recorders_sent: BTreeMap::new(),
+            recorders_dirty: false,
+            recorders_due_us: 0,
         }
     }
 
@@ -468,6 +489,8 @@ impl Call {
     /// producer. The take goes on.
     fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
         self.unmet.insert(id);
+        self.recorders.unmet(id.0, &issue);
+        self.recorders_dirty = true;
         let name = self.names.get(&id).cloned().unwrap_or_default();
         warn!(guest = id.0, name = %name, take = issue.take.0, source = %issue.source.0,
             kind = ?issue.kind, reason = %issue.reason, "device cannot meet the recording profile");
@@ -484,6 +507,78 @@ impl Call {
             }
         }
         Response::Done
+    }
+
+    /// A device acknowledged one of its recorded sources (or says it was lost
+    /// or cannot record): its participant's recording changes. Never blocks
+    /// the take.
+    fn source_ack(&mut self, id: GuestId, ack: SourceAck) -> Response {
+        if !self.names.contains_key(&id) {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "join first".into(),
+            };
+        }
+        if ack.state != SourceState::Recording {
+            warn!(guest = id.0, take = ack.take.0, source = %ack.source.0, kind = ?ack.kind,
+                state = ?ack.state, "a device's recorded source is not recording");
+        }
+        if self.recorders.ack(id.0, &ack) {
+            self.recorders_dirty = true;
+        }
+        Response::Done
+    }
+
+    /// The host's own microphone recording or lost (its recorder says so).
+    fn native_source(&mut self, state: SourceState) {
+        let (Some(local), TakeStatus::Recording { take, .. }) = (&self.local, self.status) else {
+            return;
+        };
+        let ack = SourceAck {
+            take,
+            source: castcorder_protocol::SourceId("mic".into()),
+            kind: SourceKind::Audio,
+            state,
+        };
+        if self.recorders.ack(local.id().0, &ack) {
+            self.recorders_dirty = true;
+        }
+    }
+
+    /// Send each joined connection its view of the recorders if it changed:
+    /// a producer everyone's, anyone else only its own. Checked when they
+    /// change and every half second (a role may have changed).
+    fn publish_recorders(&mut self) {
+        let now = self.timeline.now_us();
+        if !self.recorders_dirty && now < self.recorders_due_us {
+            return;
+        }
+        self.recorders_dirty = false;
+        self.recorders_due_us = now + TRACKS_EVERY_US;
+        let all = self.recorders.list();
+        let producers = self.room.producers();
+        let joined: Vec<u64> = self.names.keys().map(|g| g.0).collect();
+        self.recorders_sent.retain(|c, _| joined.contains(c));
+        for id in joined {
+            let view: Vec<Recorder> = if producers.contains(&id) {
+                all.clone()
+            } else {
+                all.iter()
+                    .filter(|r| r.participant.0 == id)
+                    .cloned()
+                    .collect()
+            };
+            if self.recorders_sent.get(&id) == Some(&view) {
+                continue;
+            }
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(id)) {
+                if rpc.emit(Event::Recorders(view.clone())).is_err() {
+                    warn!(guest = id, "recorders not sent: channel closed");
+                    continue;
+                }
+                self.recorders_sent.insert(id, view);
+            }
+        }
     }
 
     /// Tell these connections their role.
@@ -605,7 +700,10 @@ impl Call {
                 }
             }
         }
-        self.local = Some(host.add_local_audio(&p.name));
+        let local = host.add_local_audio(&p.name);
+        self.recorders.joined(local.id().0, &p.name);
+        self.recorders_dirty = true;
+        self.local = Some(local);
         info!(name = %p.name, "host microphone joined the call");
         self.participant = Some(p);
         // Whoever is at the host is a producer, in the call while joined.
@@ -632,6 +730,8 @@ impl Call {
             }
         }
         if let Some(local) = self.local.take() {
+            self.recorders.left(local.id().0);
+            self.recorders_dirty = true;
             host.remove_local_audio(local);
         }
         info!(name = %p.name, "host microphone left the call");
@@ -924,6 +1024,11 @@ impl Call {
             }
         }
         self.broadcast();
+        // Everyone is Starting until their device acks: said at once, so
+        // producers see it however soon the acks come.
+        self.recorders.take_started(take);
+        self.recorders_dirty = true;
+        self.publish_recorders();
         Ok((take, host_us))
     }
 
@@ -942,6 +1047,9 @@ impl Call {
             self.local_busy.insert(take.0);
         }
         self.broadcast();
+        self.recorders.take_stopped();
+        self.recorders_dirty = true;
+        self.publish_recorders();
         Ok((take, host_us))
     }
 
@@ -974,7 +1082,9 @@ impl Call {
             },
             last_take: self.last_take,
             syncing: self.pullers.values().filter(|p| !p.is_idle()).count(),
-            attention: self.device_disk().iter().filter(|d| d.low).count() + self.unmet.len(),
+            attention: self.device_disk().iter().filter(|d| d.low).count()
+                + self.unmet.len()
+                + self.recorders.mic_lost(),
         }
     }
 
@@ -1065,6 +1175,8 @@ impl Call {
                                 if let Some(ch) = self.data.get(&id) {
                                     let call = self.library.call().to_string();
                                     self.names.insert(id, display_name.clone());
+                                    self.recorders.joined(id.0, &display_name);
+                                    self.recorders_dirty = true;
                                     self.pullers
                                         .insert(id, Puller::new(call, display_name, ch.clone()));
                                 }
@@ -1112,6 +1224,7 @@ impl Call {
                     Request::Room(action) => self.room_action(id, &action),
                     Request::ProfileUnmet(issue) => self.profile_unmet(id, issue),
                     Request::MicState { muted, level } => self.relay_mic(id, muted, level),
+                    Request::SourceAck(ack) => self.source_ack(id, ack),
                     Request::DiskFree { free_bytes } => {
                         self.disk.insert(id, free_bytes);
                         Response::Done
@@ -1163,6 +1276,8 @@ impl Call {
                                 self.names.remove(&guest);
                                 self.disk.remove(&guest);
                                 self.unmet.remove(&guest);
+                                self.recorders.left(guest.0);
+                                self.recorders_dirty = true;
                                 self.drop_puller(guest);
                                 self.safety.guest_gone(guest.0);
                                 self.hear(Heard::Gone(guest));
@@ -1197,6 +1312,7 @@ impl Call {
                     self.sync();
                     self.publish_tracks();
                     self.publish_disk();
+                    self.publish_recorders();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
                     let wait = deadline.saturating_sub(clock.monotonic());
@@ -1333,6 +1449,7 @@ impl Call {
                     host.send_local_audio(local, rtp_time, &data);
                 }
             }
+            Command::NativeSource { state } => self.native_source(state),
         }
     }
 }

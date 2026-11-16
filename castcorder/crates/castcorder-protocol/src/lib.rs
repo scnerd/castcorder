@@ -153,6 +153,71 @@ pub enum Request {
         /// 0 (silence) to 255 (full scale), linear.
         level: u8,
     },
+    /// This device's acknowledgement of one recorded source for a take: it
+    /// records (a new segment after a dropout says so again), it was lost
+    /// mid-take (the track continues in a new segment when it returns), or it
+    /// cannot be recorded at all here. Sent when each happens and again after
+    /// every join while the take records. The host shares each participant's
+    /// state with producers and with the device itself ([`Event::Recorders`]).
+    /// Never blocks the take. Answered with [`Response::Done`].
+    SourceAck(SourceAck),
+}
+
+/// One recorded source's state on its device, as the device reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceAck {
+    /// The take it applies to (an ack for another take is ignored).
+    pub take: TakeId,
+    /// The source (for example `mic`).
+    pub source: SourceId,
+    /// Audio or video.
+    pub kind: SourceKind,
+    /// Where it stands.
+    pub state: SourceState,
+}
+
+/// Where one recorded source stands on its device during a take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceState {
+    /// Writing its track (its current segment).
+    Recording,
+    /// It ended or failed mid-take; the device reopens it and the track
+    /// continues in a new segment.
+    Lost,
+    /// It cannot be recorded on this device (the call goes on).
+    Unavailable,
+}
+
+/// One participant's recording, as the track chip on their tile shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recorder {
+    /// The participant (the host's own participant included; its forwarded
+    /// stream id ends in `-<id>` like a guest's).
+    pub participant: ParticipantId,
+    /// Display name.
+    pub name: String,
+    /// Where its microphone's track stands.
+    pub state: RecorderState,
+    /// A video source cannot be recorded as the recording profile asks this
+    /// take ([`Request::ProfileUnmet`], or a video source lost or
+    /// unavailable); its audio is told by `state`.
+    pub video_unmet: bool,
+}
+
+/// Where one participant's microphone track stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecorderState {
+    /// No take is recording.
+    Ready,
+    /// A take is recording and the device has not yet acknowledged its
+    /// microphone.
+    Starting,
+    /// Its microphone is recording.
+    Recording,
+    /// Its microphone was lost mid-take (until a new segment records).
+    MicLost,
+    /// It cannot record its microphone at all this take.
+    Unavailable,
 }
 
 /// One source of one device that cannot be recorded as the recording profile
@@ -404,6 +469,10 @@ pub enum Event {
         /// Peak level of their raw microphone, 0 to 255, linear.
         level: u8,
     },
+    /// Each participant's recording, from their devices' source acks
+    /// ([`Request::SourceAck`]): every participant to producers, only its own
+    /// to anyone else. Sent whenever it changes for the receiver.
+    Recorders(Vec<Recorder>),
 }
 
 /// One device's room for recording, as the host works it out from the device's
@@ -587,6 +656,12 @@ mod tests {
                 muted: true,
                 level: 255,
             },
+            Request::SourceAck(SourceAck {
+                take: TakeId(4),
+                source: SourceId("mic".into()),
+                kind: SourceKind::Audio,
+                state: SourceState::Lost,
+            }),
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -653,6 +728,12 @@ mod tests {
                 muted: true,
                 level: 128,
             }),
+            CoreMessage::Event(Event::Recorders(vec![Recorder {
+                participant: ParticipantId(2),
+                name: "Bea".into(),
+                state: RecorderState::MicLost,
+                video_unmet: true,
+            }])),
             CoreMessage::Event(Event::DeviceDisk(vec![DeviceDisk {
                 participant: Some(ParticipantId(2)),
                 name: "Bea".into(),
@@ -915,6 +996,33 @@ mod tests {
                 level: 7
             }),
             vec![8, 3, 0, 7]
+        );
+        // Source acks and each participant's recording (appended).
+        assert_eq!(encode(&SourceState::Recording), vec![0]);
+        assert_eq!(encode(&SourceState::Lost), vec![1]);
+        assert_eq!(encode(&SourceState::Unavailable), vec![2]);
+        assert_eq!(
+            encode(&Request::SourceAck(SourceAck {
+                take: TakeId(2),
+                source: SourceId(String::new()),
+                kind: SourceKind::Audio,
+                state: SourceState::Lost,
+            })),
+            vec![12, 2, 0, 0, 1]
+        );
+        assert_eq!(encode(&RecorderState::Ready), vec![0]);
+        assert_eq!(encode(&RecorderState::Starting), vec![1]);
+        assert_eq!(encode(&RecorderState::Recording), vec![2]);
+        assert_eq!(encode(&RecorderState::MicLost), vec![3]);
+        assert_eq!(encode(&RecorderState::Unavailable), vec![4]);
+        assert_eq!(
+            encode(&Event::Recorders(vec![Recorder {
+                participant: ParticipantId(3),
+                name: String::new(),
+                state: RecorderState::MicLost,
+                video_unmet: true,
+            }])),
+            vec![9, 1, 3, 0, 3, 1]
         );
     }
 

@@ -66,7 +66,7 @@ use std::rc::Rc;
 use castcorder_protocol::rpc::{MessageChannel, RpcClient};
 use castcorder_protocol::{
     Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, Role, RoomAction,
-    RoomState, TakeId, TakeStatus, TrackOffer,
+    RoomState, SourceAck, SourceId, SourceKind, SourceState, TakeId, TakeStatus, TrackOffer,
 };
 use js_sys::{Array, Promise, Reflect, Uint8Array};
 use leptos::prelude::*;
@@ -218,6 +218,14 @@ struct Engine {
     video: Option<VideoRec>,
     /// The take for which "cannot meet profile" was already reported.
     video_unmet: Option<TakeId>,
+    /// The latest ack of each recorded source this take (`SourceAck`), sent
+    /// again after every join while the take records; and those awaiting
+    /// their answer.
+    acks: Vec<castcorder_protocol::SourceAck>,
+    ack_requests: Vec<RequestId>,
+    /// Each participant's recording as the host last said
+    /// (`Event::Recorders`): the remote tiles' track chips.
+    recorders: Vec<castcorder_protocol::Recorder>,
 }
 
 thread_local! {
@@ -336,6 +344,9 @@ struct Ui {
     take: RwSignal<String>,
     /// How much room each device has for recording (producers only).
     disk: RwSignal<Vec<castcorder_protocol::DeviceDisk>>,
+    /// Each participant's recording as the host shares it: everyone's for a
+    /// producer, else only this participant's (the track chips, the roll-up).
+    recorders: RwSignal<Vec<castcorder_protocol::Recorder>>,
     /// When the recording take started on the host timeline (us), from its status.
     take_started_us: RwSignal<Option<i64>>,
     /// How long the take has run ("1:05"), empty until this device knows the host's clock.
@@ -480,13 +491,22 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                     }
                 });
             }
-            "recording" => ui
-                .recording
-                .set(format!("recording {}", string(&d, "name"))),
+            "recording" => {
+                ui.recording
+                    .set(format!("recording {}", string(&d, "name")));
+                // The track (this segment) is open: acknowledge the mic.
+                if let Some(take) = with_engine(|e| e.recording) {
+                    rpc::ack_source(take, "mic", SourceKind::Audio, SourceState::Recording);
+                }
+            }
             "stopped" => ui.recording.set(format!("stopped {}", string(&d, "name"))),
-            "vrecording" => ui
-                .video_rec
-                .set(format!("recording {}", string(&d, "name"))),
+            "vrecording" => {
+                ui.video_rec
+                    .set(format!("recording {}", string(&d, "name")));
+                if let Some(take) = with_engine(|e| e.video_take) {
+                    rpc::ack_source(take, "cam", SourceKind::Video, SourceState::Recording);
+                }
+            }
             "vstopped" => ui.video_rec.set(format!(
                 "stopped {} ({} bytes)",
                 string(&d, "name"),
