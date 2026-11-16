@@ -17,7 +17,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, buttons, check, opfsNames, parseTiming, inputZeroHostUs, loopDiffUs } from './helpers.mjs';
+import { sleep, waitFor, text, buttons, check, opfsNames, parseTiming, inputZeroHostUs, loopDiffUs, callDir } from './helpers.mjs';
 import { INPUT_RATE, INPUT_SECONDS } from '../gen-wav.mjs';
 
 // How far two takes' timing metadata may disagree about the same input
@@ -64,7 +64,7 @@ function ffprobe(file) {
 export async function videoRecChecks(A, B) {
   const { MODE, RESULTS, LIBRARY, input, TAKE_SECONDS } = ctx;
   const chromium = MODE === 'chromium';
-  const TAKE3 = join(LIBRARY, 'browser-test', 'take03');
+  const TAKE3 = join(callDir(LIBRARY, 'browser-test'), 'take03');
 
   // The producer turns video recording on (default off: takes 1 and 2 had none).
   check((await text(A, '#room-record-video')) === 'audio only', 'the recording profile records no video by default');
