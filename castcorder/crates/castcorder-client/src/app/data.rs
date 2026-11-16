@@ -28,10 +28,18 @@ pub(super) fn pull_frames() {
     }
 }
 
-/// Offer the worker's outbox to the host (each root once per connection).
-pub(super) fn offer_tracks(offers: &JsValue) {
+/// Offer the worker's outbox (`outbox {offers, rooms, calls}`) to the host,
+/// each root once per connection: `OfferTrack` for this call's tracks and
+/// those from before rooms, `OfferCallTrack` for another call's.
+pub(super) fn offer_tracks(msg: &JsValue) {
     let ctx = with_engine(|e| e.ctx.clone());
-    for bytes in Array::from(offers).iter() {
+    let (rooms, calls) = (
+        Array::from(&get(msg, "rooms")),
+        Array::from(&get(msg, "calls")),
+    );
+    for (i, bytes) in Array::from(&get(msg, "offers")).iter().enumerate() {
+        let room = rooms.get(i as u32).as_string().unwrap_or_default();
+        let call = calls.get(i as u32).as_string().unwrap_or_default();
         let bytes = Uint8Array::new(&bytes).to_vec();
         let Ok(offer) = castcorder_protocol::decode::<TrackOffer>(&bytes) else {
             warn!("bad offer from worker");
@@ -44,8 +52,21 @@ pub(super) fn offer_tracks(offers: &JsValue) {
             if e.participant.is_none() || !e.offered.insert(offer.root) {
                 return;
             }
-            info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size, "offering track to the host");
-            match rpc.send(Request::OfferTrack(offer)) {
+            let request = if room.is_empty() || call.is_empty() {
+                info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size, "offering track to the host");
+                Request::OfferTrack(offer)
+            } else {
+                info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size,
+                    recorded_in = %format!("{room}/{call}"), "offering another call's track to the host");
+                Request::OfferCallTrack {
+                    call: castcorder_protocol::CallRef {
+                        room: room.clone(),
+                        call: call.clone(),
+                    },
+                    offer,
+                }
+            };
+            match rpc.send(request) {
                 Ok(id) => e.offer_requests.push(id),
                 Err(err) => warn!(error = ?err, "OfferTrack not sent"),
             }

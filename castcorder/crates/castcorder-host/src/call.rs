@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use castcorder_core::clocksync::HostTimeline;
 use castcorder_core::diskspace;
-use castcorder_core::library::{Library, Puller};
+use castcorder_core::library::{CallSet, Library, Puller};
 use castcorder_core::safety::{self, SafetyRecorder, SafetyWriter};
 use castcorder_port_clock::{Clock, SystemClock};
 use castcorder_port_disk::FsStorage;
@@ -267,6 +267,9 @@ pub struct Call {
     names_sent: Vec<ParticipantName>,
     /// The open call's tracks (`None` until a call of the room is open).
     library: Option<Library<FsStorage>>,
+    /// Other calls' libraries (`<room>/<call>`), opened for tracks a device
+    /// recorded there and delivers now (`Request::OfferCallTrack`).
+    elsewhere: BTreeMap<String, Library<FsStorage>>,
     pullers: BTreeMap<GuestId, Puller<FsStorage, GuestChannel>>,
     participant: Option<Participant>,
     local: Option<LocalAudio>,
@@ -419,6 +422,7 @@ impl Call {
             names: BTreeMap::new(),
             names_sent: Vec::new(),
             library: None,
+            elsewhere: BTreeMap::new(),
             pullers: BTreeMap::new(),
             participant: None,
             local: None,
@@ -816,8 +820,12 @@ impl Call {
         let Some(library) = self.library.as_mut() else {
             return;
         };
+        let mut libs = CallSet {
+            open: library,
+            others: &mut self.elsewhere,
+        };
         for (id, p) in &mut self.pullers {
-            if let Err(e) = p.poll(library, recording) {
+            if let Err(e) = p.poll(&mut libs, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
                 gone.push(*id);
             } else if p.is_closed() {
@@ -1284,6 +1292,9 @@ impl Call {
                         }
                     }
                     Request::OfferTrack(offer) => self.offer_track(id, &offer),
+                    Request::OfferCallTrack { call, offer } => {
+                        self.offer_call_track(id, &call, &offer)
+                    }
                     Request::ClockPing { .. } => unreachable!("answered above"),
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),

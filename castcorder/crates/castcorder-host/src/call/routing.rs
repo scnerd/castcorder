@@ -32,7 +32,9 @@ use castcorder_core::safety::{self, SafetyRecorder, SafetyWriter};
 use castcorder_core::sync::SyncConfig;
 use castcorder_port_clock::Clock;
 use castcorder_port_disk::{FsStorage, Storage};
-use castcorder_protocol::{CallRef, CallSummary, Event, TakeId, TakeStatus};
+use castcorder_protocol::{
+    CallRef, CallSummary, ErrorKind, Event, Response, TakeId, TakeStatus, TrackOffer,
+};
 use castcorder_transport::GuestId;
 use serde::Serialize;
 use tracing::{info, warn};
@@ -238,6 +240,7 @@ impl Call {
     /// Forget the open call (nothing is live).
     fn close_call(&mut self) {
         self.library = None;
+        self.elsewhere.clear();
         self.call_id = None;
         self.call_dir = None;
         self.last_take = 0;
@@ -303,6 +306,9 @@ impl Call {
         for g in &moving {
             self.drop_puller(*g);
         }
+        // No puller is left to file into another call (and this one may
+        // have been among them).
+        self.elsewhere.clear();
         self.library = Some(library);
         self.last_take = takes.last().copied().unwrap_or(0);
         self.call_id = Some(id.to_string());
@@ -432,14 +438,77 @@ impl Call {
         };
         let event = Event::Call(CallRef {
             room: self.room_name.clone(),
-            call,
+            call: call.clone(),
         });
         for id in ids {
+            // In this call from now on: its tracks of this call are accepted
+            // whichever call it delivers them from.
+            if let (Some(device), Some(library)) =
+                (self.room.device_of(id.0), self.library.as_mut())
+                && let Err(e) = library.admit(device)
+            {
+                warn!(call = %call, device = %device, error = %e, "device not recorded in the call");
+            }
             if let Some(rpc) = self.rpc.get_mut(id)
                 && rpc.emit(event.clone()).is_err()
             {
                 warn!(guest = id.0, "call not sent: channel closed");
             }
+        }
+    }
+
+    /// `Request::OfferCallTrack`: a track this device recorded in `call`.
+    /// The open call's go the usual way; another call's is filed into that
+    /// call's folder only if the device was in it ([`call_library`]).
+    pub(super) fn offer_call_track(
+        &mut self,
+        id: GuestId,
+        call: &CallRef,
+        offer: &TrackOffer,
+    ) -> Response {
+        if call.room == self.room_name && self.call_id.as_deref() == Some(call.call.as_str()) {
+            return self.offer_track(id, offer);
+        }
+        let refuse = |kind, message: String| Response::Error { kind, message };
+        let Some(p) = self.pullers.get_mut(&id) else {
+            return refuse(ErrorKind::InvalidState, "Join first".into());
+        };
+        let Some(member) = self.room.device_of(id.0).map(str::to_string) else {
+            return refuse(ErrorKind::InvalidState, "Join first".into());
+        };
+        let device = self.room.offer_device(id.0, &offer.device);
+        let offer = &TrackOffer {
+            device,
+            ..offer.clone()
+        };
+        let key = format!("{}/{}", call.room, call.call);
+        let mut library = match self.elsewhere.remove(&key) {
+            Some(l) => l,
+            None => match call_library(&self.rooms, call, &member) {
+                Ok(l) => l,
+                Err(message) => {
+                    warn!(guest = id.0, device = %member, room = %call.room, call = %call.call,
+                        take = offer.take.0, track = %offer.name, reason = %message,
+                        "track for another call refused");
+                    return refuse(ErrorKind::NotAllowed, message);
+                }
+            },
+        };
+        let r = p.offer_into(&key, &mut library, &member, offer);
+        self.elsewhere.insert(key, library);
+        match r {
+            Ok(e) => {
+                info!(guest = id.0, device = %member, room = %call.room, call = %call.call,
+                    take = offer.take.0, track = %e.file, "track of another call offered");
+                Response::TrackAccepted {
+                    file: e.file,
+                    received: e.verified,
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                refuse(ErrorKind::NotAllowed, e.to_string())
+            }
+            Err(e) => refuse(ErrorKind::Other, e.to_string()),
         }
     }
 
@@ -531,6 +600,47 @@ impl Call {
 }
 
 /// A room's security as saved (a fresh one if unreadable).
+/// The library of `call` for a track `device` (the connection's verified
+/// device) delivers, if that device was in the call. Depends only on the
+/// call's folder, never on which call or room the device is in now. A call
+/// from before the device list counts a device named in its manifests.
+pub fn call_library(
+    rooms: &Rooms,
+    call: &CallRef,
+    device: &str,
+) -> Result<Library<FsStorage>, String> {
+    if !rooms.exists(&call.room) {
+        return Err(format!("no room named {}", call.room));
+    }
+    let room_dir = rooms.room_dir(&call.room);
+    let call_dir = room_dir.join(&call.call);
+    // Opening a library creates its folder: only for a call that exists.
+    if !rooms::is_call_id(&call.call) || rooms::read_meta(&call_dir).is_none() {
+        return Err(format!("no call {} in room {}", call.call, call.room));
+    }
+    let root = FsStorage::new(&room_dir).map_err(|e| format!("room folder: {e}"))?;
+    let mut lib = Library::open(&root, &call.call, SyncConfig::default())
+        .map_err(|e| format!("open call {}: {e}", call.call))?;
+    if lib.was_in(device).map_err(|e| e.to_string())? {
+        return Ok(lib);
+    }
+    let mut takes: Vec<TakeId> = rooms::take_numbers(&call_dir)
+        .into_iter()
+        .map(TakeId)
+        .collect();
+    if call_dir.join("logs").is_dir() {
+        takes.push(TakeId(0));
+    }
+    if lib
+        .in_manifests(device, &takes)
+        .map_err(|e| e.to_string())?
+    {
+        lib.admit(device).map_err(|e| e.to_string())?;
+        return Ok(lib);
+    }
+    Err(format!("this device was not in call {}", call.call))
+}
+
 fn read_room(dir: &Path) -> Room {
     std::fs::read_to_string(dir.join("room.json"))
         .ok()

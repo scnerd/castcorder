@@ -549,7 +549,7 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 ui.tracks_json.set(stringify(&arr));
             }
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
-            "outbox" => offer_tracks(&get(&d, "offers")),
+            "outbox" => offer_tracks(&d),
             "xfer-out" => send_frames(&get(&d, "frames")),
             "xfer-progress" => ui.progress.set(
                 Array::from(&get(&d, "items"))
