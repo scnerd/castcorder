@@ -1,12 +1,16 @@
 //! The browser guest's outbox, in the storage worker: castcorder-core's
 //! [`GuestOutbox`] over OPFS sync access handles.
 //!
-//! - `outbox {call}`: after any crash repair (`list`), every finished track of
-//!   this call (`<track>.wav`, its `<track>.json` sidecar and its
-//!   `<track>.timing.jsonl` timing metadata, three outbox items)
-//!   is opened, hashed once (one OPFS read per MiB) and held open; the worker
-//!   answers `outbox {offers: [Uint8Array]}`, each a postcard `TrackOffer`. The
-//!   main thread offers them to the host on "control".
+//! - `outbox {call, legacy}`: after any crash repair (`list`), every finished
+//!   track of any call of this host (`<track>.wav`, its `<track>.json` sidecar
+//!   and its `<track>.timing.jsonl` timing metadata, three outbox items; the
+//!   sidecar's `call` is `<legacy>/<room>/<call>`, or `<legacy>` from before
+//!   rooms) is opened, hashed once (one OPFS read per MiB) and held open; the
+//!   worker answers `outbox {offers: [Uint8Array], rooms, calls}`, each offer a
+//!   postcard `TrackOffer` with the room and call it was recorded in (both
+//!   empty: this call, or from before rooms). The main thread offers them to
+//!   the host on "control": `OfferTrack`, or `OfferCallTrack` for another
+//!   call (the host accepts it if this device was in that call).
 //! - `xfer-in {bytes, room}`: one message from the host's "data" channel.
 //!   `xfer-pull {room}`: the channel has room. The worker answers
 //!   `xfer-out {frames: [ArrayBuffer]}` with at most about `room` bytes (at
@@ -50,6 +54,8 @@ thread_local! {
     static CALL: RefCell<String> = const { RefCell::new(String::new()) };
     /// The host's scope: tracks from before rooms carry it.
     static LEGACY: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Each outbox item's call scope (its sidecar's `call`), by item name.
+    static ITEM_CALL: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static PREPARE_AGAIN: Cell<bool> = const { Cell::new(false) };
     /// The transfer progress last posted to the page.
@@ -133,18 +139,20 @@ fn release(file: &str) {
     });
 }
 
-/// `outbox {call}`: hash and hold every finished track of this call, then post
-/// every offer the host has not confirmed.
+/// `outbox {call, legacy}`: hash and hold every finished track of any call of
+/// this host, then post every offer the host has not confirmed.
 pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
     let call = string(&msg, "call");
-    LEGACY.with(|l| *l.borrow_mut() = string(&msg, "legacy"));
+    let legacy = string(&msg, "legacy");
     if !call.is_empty() {
-        let changed = CALL.with(|c| c.replace(call.clone()) != call);
+        CALL.with(|c| *c.borrow_mut() = call);
+        let changed = LEGACY.with(|l| l.replace(legacy.clone()) != legacy);
         if changed && !is_busy() {
-            // Another call: only its tracks are offered from now on. What
+            // Another host: only its tracks are offered from now on. What
             // the outbox held for the last one stays in OPFS, offered again
-            // when that call is rejoined.
+            // when that host is reached.
             OUTBOX.with(|o| *o.borrow_mut() = None);
+            ITEM_CALL.with(|m| m.borrow_mut().clear());
             HANDLES.with(|m| {
                 for (_, h) in std::mem::take(&mut *m.borrow_mut()).into_values() {
                     h.close();
@@ -155,10 +163,52 @@ pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
     prepare_current().await
 }
 
-/// Whether a track's sidecar `call` belongs in this call's outbox: this
-/// call's, or one from before rooms of the same host (`legacy`).
-fn in_scope(meta_call: &str, call: &str) -> bool {
-    meta_call == call || (!meta_call.is_empty() && LEGACY.with(|l| *l.borrow() == meta_call))
+/// Whether a track's sidecar `call` belongs to this host: any of its calls
+/// (`<legacy>/<room>/<call>`), or from before rooms (`<legacy>`).
+fn in_scope(meta_call: &str) -> bool {
+    LEGACY.with(|l| {
+        let l = l.borrow();
+        !l.is_empty()
+            && (meta_call == l.as_str()
+                || meta_call
+                    .strip_prefix(l.as_str())
+                    .is_some_and(|rest| rest.starts_with('/')))
+    })
+}
+
+/// The room and call an item is offered for: empty for the call this device
+/// is in and for tracks from before rooms (`OfferTrack`), else the call of
+/// this host it was recorded in (`OfferCallTrack`).
+fn offer_call(scope: &str) -> (String, String) {
+    let (call, legacy) = (
+        CALL.with(|c| c.borrow().clone()),
+        LEGACY.with(|l| l.borrow().clone()),
+    );
+    if scope == call || legacy.is_empty() {
+        return Default::default();
+    }
+    let Some(rest) = scope
+        .strip_prefix(legacy.as_str())
+        .and_then(|r| r.strip_prefix('/'))
+    else {
+        return Default::default();
+    };
+    match rest.split_once('/') {
+        Some((room, call)) if !room.is_empty() && !call.is_empty() && !call.contains('/') => {
+            (room.to_string(), call.to_string())
+        }
+        _ => Default::default(),
+    }
+}
+
+/// Remember which call these outbox items were recorded in.
+fn tag(names: &[&str], scope: &str) {
+    ITEM_CALL.with(|m| {
+        let mut m = m.borrow_mut();
+        for n in names {
+            m.insert((*n).to_string(), scope.to_string());
+        }
+    });
 }
 
 /// Prepare for the call last named by `outbox` (none yet: do nothing). Runs
@@ -238,7 +288,8 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
         };
         let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
         let meta = JSON::parse(&text).unwrap_or_else(|_| object());
-        if !in_scope(&string(&meta, "call"), call) || !get(&meta, "finalised").is_truthy() {
+        let scope = string(&meta, "call");
+        if !in_scope(&scope) || !get(&meta, "finalised").is_truthy() {
             h.close();
             continue;
         }
@@ -289,6 +340,10 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             };
             (offer, OpfsFile::register(timing_name, t))
         });
+        tag(
+            &[track.as_str(), &sidecar.name, &format!("{track}-timing")],
+            &scope,
+        );
         let wav_file = OpfsFile::register(n.clone(), wav);
         let json_file = OpfsFile::register(json, h);
         let r = OUTBOX.with(|o| {
@@ -310,7 +365,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
     // number of passes.
     if !audio_busy || HOLDS.get() >= VIDEO_HOLDS {
         HOLDS.set(0);
-        add_video_tracks(&dir, call).await?;
+        add_video_tracks(&dir).await?;
     } else {
         HOLDS.set(HOLDS.get() + 1);
         info!(
@@ -320,17 +375,23 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
         prepare_later();
     }
     add_log_files().await?;
-    let offers = Array::new();
+    let (offers, rooms, calls) = (Array::new(), Array::new(), Array::new());
     OUTBOX.with(|o| {
         if let Some(o) = o.borrow().as_ref() {
             for offer in o.pending() {
+                let scope = ITEM_CALL.with(|m| m.borrow().get(&offer.name).cloned());
+                let (room, call) = offer_call(&scope.unwrap_or_default());
                 offers.push(&Uint8Array::from(&castcorder_protocol::encode(&offer)[..]));
+                rooms.push(&JsValue::from(room));
+                calls.push(&JsValue::from(call));
             }
         }
     });
     let out = object();
     set(&out, "type", "outbox");
     set(&out, "offers", offers);
+    set(&out, "rooms", rooms);
+    set(&out, "calls", calls);
     post(&out);
     Ok(())
 }
@@ -422,16 +483,13 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
     Ok(())
 }
 
-/// Add every finished video track of `call` not yet in the outbox: the
+/// Add every finished video track of this host not yet in the outbox: the
 /// `.webm`, its sidecar and its timing metadata, all `SourceKind::Video`
 /// (they sync after every audio track). A video track a crash left
 /// unfinalised is finalised here as it is (MediaRecorder WebM has
 /// unknown-size elements, so the written prefix is the track) and marked
 /// `recovered`; one being recorded here, or held by another tab, is skipped.
-async fn add_video_tracks(
-    dir: &web_sys::FileSystemDirectoryHandle,
-    call: &str,
-) -> Result<(), JsValue> {
+async fn add_video_tracks(dir: &web_sys::FileSystemDirectoryHandle) -> Result<(), JsValue> {
     let recording = crate::video::active_name();
     for n in entry_names(dir)
         .await?
@@ -476,7 +534,8 @@ async fn add_video_tracks(
         let timing = opened[2].clone();
         let text = String::from_utf8_lossy(&read_all(&h).unwrap_or_default()).to_string();
         let meta = JSON::parse(&text).unwrap_or_else(|_| object());
-        if !in_scope(&string(&meta, "call"), call) {
+        let scope = string(&meta, "call");
+        if !in_scope(&scope) {
             close_all(&opened);
             continue;
         }
@@ -514,6 +573,10 @@ async fn add_video_tracks(
             };
             (offer, OpfsFile::register(timing_name.clone(), t))
         });
+        tag(
+            &[track.as_str(), &sidecar.name, &format!("{track}-timing")],
+            &scope,
+        );
         let webm_file = OpfsFile::register(n.clone(), webm);
         let json_file = OpfsFile::register(json, h);
         let r = OUTBOX.with(|o| {
@@ -531,6 +594,24 @@ async fn add_video_tracks(
         }
     }
     Ok(())
+}
+
+/// The call of this host a log file's lines name first (`<legacy>/<room>/<call>`),
+/// or empty: offered into the call this device is in, as before rooms.
+fn log_call(text: &str) -> String {
+    const KEY: &str = "\"call\":\"";
+    let mut rest = text;
+    while let Some(i) = rest.find(KEY) {
+        rest = &rest[i + KEY.len()..];
+        let Some(end) = rest.find('"') else {
+            break;
+        };
+        let call = &rest[..end];
+        if in_scope(call) && LEGACY.with(|l| call != l.borrow().as_str()) {
+            return call.to_string();
+        }
+    }
+    String::new()
 }
 
 /// Add every closed log file not yet in the outbox (the current one may still
@@ -581,6 +662,10 @@ async fn add_log_files_locked(device: &str) -> Result<(), JsValue> {
             root: [0; 32],
             format: "jsonl".into(),
         };
+        // The call it was written in: its lines' `call` (each file holds
+        // one call's lines: the worker rotates when the call changes).
+        let scope = log_call(&String::from_utf8_lossy(&read_all(&h).unwrap_or_default()));
+        tag(&[stem.as_str()], &scope);
         let file = OpfsFile::register(n.clone(), h);
         let r = OUTBOX.with(|o| {
             let mut o = o.borrow_mut();

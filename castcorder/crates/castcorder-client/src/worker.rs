@@ -1501,9 +1501,23 @@ pub fn main() {
                 }
                 "log-context" => {
                     let ctx = crate::logging::context();
-                    ctx.set(castcorder_core::logging::CALL, &string(&msg, "call"));
+                    let call = string(&msg, "call");
+                    let before = castcorder_core::logging::LogContext::get(
+                        &ctx,
+                        castcorder_core::logging::CALL,
+                    )
+                    .unwrap_or_default();
+                    // Another call: close the log file, so each file holds
+                    // one call's lines and syncs into that call's folder.
+                    let rotate = !before.is_empty() && before != call;
+                    let r = if rotate {
+                        crate::logfiles::flush(true).await
+                    } else {
+                        Ok(())
+                    };
+                    ctx.set(castcorder_core::logging::CALL, &call);
                     ctx.set(castcorder_core::logging::DEVICE, &string(&msg, "device"));
-                    Ok(())
+                    r
                 }
                 "log-rotate" => match crate::logfiles::flush(true).await {
                     Ok(()) => crate::outbox::prepare_current().await,

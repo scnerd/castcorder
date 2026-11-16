@@ -810,8 +810,7 @@ impl Room {
             .collect()
     }
 
-    /// The device a connection presented.
-    #[cfg(test)]
+    /// The device a connection presented (verified).
     pub fn device_of(&self, conn: ConnId) -> Option<&str> {
         self.conns.get(&conn).map(|c| c.device.as_str())
     }

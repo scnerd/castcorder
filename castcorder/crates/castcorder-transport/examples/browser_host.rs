@@ -233,6 +233,11 @@ impl Call {
                         kind: ErrorKind::Other,
                         message: "no recording profile in this example".into(),
                     },
+                    // The example has one call.
+                    Request::OfferCallTrack { .. } => Response::Error {
+                        kind: ErrorKind::NotAllowed,
+                        message: "one call only in this example".into(),
+                    },
                     Request::DiskFree { .. } | Request::MicState { .. } | Request::SourceAck(_) => {
                         Response::Done
                     }

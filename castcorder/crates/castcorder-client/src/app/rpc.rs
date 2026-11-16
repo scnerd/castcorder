@@ -277,13 +277,19 @@ pub(super) fn pump_rpc(ui: Ui) {
                     level,
                 } => super::meters::mic(participant.0, muted, level),
                 Event::Call(c) => {
-                    // Tracks are kept per call from here on, and only this
-                    // call's are offered (with those from before rooms).
+                    // Tracks are kept per call from here on; the outbox
+                    // offers every call's, each for the call it was
+                    // recorded in.
                     let scope = format!("{}/{}/{}", e.ctx.host_scope, c.room, c.call);
                     if e.ctx.call != scope {
                         info!(call = %scope, device = %ctx.device, room = %c.room, "in call {}", c.call);
                         e.ctx.call = scope;
                         crate::logging::context().set(castcorder_core::logging::CALL, &e.ctx.call);
+                        // The worker's lines too; it starts a new log file.
+                        let msg = worker_cmd("log-context");
+                        set(&msg, "call", e.ctx.call.as_str());
+                        set(&msg, "device", e.ctx.device.as_str());
+                        samples.push(msg);
                     }
                     ui.call_ref.set(Some(c));
                 }
