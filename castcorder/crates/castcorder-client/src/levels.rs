@@ -25,10 +25,22 @@ pub const SPEAKING_HOLD_MS: f64 = 400.0;
 /// reporting: it left, or lost its connection).
 pub const MIC_REPORT_TTL_MS: f64 = 1500.0;
 
-/// Where a linear level sits on the waveform's scale, 0.0 (-60 dBFS or less)
-/// to 1.0 (full scale).
+/// The quietest level the waveforms show (dBFS); anything below is flat.
+pub const FLOOR_DB: f64 = -60.0;
+
+/// A linear level in dBFS (`FLOOR_DB` for silence and NaN, never lower).
+pub fn to_dbfs(level: f64) -> f64 {
+    if level.is_nan() {
+        return FLOOR_DB;
+    }
+    (level.max(1e-6).log10() * 20.0).max(FLOOR_DB)
+}
+
+/// Where a linear level sits on the waveform's scale, 0.0 ([`FLOOR_DB`] or
+/// less) to 1.0 (full scale), linear in dB so equal dB steps look equal. The
+/// dock waveform and the remote tiles both use it.
 pub fn norm_db(level: f64) -> f64 {
-    ((level.max(1e-5).log10() * 20.0 + 60.0) / 60.0).clamp(0.0, 1.0)
+    ((to_dbfs(level) - FLOOR_DB) / -FLOOR_DB).clamp(0.0, 1.0)
 }
 
 /// The peak absolute value of `samples` (0.0 for none; NaN counts as 0).
@@ -141,6 +153,26 @@ mod tests {
         assert!((norm_db(0.01) - 1.0 / 3.0).abs() < 1e-9);
         assert!((norm_db(1.0) - 1.0).abs() < 1e-9);
         assert_eq!(norm_db(4.0), 1.0);
+    }
+
+    #[test]
+    fn equal_db_steps_are_equal_bar_steps() {
+        let db = |d: f64| 10f64.powf(d / 20.0);
+        // Room noise vs gentle speech, 15 dB apart: a clear quarter of the bar.
+        let gap = norm_db(db(-30.0)) - norm_db(db(-45.0));
+        assert!((gap - 0.25).abs() < 1e-9, "{gap}");
+        let gap2 = norm_db(db(-10.0)) - norm_db(db(-25.0));
+        assert!((gap - gap2).abs() < 1e-9);
+        assert!((to_dbfs(db(-20.0)) + 20.0).abs() < 1e-9);
+        assert_eq!(to_dbfs(f64::NAN), FLOOR_DB);
+        assert_eq!(to_dbfs(0.0), FLOOR_DB);
+        assert_eq!(norm_db(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn speaking_thresholds_sit_at_sensible_dbfs() {
+        assert!((to_dbfs(SPEAKING_ON) + 36.0).abs() < 0.1);
+        assert!((to_dbfs(SPEAKING_OFF) + 46.0).abs() < 0.1);
     }
 
     #[test]

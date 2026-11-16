@@ -366,7 +366,7 @@ fn Call(ui: Ui) -> impl IntoView {
             let pad = WAVE_LEN.saturating_sub(v.len());
             if i < pad { 0.0 } else { v[i - pad] }
         });
-        let norm = ((p.max(1e-5).log10() * 20.0 + 60.0) / 60.0).clamp(0.0, 1.0);
+        let norm = crate::levels::norm_db(p);
         format!("height: {}px", (2.0 + norm * 22.0).round())
     };
     let wave_caption = move || match (local_rec(), ui.muted.get()) {
