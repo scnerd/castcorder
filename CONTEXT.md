@@ -47,7 +47,7 @@ A persistent recording container in a room: every take and track of one recordin
 _Avoid_: Session, meeting, episode
 
 **Call Link**:
-The URL a host shares so guests can join a room. It stays the same for every call in the room until a producer at the host regenerates it.
+The URL a host shares so guests can join a room. It stays the same for every call in the room until a producer regenerates it.
 _Avoid_: Invite, join URL, room link
 
 **Take**:
