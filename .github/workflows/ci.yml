@@ -115,6 +115,42 @@ jobs:
           WEBKIT_DISABLE_DMABUF_RENDERER: "1"
         run: xvfb-run -a task app:check
 
+  # The native-capture feature (GStreamer): castcorder-capture-gst, and the host and app
+  # built with it, which no other job compiles.
+  gst:
+    name: gst
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain
+        run: rustup show active-toolchain
+
+      - name: Install GStreamer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-dev             libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base             gstreamer1.0-plugins-good gstreamer1.0-pulseaudio
+          pkg-config --modversion gstreamer-1.0
+
+      # No sound server on purpose: the real-microphone tests skip themselves without an
+      # input device. A pulseaudio null sink gives them a device whose first frame lags
+      # the take start by ~700 ms, failing the host's 200 ms timing assertion.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: gst
+
+      - name: Clippy and tests with native capture
+        run: task test:gst
+
   # Tier 4: Playwright against headless Chromium and Firefox. No Docker: the host, the
   # transport example and the client build all run as plain processes on the runner.
   browser:
