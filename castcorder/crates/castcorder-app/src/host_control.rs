@@ -87,6 +87,16 @@ impl HostControl {
         }
     }
 
+    /// Mute (true) or unmute the native microphone in the call (call-only:
+    /// its track keeps recording). False if it is not in the call.
+    pub fn mute_native(&self, muted: bool) -> bool {
+        self.running
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref().map(|r| r.mute_native(muted)))
+            .unwrap_or(false)
+    }
+
     /// The inputs the host can join with and whether it is joined, if running.
     pub fn native_state(&self) -> Option<NativeState> {
         self.running

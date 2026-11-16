@@ -69,6 +69,8 @@ pub struct NativeState {
     pub devices: Vec<NativeDevice>,
     /// Why the inputs could not be listed, if they could not.
     pub error: Option<String>,
+    /// Muted in the call (the live stream only; its track keeps recording).
+    pub muted: bool,
 }
 
 /// What every join of the host's participant records with.
@@ -102,6 +104,8 @@ pub(crate) struct NativeCtl {
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     base: NativeBase,
     joined: Mutex<Option<Joined>>,
+    /// Muted in the call (call-only: the live stream; the track records).
+    muted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NativeCtl {
@@ -115,6 +119,7 @@ impl NativeCtl {
             takes,
             base,
             joined: Mutex::new(None),
+            muted: Default::default(),
         }
     }
 
@@ -153,6 +158,9 @@ impl NativeCtl {
             if joined.is_some() {
                 return Err("the host microphone is already in the call".into());
             }
+            // Every join starts unmuted.
+            self.muted
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let label = input.label();
             let (participant, prepared) = crate::native::prepare(crate::native::Config {
                 input,
@@ -161,6 +169,7 @@ impl NativeCtl {
                 timeline: self.base.timeline.clone(),
                 device_id: self.base.device_id.clone(),
                 keep_wav: self.base.keep_wav,
+                muted: self.muted.clone(),
             });
             let takes = participant.takes.clone();
             let tx = self.tx.lock().map_err(|_| "host lock poisoned")?.clone();
@@ -224,6 +233,19 @@ impl NativeCtl {
         Ok(true)
     }
 
+    /// Mute (true) or unmute the native microphone in the call: the live
+    /// stream goes silent, its track keeps recording, and everyone sees it
+    /// muted with its level moving. False if it is not in the call.
+    pub fn set_muted(&self, muted: bool) -> bool {
+        let joined = self.joined.lock().is_ok_and(|j| j.is_some());
+        if joined {
+            self.muted
+                .store(muted, std::sync::atomic::Ordering::Relaxed);
+            info!(muted, "host microphone mute");
+        }
+        joined
+    }
+
     /// Whether it can join, with what, and whether it is joined.
     pub fn state(&self) -> NativeState {
         let joined = self
@@ -232,11 +254,13 @@ impl NativeCtl {
             .ok()
             .and_then(|j| j.as_ref().map(|j| j.label.clone()));
         let (devices, error) = list_devices();
+        let joined_now = joined.is_some();
         NativeState {
             available: crate::NATIVE_CAPTURE,
             joined,
             devices,
             error,
+            muted: joined_now && self.muted.load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 }

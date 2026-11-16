@@ -318,6 +318,13 @@ impl Running {
         self.native.leave()
     }
 
+    /// Mute (true) or unmute the native microphone in the call: only the
+    /// live stream goes silent; its track keeps recording. False if it is
+    /// not in the call.
+    pub fn mute_native(&self, muted: bool) -> bool {
+        self.native.set_muted(muted)
+    }
+
     /// Whether this host can join natively, with which inputs, and whether
     /// it is joined.
     pub fn native_state(&self) -> NativeState {

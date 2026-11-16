@@ -198,6 +198,15 @@ pub enum Command {
         /// What to wait for, or "not in the call".
         reply: mpsc::Sender<Result<Option<mpsc::Receiver<Vec<String>>>, String>>,
     },
+    /// The host's own participant's microphone (mute is call-only): relayed
+    /// to everyone in the call as `Event::MicState`, like a browser guest's.
+    #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
+    NativeMic {
+        /// Muted in the call.
+        muted: bool,
+        /// Peak of the raw microphone, 0 to 255.
+        level: u8,
+    },
     /// One Opus frame of the host's own participant.
     #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
     LocalAudio {
@@ -1592,6 +1601,20 @@ impl Call {
                 }
             }
             Command::NativeSource { state } => self.native_source(state),
+            Command::NativeMic { muted, level } => {
+                if let Some(local) = &self.local {
+                    let event = Event::MicState {
+                        participant: ParticipantId(local.id().0),
+                        muted,
+                        level,
+                    };
+                    for (id, rpc) in &mut self.rpc {
+                        if self.names.contains_key(id) && rpc.emit(event.clone()).is_err() {
+                            warn!(guest = id.0, "microphone state not sent: channel closed");
+                        }
+                    }
+                }
+            }
         }
     }
 }

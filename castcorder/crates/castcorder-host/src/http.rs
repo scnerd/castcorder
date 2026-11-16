@@ -483,14 +483,14 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             None => gone(),
         },
         ("GET", "/native" | "/rooms")
-        | ("POST", "/native/join" | "/native/leave" | "/rooms" | "/rooms/link" | "/rooms/call")
-            if !native_allowed(req, producer) =>
-        {
-            text(
-                403,
-                "the native microphone and the rooms are only available to the host machine's own page",
-            )
-        }
+        | (
+            "POST",
+            "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
+            | "/rooms/call",
+        ) if !native_allowed(req, producer) => text(
+            403,
+            "the native microphone and the rooms are only available to the host machine's own page",
+        ),
         ("POST", "/folder/open") if !native_allowed(req, producer) => text(
             403,
             "the recordings folder opens only from the host machine's own page",
@@ -576,6 +576,19 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                     serde_json::to_string(&app.native.state()).unwrap_or_default(),
                 ),
                 Err(e) => text(409, e),
+            }
+        }
+        ("POST", "/native/mute") => {
+            let muted = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|v| v["muted"].as_bool());
+            match muted {
+                None => text(400, "send {\"muted\": true or false}"),
+                Some(m) if app.native.set_muted(m) => json(
+                    200,
+                    serde_json::to_string(&app.native.state()).unwrap_or_default(),
+                ),
+                Some(_) => text(409, "the host microphone is not in the call"),
             }
         }
         ("POST", "/native/leave") => match app.native.leave() {

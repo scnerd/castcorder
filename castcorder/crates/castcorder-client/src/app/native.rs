@@ -16,6 +16,8 @@ struct NativeView {
     /// Display name and whether it is the default input.
     devices: Vec<(String, bool)>,
     error: String,
+    /// Muted in the call (call-only: the host keeps recording it).
+    muted: bool,
 }
 
 fn parse(v: &JsValue) -> NativeView {
@@ -32,6 +34,7 @@ fn parse(v: &JsValue) -> NativeView {
         joined: get(v, "joined").as_string(),
         devices,
         error: string(v, "error"),
+        muted: get(v, "muted").is_truthy(),
     }
 }
 
@@ -122,6 +125,15 @@ pub(super) fn NativeMic(
             busy.set(false);
         });
     };
+    let mute = move |muted: bool| {
+        spawn_local(async move {
+            let body = serde_json::json!({ "muted": muted }).to_string();
+            match native_request("POST", "/native/mute", Some(body)).await {
+                Ok(s) => state.set(s),
+                Err(e) => message.set(e),
+            }
+        });
+    };
     view! {
         <Show when=move || state.get().available>
             <div class="native">
@@ -140,6 +152,12 @@ pub(super) fn NativeMic(
                     "Join with this microphone"</button>
                 <button id="native-leave" class="btn outline" disabled=move || !joined() || busy.get() on:click=move |_| act(false)>
                     "Leave"</button>
+                // Call-only, as in the dock: the track keeps recording.
+                <button id="native-mute" class="btn"
+                    aria-pressed=move || if state.get().muted { "true" } else { "false" }
+                    title="Mute in the call only: the host keeps recording this microphone"
+                    disabled=move || !joined() || busy.get() on:click=move |_| mute(!state.get_untracked().muted)>
+                    {move || if state.get().muted { "Unmute" } else { "Mute" }}</button>
             </div>
             <span class="small muted"><span id="native-state">{move || match state.get().joined {
                     Some(j) => format!("in the call with {j}"),

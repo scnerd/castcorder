@@ -77,6 +77,8 @@ pub struct Config {
     pub device_id: String,
     /// Keep each WAV after its FLAC is verified (`--keep-wav`, default on).
     pub keep_wav: bool,
+    /// Muted in the call (the live stream only; the track keeps recording).
+    pub muted: Arc<AtomicBool>,
 }
 
 /// A participant about to join: playback runs (a device input only), the
@@ -552,10 +554,15 @@ fn run(
         );
         let stop = Arc::new(AtomicBool::new(false));
         let live_thread = {
-            let (stop, commands, rtp_next) = (stop.clone(), commands.clone(), rtp_next.clone());
+            let (stop, commands, rtp_next, muted) = (
+                stop.clone(),
+                commands.clone(),
+                rtp_next.clone(),
+                cfg.muted.clone(),
+            );
             thread::Builder::new()
                 .name("participant-live".into())
-                .spawn(move || live_loop(live, &stop, &commands, &rtp_next))
+                .spawn(move || live_loop(live, &stop, &commands, &rtp_next, &muted))
                 .ok()
         };
         let quit = 'capture: loop {
@@ -629,17 +636,43 @@ fn run(
     }
 }
 
+/// How often a muted microphone reports its raw level (as browser guests do).
+const MIC_EVERY: Duration = Duration::from_millis(100);
+
 /// Pull the live branch and hand its frames to the host thread, with RTP time
-/// continuing after the previous capture's last frame.
+/// continuing after the previous capture's last frame. Mute (call-only)
+/// silences the live branch's encoder; while muted the raw level is reported
+/// ten times a second, and every change once (`Command::NativeMic`).
 fn live_loop(
     mut live: LiveOpus,
     stop: &AtomicBool,
     commands: &mpsc::Sender<Command>,
     rtp_next: &AtomicU64,
+    muted: &AtomicBool,
 ) {
     let base = rtp_next.load(Ordering::Relaxed);
     let mut first = None;
+    let mut applied = None;
+    let mut next_report = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) && !live.is_eos() {
+        let m = muted.load(Ordering::Relaxed);
+        let now = std::time::Instant::now();
+        let changed = applied != Some(m);
+        if changed {
+            live.set_muted(m);
+            applied = Some(m);
+            info!(muted = m, "host microphone live stream");
+        }
+        if changed || (m && now >= next_report) {
+            next_report = now + MIC_EVERY;
+            let level = live.raw_level();
+            if commands
+                .send(Command::NativeMic { muted: m, level })
+                .is_err()
+            {
+                return;
+            }
+        }
         let Some(p) = live.next_packet(Duration::from_millis(50)) else {
             continue;
         };
@@ -697,6 +730,7 @@ mod tests {
             timeline: timeline.clone(),
             device_id: "host-test".into(),
             keep_wav: true,
+            muted: Default::default(),
         };
         let rec = thread::spawn(move || run(cfg, take_rx, cmd_tx, None));
         // The first Opus frame means the capture is open.
