@@ -39,11 +39,11 @@ _Avoid_: Web guest, web client
 ### Calls and recordings
 
 **Room**:
-A persistent place owned by a host and reachable through one call link, such as a recurring show. It exists from the moment it is created, whether or not anyone is in it, and it keeps its settings, trusted devices, producers and bans across calls. A one-off recording is a room that is never reused.
+A call factory owned by a host and reachable through one call link, such as a recurring show. Joining a room puts you in its current call: the active or recently active one, or a new call if the last one has been idle for a while. It keeps its settings, trusted devices, producers and bans across calls.
 _Avoid_: Channel, space, project
 
 **Call**:
-One sitting in a room: it begins when someone joins the room after it has been empty for a while (or when a producer starts a new call from the lobby) and it is the container for every take and track recorded then. A guest who drops and rejoins stays in the same call.
+A persistent recording container in a room: every take and track of one recording effort, saved together in one folder. A call can be rejoined at any time, even days later, so a call where everyone dropped carries on where it left off. A room starts a new call only after its current one has been idle for a while, or when a producer starts or continues a particular call from the lobby.
 _Avoid_: Session, meeting, episode
 
 **Call Link**:
