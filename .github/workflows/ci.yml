@@ -13,6 +13,10 @@ concurrency:
 permissions:
   contents: read
 
+# Tests that would skip themselves (no audio device, no LAN address) fail instead.
+env:
+  CASTCORDER_CI: 1
+
 jobs:
   hygiene:
     name: hygiene

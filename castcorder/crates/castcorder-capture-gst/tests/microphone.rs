@@ -1,5 +1,5 @@
 //! Real hardware: enumerate inputs and capture about a second from the default one.
-//! Skips (with a message) when there is no input device. Asserts nothing about audio
+//! Skips (with a message) when there is no input device, unless CASTCORDER_CI is set, which makes the skip a failure. Asserts nothing about audio
 //! content.
 
 use std::time::{Duration, Instant};
@@ -17,12 +17,20 @@ fn default_microphone_delivers_about_one_second() {
         );
     }
     if devices.is_empty() {
+        assert!(
+            std::env::var_os("CASTCORDER_CI").is_none(),
+            "CASTCORDER_CI is set but this machine has no audio input device (CI must provide one, e.g. a pulseaudio null sink)"
+        );
         println!("SKIP: no audio input device on this machine");
         return;
     }
     let mut source = match GstCapture::open_device(None, Watchdog::default()) {
         Ok(s) => s,
         Err(e) => {
+            assert!(
+                std::env::var_os("CASTCORDER_CI").is_none(),
+                "CASTCORDER_CI is set but the default input could not be opened: {e}"
+            );
             println!("SKIP: default input could not be opened: {e}");
             return;
         }
