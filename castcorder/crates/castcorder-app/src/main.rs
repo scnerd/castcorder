@@ -198,7 +198,7 @@ fn setup(app: &AppHandle, args: &AppArgs) {
     let shell = app.state::<Shell>();
     let url = match shell.host.start() {
         Ok(status) => {
-            tracing::info!(call = %status.call, producer = %status.producer_url, "app host running");
+            tracing::info!(room = %status.room, producer = %status.producer_url, "app host running");
             println!(
                 "HOST_READY http={}",
                 status.producer_url.trim_end_matches('/')

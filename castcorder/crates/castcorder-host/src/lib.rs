@@ -1,4 +1,4 @@
-//! The host as a library: [`start`] runs a host for one call in this process
+//! The host as a library: [`start`] runs a host for many rooms (one live call at a time) in this process
 //! and [`Running::stop`] ends it. The `castcorder-host` binary (its flags map
 //! onto [`Config`]; see its docs) and the desktop app (castcorder-app) both
 //! run the host through it.
@@ -7,7 +7,8 @@
 //! a self-signed certificate and over plain HTTP on localhost for the host
 //! machine's own browser (the producer page), forwards the call through
 //! castcorder-transport on one UDP port, and pulls guests' tracks and logs
-//! into the library: `<library>/<call>/takeNN/...` and `<library>/<call>/logs/...`.
+//! into the library: `<library>/<room>/<call>/takeNN/...` and
+//! `<library>/<room>/<call>/logs/...` (crate::rooms).
 
 mod args;
 mod call;
@@ -19,6 +20,7 @@ mod participant;
 mod recorders;
 mod rendezvous;
 mod room;
+mod rooms;
 mod tls;
 mod tracks;
 
@@ -29,9 +31,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use castcorder_core::library::Library;
 use castcorder_core::logging::utc_compact;
-use castcorder_core::sync::SyncConfig;
 use castcorder_port_clock::SystemClock;
 use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
@@ -43,10 +43,18 @@ use castcorder_transport::{Host, HostConfig};
 pub struct Config {
     /// The client build (trunk output) the host serves; must hold `index.html`.
     pub dist: PathBuf,
-    /// The library: one directory per call.
+    /// The library: one folder per room, one per call in it.
     pub library: PathBuf,
-    /// The call's name (its directory in the library).
-    pub call: String,
+    /// The default room (`--room`; `--call` before rooms): made if missing;
+    /// its link is printed and LAN pages without a room join it. Empty: the
+    /// most recently active room, or a new one named `my-show`.
+    pub room: String,
+    /// How long a room's last call stays the one joiners land in after
+    /// everyone left (`--idle-gap` minutes; default two hours).
+    pub idle_gap: Duration,
+    /// What "now" is for routing joiners to calls (`None`: the system
+    /// clock). Tests drive it through the clock port.
+    pub clock: Option<RoutingClock>,
     /// The address every listener and the UDP socket bind to.
     pub bind: IpAddr,
     /// The HTTPS (LAN guests) port; 0 lets the OS pick.
@@ -92,7 +100,9 @@ impl Config {
         Config {
             dist: dist.into(),
             library: default_library(),
-            call: format!("call-{}", utc_compact(wall_ms())),
+            room: String::new(),
+            idle_gap: rooms::DEFAULT_IDLE_GAP,
+            clock: None,
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             https_port: 27800,
             http_port: 27801,
@@ -216,19 +226,18 @@ fn primary_ipv4() -> Option<IpAddr> {
     }
 }
 
-/// The take numbers already in the call's directory, ascending: the last one
-/// is where a restarted host continues (it never reuses one), and each is
-/// scanned for host microphone tracks to recover.
-fn take_numbers(call_dir: &Path) -> Vec<u32> {
-    let mut v: Vec<u32> = std::fs::read_dir(call_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str()?.strip_prefix("take")?.parse().ok())
-        .collect();
-    v.sort_unstable();
-    v
+/// What "now" is for routing joiners to calls ([`Config::clock`]).
+#[derive(Clone)]
+pub struct RoutingClock(pub Arc<dyn castcorder_port_clock::Clock>);
+
+impl std::fmt::Debug for RoutingClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RoutingClock")
+    }
 }
+
+/// One room of a running host and its calls, for the host machine's home.
+pub use call::{CallView, RoomView};
 
 /// Finishes what a running host is writing: an in-progress take of the host
 /// microphone (WAV, timing, manifest, FLAC) and the safety tracks. What is not
@@ -274,13 +283,13 @@ impl Finisher {
 
 /// A host running in this process, from [`start`] until [`Running::stop`].
 pub struct Running {
-    call: String,
-    call_dir: PathBuf,
+    room: String,
+    library: PathBuf,
     host_id: String,
     http: SocketAddr,
     links: Vec<String>,
     udp: SocketAddr,
-    call_link: Arc<Mutex<Option<String>>>,
+    call_links: rendezvous::Links,
     finisher: Finisher,
     native: Arc<participant::NativeCtl>,
     stop: Arc<AtomicBool>,
@@ -289,10 +298,17 @@ pub struct Running {
 
 impl Running {
     /// Join the call as the person at the host with `input`, captured
-    /// natively (a build with `native-capture`). A take recording now is
-    /// recorded from the join on. Errors are a sentence for that person.
+    /// natively (a build with `native-capture`): the live room's call, else
+    /// the default room's current call. A take recording now is recorded
+    /// from the join on. Errors are a sentence for that person.
     pub fn join_native(&self, input: NativeInput) -> Result<(), String> {
         self.native.join(input)
+    }
+
+    /// [`Running::join_native`] into a room's current call (it becomes the
+    /// live call; fails while another room's call is live).
+    pub fn join_native_room(&self, input: NativeInput, room: &str) -> Result<(), String> {
+        self.native.join_room(input, Some(room.to_string()))
     }
 
     /// Leave the call with the native input: the take recording now gets its
@@ -308,14 +324,31 @@ impl Running {
         self.native.state()
     }
 
-    /// The call's name.
-    pub fn call(&self) -> &str {
-        &self.call
+    /// The default room's name (`--room`).
+    pub fn room(&self) -> &str {
+        &self.room
     }
 
-    /// The call's directory in the library.
-    pub fn call_dir(&self) -> &Path {
-        &self.call_dir
+    /// The library folder.
+    pub fn library(&self) -> &Path {
+        &self.library
+    }
+
+    /// The open call (room, call id and folder), if a call is open.
+    pub fn current_call(&self) -> Option<(String, String, PathBuf)> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::Current { reply })
+            .ok()?;
+        rx.recv_timeout(Duration::from_secs(2)).ok()?
+    }
+
+    /// The open call's folder, else the default room's folder.
+    pub fn call_dir(&self) -> PathBuf {
+        self.current_call()
+            .map(|(_, _, dir)| dir)
+            .unwrap_or_else(|| self.library.join(&self.room))
     }
 
     /// The host id (base64url) that device key proofs are signed for.
@@ -333,7 +366,7 @@ impl Running {
         format!("http://localhost:{}/", self.http.port())
     }
 
-    /// The LAN join links (`https://<ip>:<port>/`).
+    /// The LAN join links (`https://<ip>:<port>/`, the default room).
     pub fn lan_links(&self) -> &[String] {
         &self.links
     }
@@ -343,9 +376,63 @@ impl Running {
         self.udp
     }
 
-    /// The call link for guests anywhere, once registered with the rendezvous.
+    /// The call link of the open call's room (else the default room's) for
+    /// guests anywhere, once registered with the rendezvous.
     pub fn call_link(&self) -> Option<String> {
-        self.call_link.lock().ok().and_then(|l| l.clone())
+        let room = self
+            .current_call()
+            .map(|(room, _, _)| room)
+            .unwrap_or_else(|| self.room.clone());
+        self.call_links.link(&room)
+    }
+
+    /// A room's call link, once registered with the rendezvous.
+    pub fn room_link(&self, room: &str) -> Option<String> {
+        self.call_links.link(room)
+    }
+
+    /// Every room with its link and calls.
+    pub fn rooms(&self) -> Vec<RoomView> {
+        let (reply, rx) = mpsc::channel();
+        if self
+            .finisher
+            .tx
+            .send(call::Command::Rooms { reply })
+            .is_err()
+        {
+            return vec![];
+        }
+        rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
+    }
+
+    /// Make an empty room; its name as made.
+    pub fn create_room(&self, name: &str) -> Result<String, String> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::CreateRoom {
+                name: name.to_string(),
+                reply,
+            })
+            .map_err(|_| "the host is stopping")?;
+        rx.recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "the host did not answer")?
+    }
+
+    /// Pick the call a room's joiners land in: a past call or (`None`) a new
+    /// one; everyone in the call moves when the room is live. The call's id.
+    pub fn choose_call(&self, room: &str, call: Option<&str>) -> Result<String, String> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::ChooseCall {
+                room: room.to_string(),
+                call: call.map(str::to_string),
+                reply,
+            })
+            .map_err(|_| "the host is stopping")?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the host did not answer")?
     }
 
     /// The live status (guests, recording take, syncing outboxes), asked of
@@ -356,21 +443,26 @@ impl Running {
         rx.recv_timeout(Duration::from_secs(2)).ok()
     }
 
-    /// Rotate the call secret: the old call link stops admitting anyone (guests
-    /// in the call stay). The new link, if reachable through a rendezvous.
+    /// Rotate the call secret of the live room (else the default room): the
+    /// old call link stops admitting anyone (guests in the call stay). The new
+    /// link, if reachable through a rendezvous.
     pub fn regenerate_link(&self) -> Result<Option<String>, String> {
+        self.regenerate(None)
+    }
+
+    /// Rotate one room's call secret ([`Running::regenerate_link`]).
+    pub fn regenerate_room_link(&self, room: &str) -> Result<Option<String>, String> {
+        self.regenerate(Some(room.to_string()))
+    }
+
+    fn regenerate(&self, room: Option<String>) -> Result<Option<String>, String> {
         let (reply, rx) = mpsc::channel();
         self.finisher
             .tx
-            .send(call::Command::RegenerateLink { reply })
+            .send(call::Command::RegenerateLink { room, reply })
             .map_err(|_| "the host is stopping")?;
-        let link = rx
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| "the host did not answer")??;
-        if let (Some(l), Ok(mut slot)) = (&link, self.call_link.lock()) {
-            *slot = Some(l.clone());
-        }
-        Ok(link)
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the host did not answer")?
     }
 
     /// What finishes the host's open files (for a Ctrl+C handler).
@@ -391,13 +483,38 @@ impl Running {
         for t in self.threads {
             let _ = t.join();
         }
-        tracing::info!(call = %self.call, "host stopped");
+        tracing::info!(room = %self.room, "host stopped");
     }
 }
 
-/// Start a host for `config`'s call in this process. `on_link` runs once,
-/// with the call link, after the first registration with the rendezvous (it
-/// never runs without one). Errors are a sentence for the person starting it.
+/// The default room: `--room` if given (made if missing), else the most
+/// recently active room, else a new room named `my-show`.
+fn default_room(library: &Path, asked: &str) -> Result<String, String> {
+    if !asked.is_empty() {
+        let slug = rooms::room_slug(asked);
+        if slug.is_empty() || slug == rooms::LOGS {
+            return Err(format!("--room {asked}: a room needs letters or digits"));
+        }
+        return Ok(slug);
+    }
+    let recent = rooms::list_rooms(library)
+        .into_iter()
+        .map(|r| {
+            let last = rooms::list_calls(&library.join(&r))
+                .iter()
+                .map(|c| c.meta.last_active_ms)
+                .max()
+                .unwrap_or(0);
+            (last, r)
+        })
+        .max();
+    Ok(recent.map(|(_, r)| r).unwrap_or_else(|| "my-show".into()))
+}
+
+/// Start a host with `config`'s rooms in this process. `on_link` runs once,
+/// with the default room's call link, after the first registration with the
+/// rendezvous (it never runs without one). Errors are a sentence for the
+/// person starting it.
 pub fn start(
     config: Config,
     on_link: impl FnOnce(&str) + Send + 'static,
@@ -419,14 +536,19 @@ pub fn start(
     }
     std::fs::create_dir_all(&args.library)
         .map_err(|e| format!("cannot create library {}: {e}", args.library.display()))?;
-    let root = FsStorage::new(&args.library).map_err(|e| format!("library directory: {e}"))?;
-    let mut library = Library::open(&root, &args.call, SyncConfig::default())
-        .map_err(|e| format!("open library: {e}"))?;
-    let call_name = library.call().to_string();
-    let call_dir = args.library.join(&call_name);
     if args.log {
-        init_logging(&args.library, &call_name);
+        init_logging(&args.library);
     }
+    let clock: Arc<dyn castcorder_port_clock::Clock> = match &args.clock {
+        Some(c) => c.0.clone(),
+        None => Arc::new(SystemClock::new()),
+    };
+    // Folders from before rooms (one call each) become rooms with that call.
+    rooms::migrate_library(&args.library, clock.wall().as_millis() as u64);
+    let room_name = default_room(&args.library, &args.room)?;
+    let room_dir = args.library.join(&room_name);
+    std::fs::create_dir_all(&room_dir)
+        .map_err(|e| format!("cannot create room {}: {e}", room_dir.display()))?;
     // The host's own device id: its microphone tracks are items of its own
     // device in the take manifests, like a guest's.
     let host_key = rendezvous::host_key(&args.library).map_err(|e| format!("host key: {e}"))?;
@@ -434,9 +556,6 @@ pub fn start(
     // a rendezvous (LAN pages read it from `GET /role`).
     let host_id = host_key.id().encode();
     let host_device = format!("host-{}", host_key.id());
-    // A take the host never finalised (Ctrl+C, a crash) is recovered first.
-    let takes = take_numbers(&call_dir);
-    let recovered = local::recover_takes(&mut library, &takes, &host_device, args.keep_wav);
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
@@ -466,25 +585,42 @@ pub fn start(
     let local = TcpListener::bind((Ipv4Addr::LOCALHOST, args.http_port))
         .map_err(|e| format!("cannot bind HTTP port {}: {e}", args.http_port))?;
     let http = local.local_addr().map_err(|e| e.to_string())?;
-    let secret: rendezvous::SharedSecret = Arc::new(Mutex::new(
-        rendezvous::call_secret(&call_dir).map_err(|e| format!("call secret: {e}"))?,
-    ));
-    // Room security: devices and settings persist in <call>/room.json.
-    let mut room = match std::fs::read_to_string(call_dir.join("room.json")) {
+    // Every room's call secret: the rendezvous thread picks an offer's room
+    // by the secret it carries.
+    let mut secrets = rendezvous::Secrets {
+        default: room_name.clone(),
+        ..Default::default()
+    };
+    for r in rooms::list_rooms(&args.library) {
+        match rendezvous::call_secret(&args.library.join(&r)) {
+            Ok(s) => {
+                secrets.rooms.insert(r, s);
+            }
+            Err(e) => {
+                tracing::warn!(room = %r, error = %e, "room has no readable call secret; its link does not work")
+            }
+        }
+    }
+    if !secrets.rooms.contains_key(&room_name) {
+        return Err(format!("room {room_name}: no call secret"));
+    }
+    let secrets: rendezvous::SharedSecrets = Arc::new(Mutex::new(secrets));
+    // Room security: devices and settings persist in <room>/room.json.
+    let mut room = match std::fs::read_to_string(room_dir.join("room.json")) {
         Ok(text) => room::Room::from_json(&text)
-            .map_err(|e| format!("{}: {e}", call_dir.join("room.json").display()))?,
+            .map_err(|e| format!("{}: {e}", room_dir.join("room.json").display()))?,
         Err(_) => room::Room::new(false),
     };
 
-    let clock = SystemClock::new();
-    // The call's shared timeline: clock pongs, take times, timing metadata.
-    let timeline = castcorder_core::clocksync::HostTimeline::new(clock.clone());
+    let system_clock = SystemClock::new();
+    // The shared timeline of every call: clock pongs, take times, timing metadata.
+    let timeline = castcorder_core::clocksync::HostTimeline::new(system_clock.clone());
     tracing::info!(timeline = timeline.id(), "host timeline anchored");
     let mut host = Host::new(
         socket,
-        clock.clone(),
+        system_clock.clone(),
         HostConfig {
-            call: call_name.clone(),
+            call: room_name.clone(),
             advertise: advertise_ips
                 .iter()
                 .map(|ip| SocketAddr::new(*ip, udp.port()))
@@ -503,14 +639,39 @@ pub fn start(
         }
     }
     let (tx, rx) = mpsc::channel();
+    let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
+        base: base.clone(),
+        key: host_key,
+        secret: secrets.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+    let call_links = rendezvous::Links {
+        secrets: secrets.clone(),
+        base: rendezvous.as_ref().map(rendezvous::Config::link_base),
+        registered: Arc::new(AtomicBool::new(false)),
+    };
+    if args.open {
+        room.set_open(true);
+    }
+    if let Some(on) = args.record_video {
+        room.set_record_video(on);
+    }
     let mut call = call::Call::new(
-        library,
-        takes.last().copied().unwrap_or(0),
         timeline.clone(),
+        call::Rooms {
+            library: args.library.clone(),
+            secrets: secrets.clone(),
+            link: call_links.base.clone(),
+            clock,
+            gap: args.idle_gap,
+            host_device: host_device.clone(),
+            keep_wav: args.keep_wav,
+        },
+        room,
+        room_name.clone(),
     );
     if let Some(cfg) = args.align {
         call = call.with_alignment(cfg);
-        call.align_recovered(recovered.iter().map(|r| r.take).collect());
     }
     // The host's own participant, joined and left at runtime; its recorder
     // is told to finalise when the host finishes.
@@ -520,32 +681,14 @@ pub fn start(
         local_takes.clone(),
         participant::NativeBase {
             name: args.name.clone(),
-            call: call_name.clone(),
+            call: room_name.clone(),
             timeline: timeline.clone(),
             device_id: host_device.clone(),
             keep_wav: args.keep_wav,
         },
     ));
-    let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
-        base: base.clone(),
-        key: host_key,
-        secret: secret.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    });
-    if args.open {
-        room.set_open(true);
-    }
-    if let Some(on) = args.record_video {
-        room.set_record_video(on);
-    }
-    call = call.with_room(
-        room,
-        call_dir.clone(),
-        secret,
-        rendezvous.as_ref().map(rendezvous::Config::link_base),
-    );
     let stop = Arc::new(AtomicBool::new(false));
-    let mut threads = vec![call.spawn(host, clock, rx)];
+    let mut threads = vec![call.spawn(host, system_clock, rx)];
     let finisher = Finisher {
         tx: tx.clone(),
         local_takes,
@@ -560,15 +703,14 @@ pub fn start(
     .iter()
     .map(|ip| format!("https://{ip}:{https_port}/"))
     .collect();
-    let call_link = Arc::new(Mutex::new(None));
 
     let app = Arc::new(http::App {
         tx: Mutex::new(tx),
         dist: args.dist.clone(),
         host_id: host_id.clone(),
         native: native.clone(),
-        call_dir: call_dir.clone(),
-        call_link: call_link.clone(),
+        library: args.library.clone(),
+        call_links: call_links.clone(),
         lan_links: links.clone(),
     });
     threads.push(http::serve(
@@ -580,17 +722,15 @@ pub fn start(
     ));
     threads.push(http::serve(local, app, None, true, stop.clone()));
 
-    tracing::info!(call = %call_name, links = ?links, udp = %udp, "host ready");
+    tracing::info!(room = %room_name, links = ?links, udp = %udp, "host ready");
     if let Some(cfg) = rendezvous {
         tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
-        let slot = call_link.clone();
+        let registered = call_links.registered.clone();
         threads.push(rendezvous::spawn(
             cfg,
             rendezvous_tx,
             move |link| {
-                if let Ok(mut l) = slot.lock() {
-                    *l = Some(link.to_string());
-                }
+                registered.store(true, Ordering::SeqCst);
                 on_link(link);
             },
             stop.clone(),
@@ -603,13 +743,13 @@ pub fn start(
         tracing::warn!(error = %e, "the host microphone did not join");
     }
     Ok(Running {
-        call: call_name,
-        call_dir,
+        room: room_name,
+        library: args.library.clone(),
         host_id,
         http,
         links,
         udp,
-        call_link,
+        call_links,
         finisher,
         native,
         stop,
@@ -618,10 +758,10 @@ pub fn start(
 }
 
 /// A readable console log on stderr, and JSON lines in
-/// `<library>/<call>/logs/host-<start>.jsonl` (rotated at 10 MB), in the shape
+/// `<library>/logs/host-<start>.jsonl` (rotated at 10 MB), in the shape
 /// every machine in the call logs (castcorder_core::logging). The first call
 /// in a process installs it; later ones do nothing.
-fn init_logging(library: &Path, call: &str) {
+fn init_logging(library: &Path) {
     use castcorder_core::logging::{JsonLayer, LogContext, RotatingLog, Stamp};
     use castcorder_port_disk::Storage;
     use std::time::Instant;
@@ -636,10 +776,7 @@ fn init_logging(library: &Path, call: &str) {
     let console = tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(std::io::stderr);
-    let Ok(logs) = FsStorage::new(library)
-        .and_then(|r| r.subdir(call))
-        .and_then(|r| r.subdir("logs"))
-    else {
+    let Ok(logs) = FsStorage::new(library).and_then(|r| r.subdir("logs")) else {
         eprintln!("castcorder-host: no logs directory; logging to the console only");
         let _ = tracing_subscriber::registry()
             .with(console)
@@ -653,7 +790,7 @@ fn init_logging(library: &Path, call: &str) {
         10 * 1024 * 1024,
     ));
     let context = LogContext::new();
-    context.set("call", call);
+    context.set("call", "host");
     context.set("device", "host");
     context.set("realm", "host");
     let start = Instant::now();

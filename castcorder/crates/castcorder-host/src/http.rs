@@ -64,10 +64,10 @@ pub struct App {
     pub host_id: String,
     /// The host's own participant (`/native`).
     pub native: Arc<crate::participant::NativeCtl>,
-    /// The call's folder (`/folder/open`).
-    pub call_dir: PathBuf,
-    /// The call link through the rendezvous, once it is known.
-    pub call_link: Arc<Mutex<Option<String>>>,
+    /// The library (`/folder/open`, `/rooms`).
+    pub library: PathBuf,
+    /// Every room's call link through the rendezvous, once registered.
+    pub call_links: crate::rendezvous::Links,
     /// The LAN join links (`https://<ip>:<port>/`), as the host prints them.
     pub lan_links: Vec<String>,
 }
@@ -95,11 +95,50 @@ fn native_allowed(req: &Request, producer: bool) -> bool {
         && matches!(req.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 struct NativeJoin {
     /// The input's display name; absent or null: the default input.
     #[serde(default)]
     device: Option<String>,
+    /// The room to join (absent: the live room, else the default room).
+    #[serde(default)]
+    room: Option<String>,
+}
+
+/// The body of the home's requests (`/rooms...`, `/folder/open`).
+#[derive(Default, serde::Deserialize)]
+struct HomeRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    room: Option<String>,
+    #[serde(default)]
+    call: Option<String>,
+}
+
+/// The folder `/folder/open` opens: a room's call (`room` and `call`), a
+/// room (`room`), else the open call, else the default room. Names are
+/// checked to be folder names, so nothing outside the library opens.
+fn folder(app: &App, pick: &HomeRequest) -> Result<PathBuf, String> {
+    let safe = |s: &str| crate::rooms::room_slug(s) == s && !s.is_empty();
+    match (&pick.room, &pick.call) {
+        (Some(r), Some(c)) if safe(r) && safe(c) => Ok(app.library.join(r).join(c)),
+        (Some(r), None) if safe(r) => Ok(app.library.join(r)),
+        (None, None) => Ok(ask(app, |reply| Command::Current { reply })
+            .flatten()
+            .map(|(_, _, d)| d)
+            .unwrap_or_else(|| app.library.join(app.call_links.default_room()))),
+        _ => Err("not a room or call of this host".into()),
+    }
+}
+
+/// A query parameter, percent-decoded; `None` if absent or empty.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+        .map(percent_decode)
+        .filter(|v| !v.is_empty())
 }
 
 struct Response {
@@ -382,19 +421,25 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/role") => {
             let mut role = serde_json::json!({ "producer": producer, "host": app.host_id });
             if producer {
-                // The host machine's page only: the call link to show and copy.
-                role["link"] = serde_json::json!(app.call_link.lock().ok().and_then(|l| l.clone()));
+                // The host machine's page only: the room's call link to show
+                // and copy (`?room=`, else the default room).
+                let room = query_param(&req.query, "room")
+                    .unwrap_or_else(|| app.call_links.default_room());
+                role["link"] = serde_json::json!(app.call_links.link(&room));
                 role["lan"] = serde_json::json!(app.lan_links);
+                role["room"] = serde_json::json!(room);
             }
             json(200, role.to_string())
         }
         ("POST", "/offer") => {
             let name = query_name(&req.query);
+            let room = query_param(&req.query, "room");
             let offer = match serde_json::from_slice::<Sdp>(&req.body) {
                 Ok(o) => o,
                 Err(e) => return text(400, format!("bad offer json: {e}")),
             };
             match ask(app, |reply| Command::Offer {
+                room,
                 name,
                 offer_sdp: offer.sdp,
                 device: offer.device,
@@ -437,40 +482,95 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             Some(s) => json(200, s),
             None => gone(),
         },
-        ("GET", "/native") | ("POST", "/native/join" | "/native/leave")
+        ("GET", "/native" | "/rooms")
+        | ("POST", "/native/join" | "/native/leave" | "/rooms" | "/rooms/link" | "/rooms/call")
             if !native_allowed(req, producer) =>
         {
             text(
                 403,
-                "the native microphone is only available to the host machine's own page",
+                "the native microphone and the rooms are only available to the host machine's own page",
             )
         }
         ("POST", "/folder/open") if !native_allowed(req, producer) => text(
             403,
             "the recordings folder opens only from the host machine's own page",
         ),
-        ("POST", "/folder/open") => match crate::open_folder(&app.call_dir) {
-            Ok(()) => Response {
-                status: 204,
-                content_type: "text/plain",
-                body: Vec::new(),
-            },
-            Err(e) => text(409, e),
+        ("POST", "/folder/open") => {
+            let pick = serde_json::from_slice::<HomeRequest>(&req.body).unwrap_or_default();
+            let dir = match folder(app, &pick) {
+                Ok(d) => d,
+                Err(e) => return text(409, e),
+            };
+            match crate::open_folder(&dir) {
+                Ok(()) => Response {
+                    status: 204,
+                    content_type: "text/plain",
+                    body: Vec::new(),
+                },
+                Err(e) => text(409, e),
+            }
+        }
+        ("GET", "/rooms") => match ask(app, |reply| Command::Rooms { reply }) {
+            Some(rooms) => json(
+                200,
+                serde_json::json!({
+                    "rooms": rooms,
+                    "lan": app.lan_links,
+                    "library": std::path::absolute(&app.library)
+                        .unwrap_or_else(|_| app.library.clone())
+                        .display()
+                        .to_string(),
+                })
+                .to_string(),
+            ),
+            None => gone(),
         },
+        ("POST", "/rooms" | "/rooms/link" | "/rooms/call") => {
+            let r = match serde_json::from_slice::<HomeRequest>(&req.body) {
+                Ok(r) => r,
+                Err(e) => return text(400, format!("bad json: {e}")),
+            };
+            let answer = match req.path.as_str() {
+                "/rooms" => ask(app, |reply| Command::CreateRoom {
+                    name: r.name.unwrap_or_default(),
+                    reply,
+                })
+                .map(|a| a.map(|room| serde_json::json!({ "room": room }))),
+                "/rooms/link" => ask(app, |reply| Command::RegenerateLink {
+                    room: r.room,
+                    reply,
+                })
+                .map(|a| a.map(|link| serde_json::json!({ "link": link }))),
+                _ => ask(app, |reply| Command::ChooseCall {
+                    room: r.room.unwrap_or_default(),
+                    call: r.call,
+                    reply,
+                })
+                .map(|a| a.map(|call| serde_json::json!({ "call": call }))),
+            };
+            match answer {
+                Some(Ok(v)) => json(200, v.to_string()),
+                Some(Err(e)) => text(409, e),
+                None => gone(),
+            }
+        }
         ("GET", "/native") => json(
             200,
             serde_json::to_string(&app.native.state()).unwrap_or_default(),
         ),
         ("POST", "/native/join") => {
-            let device = if req.body.iter().all(u8::is_ascii_whitespace) {
-                None
+            let join = if req.body.iter().all(u8::is_ascii_whitespace) {
+                NativeJoin::default()
             } else {
                 match serde_json::from_slice::<NativeJoin>(&req.body) {
-                    Ok(j) => j.device,
+                    Ok(j) => j,
                     Err(e) => return text(400, format!("bad join json: {e}")),
                 }
             };
-            match app.native.join(crate::NativeInput::Device(device)) {
+            match app
+                .native
+                .join_room(crate::NativeInput::Device(join.device), join.room)
+            {
                 Ok(()) => json(
                     200,
                     serde_json::to_string(&app.native.state()).unwrap_or_default(),
@@ -524,6 +624,27 @@ fn serve_file(dir: &Path, path: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two rooms' links through a rendezvous, registered.
+    fn test_links() -> crate::rendezvous::Links {
+        use castcorder_link::{CallSecret, HostKey};
+        crate::rendezvous::Links {
+            secrets: Arc::new(Mutex::new(crate::rendezvous::Secrets {
+                rooms: [
+                    ("show".to_string(), CallSecret([1; 16])),
+                    ("other".to_string(), CallSecret([2; 16])),
+                ]
+                .into(),
+                default: "show".into(),
+            })),
+            base: Some(crate::rendezvous::LinkBase {
+                base: "https://rv".into(),
+                host: HostKey::from_secret([3; 32]).id(),
+                version: "1".into(),
+            }),
+            registered: Arc::new(AtomicBool::new(true)),
+        }
+    }
     use castcorder_link::identity;
 
     #[test]
@@ -589,8 +710,8 @@ mod tests {
             dist: std::env::temp_dir(),
             host_id: "h".into(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
-            call_dir: std::env::temp_dir(),
-            call_link: Default::default(),
+            library: std::env::temp_dir(),
+            call_links: test_links(),
             lan_links: Vec::new(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -643,8 +764,8 @@ mod tests {
             dist: std::env::temp_dir(),
             host_id: "h".into(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
-            call_dir: std::env::temp_dir(),
-            call_link: Arc::new(Mutex::new(Some("https://rv/v/1/#h.s".into()))),
+            library: std::env::temp_dir(),
+            call_links: test_links(),
             lan_links: vec!["https://192.168.1.5:27800/".into()],
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -655,7 +776,14 @@ mod tests {
         serve(lan, app, None, false, stop);
         let (_, body) = request(local_addr, "GET", "/role", "");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(v["link"], "https://rv/v/1/#h.s");
+        let links = test_links();
+        assert_eq!(v["link"], links.link("show").unwrap());
+        assert_eq!(v["room"], "show");
+        // Another room's link, for the home's lobby of that room.
+        let (_, body) = request(local_addr, "GET", "/role?room=other", "");
+        let o: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(o["link"], links.link("other").unwrap());
+        assert_ne!(o["link"], v["link"]);
         assert_eq!(v["lan"][0], "https://192.168.1.5:27800/");
         let (_, body) = request(lan_addr, "GET", "/role", "");
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -674,8 +802,8 @@ mod tests {
             dist: std::env::temp_dir(),
             host_id: host_id.clone(),
             native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
-            call_dir: std::env::temp_dir(),
-            call_link: Default::default(),
+            library: std::env::temp_dir(),
+            call_links: test_links(),
             lan_links: Vec::new(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

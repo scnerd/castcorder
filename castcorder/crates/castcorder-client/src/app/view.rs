@@ -623,10 +623,17 @@ pub(super) fn App() -> impl IntoView {
     let hash = window().location().hash().unwrap_or_default();
     let link = CallLink::parse_fragment(&hash).ok();
     let bad_link = hash.len() > 1 && link.is_none();
+    // A LAN or host machine page joins the room its `?room=` names.
+    let room_param = query_param("room").unwrap_or_default();
     let default_signal = if link.is_some() {
         format!("{}/ws", origin.replacen("http", "ws", 1))
-    } else {
+    } else if room_param.is_empty() {
         format!("{origin}/offer")
+    } else {
+        format!(
+            "{origin}/offer?room={}",
+            String::from(js_sys::encode_uri_component(&room_param))
+        )
     };
     LINK.with(|l| *l.borrow_mut() = link);
     let ui = Ui {
@@ -645,6 +652,9 @@ pub(super) fn App() -> impl IntoView {
         password: RwSignal::new(String::new()),
         role: RwSignal::new(Role::default()),
         room: RwSignal::new(None),
+        call_ref: RwSignal::new(None),
+        calls: RwSignal::new(Vec::new()),
+        room_name: RwSignal::new(room_param.clone()),
         take: RwSignal::new(String::new()),
         disk: RwSignal::new(Vec::new()),
         take_started_us: RwSignal::new(None),

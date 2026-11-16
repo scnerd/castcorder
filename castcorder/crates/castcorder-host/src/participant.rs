@@ -134,12 +134,17 @@ impl NativeCtl {
         )
     }
 
-    /// Join the call with `input`. Errors are a sentence for the person at
-    /// the host.
+    /// Join the call with `input`: the live room's call, else the default
+    /// room's. Errors are a sentence for the person at the host.
     pub fn join(&self, input: NativeInput) -> Result<(), String> {
+        self.join_room(input, None)
+    }
+
+    /// Join `room`'s current call (`None`: as [`NativeCtl::join`]) with `input`.
+    pub fn join_room(&self, input: NativeInput, room: Option<String>) -> Result<(), String> {
         #[cfg(not(feature = "native-capture"))]
         {
-            let _ = input;
+            let _ = (input, room);
             Err(crate::NO_NATIVE.into())
         }
         #[cfg(feature = "native-capture")]
@@ -160,8 +165,12 @@ impl NativeCtl {
             let takes = participant.takes.clone();
             let tx = self.tx.lock().map_err(|_| "host lock poisoned")?.clone();
             let (reply, answer) = mpsc::channel();
-            tx.send(Command::JoinNative { participant, reply })
-                .map_err(|_| "the host is not running")?;
+            tx.send(Command::JoinNative {
+                room,
+                participant,
+                reply,
+            })
+            .map_err(|_| "the host is not running")?;
             answer
                 .recv_timeout(ANSWER)
                 .map_err(|_| "the host did not answer".to_string())??;
