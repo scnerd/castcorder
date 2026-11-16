@@ -33,6 +33,7 @@
 
 pub mod delivery;
 pub mod levels;
+pub mod recorders;
 pub mod session;
 pub mod signal;
 pub mod wav;

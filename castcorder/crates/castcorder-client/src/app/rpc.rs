@@ -86,6 +86,7 @@ pub(super) fn candidates(sdp: &str) -> (usize, usize) {
 pub(super) fn pump_rpc(ui: Ui) {
     let mut samples = Vec::new();
     let mut relabel = false;
+    let mut chips = false;
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -114,6 +115,16 @@ pub(super) fn pump_rpc(ui: Ui) {
                         Ok(id) => e.status_request = Some(id),
                         Err(err) => warn!(error = ?err, "GetTakeStatus not sent"),
                     }
+                    // Rejoined mid-take: the host knows this participant
+                    // afresh, so say again where each source stands.
+                    for a in e.acks.clone() {
+                        if Some(a.take) == e.recording || Some(a.take) == e.video_take {
+                            match rpc.send(Request::SourceAck(a)) {
+                                Ok(id) => e.ack_requests.push(id),
+                                Err(err) => warn!(error = ?err, "source ack not sent"),
+                            }
+                        }
+                    }
                 }
                 other => {
                     warn!(call = %ctx.call, device = %ctx.device, response = ?other, "join refused");
@@ -135,6 +146,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 Some(Response::Done) => {}
                 Some(other) => warn!(response = ?other, "microphone report refused"),
                 None => e.mic_requests.push(id),
+            }
+        }
+        for id in std::mem::take(&mut e.ack_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "source ack refused"),
+                None => e.ack_requests.push(id),
             }
         }
         for id in std::mem::take(&mut e.disk_requests) {
@@ -247,6 +265,11 @@ pub(super) fn pump_rpc(ui: Ui) {
                         .collect();
                     relabel = true;
                 }
+                Event::Recorders(list) => {
+                    e.recorders = list.clone();
+                    ui.recorders.set(list);
+                    chips = true;
+                }
                 Event::Meters(_) => {}
                 Event::MicState {
                     participant,
@@ -259,6 +282,9 @@ pub(super) fn pump_rpc(ui: Ui) {
     });
     if relabel {
         relabel_tiles();
+    }
+    if chips || relabel {
+        chip_tiles();
     }
     for o in samples {
         post_worker(&o, None);
@@ -316,6 +342,7 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
     let (ctx, participant, raw, capture) = with_engine(|e| {
         e.recording = Some(take);
         e.video_take = video.then_some(take);
+        e.acks.retain(|a| a.take == take);
         (
             e.ctx.clone(),
             e.participant,
@@ -332,6 +359,7 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
         warn!(call = %ctx.call, device = %ctx.device, take = take.0, "RECORDING UNAVAILABLE: take started but this guest cannot record a local track");
         ui.recording
             .set(format!("not recording take {} (unsupported here)", take.0));
+        ack_source(take, "mic", SourceKind::Audio, SourceState::Unavailable);
         return;
     }
     let name = track_name(take, js_sys::Date::now() as u64);
@@ -362,6 +390,7 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
 pub(super) fn stop_track(take: TakeId) {
     let ctx = with_engine(|e| {
         e.recording = None;
+        e.acks.clear();
         e.ctx.clone()
     });
     info!(call = %ctx.call, device = %ctx.device, take = take.0, "take stopped: closing track");
@@ -374,6 +403,84 @@ pub(super) fn stop_track(take: TakeId) {
     }
     flush_logs(false);
     post_worker(&worker_cmd("stop"), None);
+}
+
+/// Acknowledge one recorded source of `take` to the host (`SourceAck`): it
+/// records, was lost, or cannot record here. The latest per source is kept
+/// and sent again after every join while the take records.
+pub(super) fn ack_source(take: TakeId, source: &str, kind: SourceKind, state: SourceState) {
+    let ack = SourceAck {
+        take,
+        source: SourceId(source.into()),
+        kind,
+        state,
+    };
+    info!(take = take.0, source, state = ?state, "source ack");
+    with_engine(|e| {
+        e.acks.retain(|a| a.take == take && a.source != ack.source);
+        e.acks.push(ack.clone());
+        if e.participant.is_none() {
+            return;
+        }
+        let Some(rpc) = e.rpc.as_mut() else {
+            return;
+        };
+        match rpc.send(Request::SourceAck(ack)) {
+            Ok(id) => e.ack_requests.push(id),
+            Err(err) => warn!(error = ?err, "source ack not sent"),
+        }
+    });
+}
+
+/// The track chip on one remote tile (`.tile-track`), from the host's last
+/// `Event::Recorders`: hidden while it has said nothing of this participant
+/// (a guest who is not a producer hears only of itself).
+fn chip_tile(tile: &web_sys::Element) {
+    let Some(origin) = tile.get_attribute("data-origin") else {
+        return;
+    };
+    let Ok(Some(chip)) = tile.query_selector(".tile-track") else {
+        return;
+    };
+    let id = origin
+        .rsplit_once('-')
+        .and_then(|(_, id)| id.parse::<u64>().ok());
+    let found = with_engine(|e| {
+        e.recorders
+            .iter()
+            .find(|r| Some(r.participant.0) == id)
+            .cloned()
+    });
+    match found {
+        Some(r) => {
+            let (words, state) = crate::recorders::chip(&r);
+            let _ = chip.set_attribute("data-state", state);
+            let _ = chip.remove_attribute("hidden");
+            if let Ok(Some(label)) = chip.query_selector("span:last-child") {
+                label.set_text_content(Some(words));
+            }
+        }
+        None => {
+            let _ = chip.set_attribute("hidden", "");
+            let _ = chip.remove_attribute("data-state");
+        }
+    }
+}
+
+/// Every remote tile's track chip again (the recorders changed).
+fn chip_tiles() {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i) {
+            chip_tile(&t);
+        }
+    }
 }
 
 pub(super) fn on_control_message(ui: Ui, ev: MessageEvent) {
@@ -515,7 +622,19 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
         let _ = level.append_child(&wave);
     }
     let _ = tile.append_child(&level);
+    // Their track: is their machine recording? (Kept apart from the live
+    // level, which says whether we hear them.)
+    let chip = doc.create_element("div").ok()?;
+    chip.set_class_name("tile-track");
+    let _ = chip.set_attribute("role", "status");
+    let dot = doc.create_element("span").ok()?;
+    dot.set_class_name("dot");
+    let _ = chip.append_child(&dot);
+    let words = doc.create_element("span").ok()?;
+    let _ = chip.append_child(&words);
+    let _ = tile.append_child(&chip);
     let _ = remote.append_child(&tile);
+    chip_tile(&tile);
     Some(tile)
 }
 

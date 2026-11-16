@@ -82,6 +82,7 @@ import { fileURLToPath } from 'node:url';
 import { ctx } from './lib/ctx.mjs';
 import { sleep, waitFor, text, buttons, json, noErrors, audioFrom, checks, check, opfsNames } from './lib/helpers.mjs';
 import { takeChecks } from './lib/take.mjs';
+import { micLostChecks, micRecoveredChecks } from './lib/trackchips.mjs';
 import { liveLevelChecks } from './lib/levels.mjs';
 import { videoChecks } from './lib/video.mjs';
 import { videoRecChecks } from './lib/videorec.mjs';
@@ -240,13 +241,14 @@ try {
     + (await text(B, '#participant')) + '; still ' + (await text(B, '#recording')));
   check((await text(B, '#recording')) === seg1, 'B continued the same track after rejoining');
   await sleep(1500);
-  await B.evaluate(() => { for (const t of window.__tracks) t.stop(); });
-  const tMicLost = Date.now();
+  // B's microphone ends (held lost a moment; the producer sees it), then reopens.
+  const tMicLost = await micLostChecks(A, B);
   const seg2 = await waitFor(async () => {
     const r = await text(B, '#recording');
     return r.includes('recording take0002') && r !== seg1 ? r : null;
   }, 'B reopened its microphone and records a new segment', 30000);
   check(true, 'B lost its microphone and continues take 2 in a new segment (' + seg2 + ')');
+  await micRecoveredChecks(A);
   const seg1Name = await recordingsWhileRecording(A, B, seg1);
   await waitFor(async () => (await text(B, '#state')) === 'connected' && (await text(B, '#participant')).length > 0,
     'B connected again after reopening its microphone', 30000);

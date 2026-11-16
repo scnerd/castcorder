@@ -16,6 +16,7 @@ mod local;
 #[cfg(feature = "native-capture")]
 mod native;
 mod participant;
+mod recorders;
 mod rendezvous;
 mod room;
 mod tls;

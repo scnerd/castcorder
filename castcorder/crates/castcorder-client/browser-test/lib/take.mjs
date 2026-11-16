@@ -7,6 +7,7 @@ import { parseOggOpus } from '../ogg.mjs';
 import { ctx } from './ctx.mjs';
 import { sleep, waitFor, text, buttons, json, noErrors, checks, check, opfsNames, parseTiming } from './helpers.mjs';
 import { muteChecks } from './levels.mjs';
+import { chipsBeforeTake, chipsWhileRecording, chipsAfterTake } from './trackchips.mjs';
 
 export async function takeChecks(A, B) {
   const { MODE, FULL, RESULTS, LIBRARY, HTTP, host, logs, input, TAKE_SECONDS, WORKSPACE, chromium, firefox } = ctx;
@@ -16,6 +17,7 @@ export async function takeChecks(A, B) {
 
   await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take only', 10000);
   check(true, 'idle: Start take enabled, Stop take disabled');
+  await chipsBeforeTake(A, B);
   await A.click('#take-start');
   await waitFor(async () => (await text(A, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
   const take1StartUs = JSON.parse(await text(A, '#take-result')).hostUs;
@@ -28,6 +30,7 @@ export async function takeChecks(A, B) {
       'guest ' + n + ' recording', 10000);
   }
   const takeT0 = Date.now();
+  await chipsWhileRecording(A, B);
   // A second tab of A's profile (same OPFS) loads mid-take: its worker's
   // startup scan meets the files A's worker holds open (one sync handle per
   // file) and must list the track as busy, without an error and without
@@ -57,6 +60,7 @@ export async function takeChecks(A, B) {
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 1 stopped', 10000);
   check(true, 'producer stopped take 1');
+  await chipsAfterTake(A, B);
   let take1StopUs = NaN;
   try { take1StopUs = JSON.parse(await text(A, '#take-result')).hostUs; } catch { /* diagnostic only */ }
   await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take again', 10000);

@@ -340,6 +340,23 @@ fn Call(ui: Ui) -> impl IntoView {
         };
         Some((head.to_string(), format!(" {more}")))
     };
+    // This participant's track chip, as the host says it stands.
+    let own_chip = move || {
+        let me = ui.participant.get().parse::<u64>().ok();
+        ui.recorders
+            .get()
+            .into_iter()
+            .find(|r| Some(r.participant.0) == me)
+            .map(|r| crate::recorders::chip(&r))
+    };
+    // Producers, during a take: how many microphones record, of how many.
+    let rollup = move || {
+        let list = ui.recorders.get();
+        (producer() && take_rec() && !list.is_empty()).then(|| {
+            let (n, m) = crate::recorders::rollup(&list);
+            (crate::recorders::rollup_text(&list), n < m)
+        })
+    };
     let can_start = move || ui.take.get().starts_with("idle");
     let can_stop = move || ui.take.get().starts_with("recording");
     // Bar `i` of the dock waveform (fixed spans; only their heights change,
@@ -371,6 +388,10 @@ fn Call(ui: Ui) -> impl IntoView {
                 <div class="pill idle" role="status" hidden=take_rec>
                     <span class="dot"></span>"Not recording"
                 </div>
+                {move || rollup().map(|(text, short)| view! {
+                    <button id="track-rollup" class="chip" class:warn=short title="Whose machines are recording this take"
+                        on:click=move |_| ui.panel.set(Panel::People)>{text}</button>
+                })}
                 <button class="chip" hidden=move || producer() || unsent() == 0
                     on:click=move |_| ui.panel.set(Panel::Recordings)>
                     {move || format!("Your recordings: {} not yet with the host", unsent())}</button>
@@ -414,6 +435,10 @@ fn Call(ui: Ui) -> impl IntoView {
                             <video id="self-video" autoplay=true muted=true prop:muted=true playsinline=true width="320" height="180"></video>
                             <div class="tile-note" hidden=move || !ui.muted.get()>"Muted in the call. Your track keeps recording."</div>
                             <div class="tile-name">{move || format!("{} (you)", ui.name.get())}</div>
+                            {move || own_chip().map(|(words, state)| view! {
+                                <div id="self-track" class="tile-track" role="status" data-state=state>
+                                    <span class="dot"></span><span>{words}</span></div>
+                            })}
                         </div>
                         <div id="remote"></div>
                     </div>
@@ -580,6 +605,7 @@ pub(super) fn App() -> impl IntoView {
         camera_state: RwSignal::new(String::new()),
         video_rec: RwSignal::new(String::new()),
         profile_warnings: RwSignal::new(Vec::new()),
+        recorders: RwSignal::new(Vec::new()),
         takes: RwSignal::new(None),
         progress: RwSignal::new(Default::default()),
         delivered: RwSignal::new(Default::default()),
