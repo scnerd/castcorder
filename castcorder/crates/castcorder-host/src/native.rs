@@ -671,11 +671,15 @@ mod tests {
 
     /// Real hardware: the default microphone through the full path (tee,
     /// recorder thread, WavWriter in a library take directory, FLAC) while the
-    /// live branch makes Opus. Skips without an input device.
+    /// live branch makes Opus. Skips without an input device (fails instead under CASTCORDER_CI).
     #[test]
     fn default_microphone_records_a_take_into_the_library() {
         let devices = castcorder_capture_gst::list_input_devices().expect("enumeration");
         if devices.is_empty() {
+            assert!(
+                std::env::var_os("CASTCORDER_CI").is_none(),
+                "CASTCORDER_CI is set but this machine has no audio input device (CI must provide one, e.g. a pulseaudio null sink)"
+            );
             println!("SKIP: no audio input device on this machine");
             return;
         }
@@ -705,6 +709,10 @@ mod tests {
             }
         }
         if packets == 0 {
+            assert!(
+                std::env::var_os("CASTCORDER_CI").is_none(),
+                "CASTCORDER_CI is set but the default input delivered nothing"
+            );
             println!("SKIP: the default input delivered nothing");
             drop(take_tx);
             let _ = rec.join();

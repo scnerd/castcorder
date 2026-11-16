@@ -144,6 +144,10 @@ console.log('host up at ' + HTTP + ' and ' + HTTPS);
 if (MODE === 'firefox' && /\/\/127\./.test(HTTPS)) {
   // No LAN address: Firefox (no loopback ICE candidates on Windows) cannot connect.
   host.kill();
+  if (process.env.CASTCORDER_CI) {
+    console.error('FAIL firefox: CASTCORDER_CI is set but this machine has no LAN IPv4 address for the host to advertise');
+    process.exit(1);
+  }
   console.log('SKIP firefox: this machine has no LAN IPv4 address for the host to advertise');
   process.exit(0);
 }
