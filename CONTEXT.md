@@ -7,7 +7,7 @@ Peer-to-peer podcast recording: participants talk over a live call while each ma
 ### People
 
 **Host**:
-The desktop app install that owns a call: it forwards the live streams, receives the tracks, and carries out producer instructions. A host is a machine, not a person, and need not be a participant in its own call.
+The desktop app install that owns a room and its calls: it forwards the live streams, receives the tracks, and carries out producer instructions. A host is a machine, not a person, and need not be a participant in its own call.
 _Avoid_: Owner, server, admin
 
 **Participant**:
@@ -26,7 +26,7 @@ One app install or browser profile, identified by a key it generates for itself.
 _Avoid_: Client, peer, account
 
 **Trusted Device**:
-A device that joined a call while a producer was present. Only trusted devices may enter a locked call or be granted the producer role.
+A device that joined a room while a producer was present. Only trusted devices may enter a locked room or be granted the producer role, and an app guest's trusted device lists the rooms it is trusted in so it can join them without the link.
 _Avoid_: Paired device, known device
 
 **App Guest**:
@@ -38,13 +38,17 @@ _Avoid_: Web guest, web client
 
 ### Calls and recordings
 
+**Room**:
+A persistent place owned by a host and reachable through one call link, such as a recurring show. It exists from the moment it is created, whether or not anyone is in it, and it keeps its settings, trusted devices, producers and bans across calls. A one-off recording is a room that is never reused.
+_Avoid_: Channel, space, project
+
 **Call**:
-A persistent room owned by a host and reachable through one call link. It exists from the moment it is created, whether or not anyone is currently in it, and it is the container for every take and track recorded in it.
-_Avoid_: Session, meeting, room, project
+One sitting in a room: it begins when someone joins the room after it has been empty for a while (or when a producer starts a new call from the lobby) and it is the container for every take and track recorded then. A guest who drops and rejoins stays in the same call.
+_Avoid_: Session, meeting, episode
 
 **Call Link**:
-The URL a host shares so guests can join a specific call.
-_Avoid_: Invite, join URL
+The URL a host shares so guests can join a room. It stays the same for every call in the room until a producer at the host regenerates it.
+_Avoid_: Invite, join URL, room link
 
 **Take**:
 One start-to-stop recording span within a call. A call can have many takes.
