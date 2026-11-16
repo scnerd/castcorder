@@ -459,3 +459,54 @@ pub(super) async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<Stri
     let answer = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
     Ok(string(&answer, "sdp"))
 }
+
+/// The host machine's page, before anyone joins: the call link to show, from
+/// the host's `GET /role` (the rendezvous link when it has one, else the LAN
+/// https link it prints). Polls until joined, since the rendezvous link
+/// arrives a moment after the host starts. Other pages are not handed a link
+/// by `/role` and stop at once.
+pub(super) async fn watch_host_link(ui: Ui) {
+    let url = crate::signal::role_url(&ui.signal_url.get_untracked());
+    loop {
+        if ui.joined.get_untracked() {
+            return;
+        }
+        let Some(role) = fetch_role(&url).await else {
+            return;
+        };
+        if !get(&role, "producer").is_truthy() {
+            return;
+        }
+        let rendezvous = string(&role, "link");
+        let lan = Reflect::get_u32(&get(&role, "lan"), 0)
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let link = if rendezvous.is_empty() {
+            lan
+        } else {
+            rendezvous.clone()
+        };
+        if ui.host_link.get_untracked() != link {
+            ui.host_link.set(link);
+        }
+        if !rendezvous.is_empty() {
+            return;
+        }
+        crate::mailbox::sleep_ms(2000).await;
+    }
+}
+
+async fn fetch_role(url: &str) -> Option<JsValue> {
+    let resp = JsFuture::from(Promise::from(
+        call(&window(), "fetch", &[&JsValue::from_str(url)]).ok()?,
+    ))
+    .await
+    .ok()?;
+    if !get(&resp, "ok").is_truthy() {
+        return None;
+    }
+    JsFuture::from(Promise::from(call(&resp, "json", &[]).ok()?))
+        .await
+        .ok()
+}

@@ -338,6 +338,10 @@ struct Ui {
     password: RwSignal<String>,
     /// This connection's role, from the host.
     role: RwSignal<Role>,
+    /// The theme choice: "system", "dark" or "light".
+    theme: RwSignal<String>,
+    /// The call link the host machine's page was told before joining.
+    host_link: RwSignal<String>,
     /// The room as the host last told this producer.
     room: RwSignal<Option<RoomState>>,
     /// The host's take status, as text ("idle", "recording take N").

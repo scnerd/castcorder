@@ -552,12 +552,24 @@ pub fn start(
     };
     let rendezvous_tx = tx.clone();
 
+    let links: Vec<String> = if args.bind.is_unspecified() || args.bind.is_loopback() {
+        advertise_ips.clone()
+    } else {
+        vec![args.bind]
+    }
+    .iter()
+    .map(|ip| format!("https://{ip}:{https_port}/"))
+    .collect();
+    let call_link = Arc::new(Mutex::new(None));
+
     let app = Arc::new(http::App {
         tx: Mutex::new(tx),
         dist: args.dist.clone(),
         host_id: host_id.clone(),
         native: native.clone(),
         call_dir: call_dir.clone(),
+        call_link: call_link.clone(),
+        lan_links: links.clone(),
     });
     threads.push(http::serve(
         https,
@@ -568,16 +580,7 @@ pub fn start(
     ));
     threads.push(http::serve(local, app, None, true, stop.clone()));
 
-    let links: Vec<String> = if args.bind.is_unspecified() || args.bind.is_loopback() {
-        advertise_ips.clone()
-    } else {
-        vec![args.bind]
-    }
-    .iter()
-    .map(|ip| format!("https://{ip}:{https_port}/"))
-    .collect();
     tracing::info!(call = %call_name, links = ?links, udp = %udp, "host ready");
-    let call_link = Arc::new(Mutex::new(None));
     if let Some(cfg) = rendezvous {
         tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
         let slot = call_link.clone();

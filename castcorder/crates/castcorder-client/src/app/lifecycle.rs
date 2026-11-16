@@ -55,6 +55,43 @@ pub(super) const MEDIA_RETRY_MS: f64 = 5000.0;
 
 pub(super) const NAME_KEY: &str = "castcorder.name";
 
+/// localStorage key of the theme choice: "dark", "light" or absent (system).
+pub(super) const THEME_KEY: &str = "castcorder.theme";
+
+/// The remembered theme choice: "system", "dark" or "light".
+pub(super) fn stored_theme() -> String {
+    window()
+        .local_storage()
+        .ok()
+        .flatten()
+        .and_then(|s| s.get_item(THEME_KEY).ok().flatten())
+        .filter(|t| t == "dark" || t == "light")
+        .unwrap_or_else(|| "system".into())
+}
+
+/// Apply and remember a theme choice. `data-theme` on `<html>` overrides
+/// `prefers-color-scheme` (style.css); "system" removes it. index.html sets the
+/// same attribute before first paint.
+pub(super) fn apply_theme(theme: &str) {
+    let root = window().document().and_then(|d| d.document_element());
+    let store = window().local_storage().ok().flatten();
+    if theme == "dark" || theme == "light" {
+        if let Some(r) = root {
+            let _ = r.set_attribute("data-theme", theme);
+        }
+        if let Some(s) = store {
+            let _ = s.set_item(THEME_KEY, theme);
+        }
+    } else {
+        if let Some(r) = root {
+            let _ = r.remove_attribute("data-theme");
+        }
+        if let Some(s) = store {
+            let _ = s.remove_item(THEME_KEY);
+        }
+    }
+}
+
 pub(super) fn stored_name() -> Option<String> {
     window()
         .local_storage()
