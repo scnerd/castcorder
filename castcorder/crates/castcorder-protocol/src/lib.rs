@@ -161,6 +161,18 @@ pub enum Request {
     /// state with producers and with the device itself ([`Event::Recorders`]).
     /// Never blocks the take. Answered with [`Response::Done`].
     SourceAck(SourceAck),
+    /// Offer a finished track recorded in a given call of this host (as
+    /// [`Request::OfferTrack`], which means the call this connection is in).
+    /// Any call: the host files it into that call's folder only if this
+    /// device was in that call, whichever call it is in now; otherwise it
+    /// answers an error with [`ErrorKind::NotAllowed`] and the device keeps
+    /// its copy.
+    OfferCallTrack {
+        /// The call the track was recorded in.
+        call: CallRef,
+        /// The track.
+        offer: TrackOffer,
+    },
 }
 
 /// One recorded source's state on its device, as the device reports it.
@@ -700,6 +712,22 @@ mod tests {
                 kind: SourceKind::Audio,
                 state: SourceState::Lost,
             }),
+            Request::OfferCallTrack {
+                call: CallRef {
+                    room: "show".into(),
+                    call: "2026-11-15".into(),
+                },
+                offer: TrackOffer {
+                    device: "d".into(),
+                    take: TakeId(2),
+                    source: SourceId("mic".into()),
+                    kind: SourceKind::Audio,
+                    name: "t".into(),
+                    size: 9,
+                    root: [7; 32],
+                    format: "wav".into(),
+                },
+            },
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -1047,6 +1075,29 @@ mod tests {
                 state: SourceState::Lost,
             })),
             vec![12, 2, 0, 0, 1]
+        );
+        // OfferCallTrack: index 13, room "", call "", then the offer.
+        let mut wire = vec![13, 0, 0, 0, 1, 0, 0, 0, 0];
+        wire.extend([0; 32]);
+        wire.push(0);
+        assert_eq!(
+            encode(&Request::OfferCallTrack {
+                call: CallRef {
+                    room: String::new(),
+                    call: String::new(),
+                },
+                offer: TrackOffer {
+                    device: String::new(),
+                    take: TakeId(1),
+                    source: SourceId(String::new()),
+                    kind: SourceKind::Audio,
+                    name: String::new(),
+                    size: 0,
+                    root: [0; 32],
+                    format: String::new(),
+                },
+            }),
+            wire
         );
         assert_eq!(encode(&RecorderState::Ready), vec![0]);
         assert_eq!(encode(&RecorderState::Starting), vec![1]);

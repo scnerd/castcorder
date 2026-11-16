@@ -3,6 +3,7 @@
 //! # Layout
 //!
 //! ```text
+//! <library>/<call>/devices.jsonl                  the devices that were in the call
 //! <library>/<call>/logs/<device>-<file>.jsonl      a guest log file (SourceKind::Log,
 //!                                                  take 0; manifest.jsonl beside it)
 //! <library>/<call>/takeNN/manifest.jsonl          the take's manifest
@@ -36,8 +37,18 @@
 //! A track is never reopened for receiving once `Verified`: a re-offer is
 //! answered with DONE straight away (opening a receiver over a file without
 //! its journal would reset it).
+//!
+//! # Which calls a device may deliver into
+//!
+//! A device's outbox holds tracks of every call it was in, and offers them
+//! all whenever the host is connected. Each call keeps `devices.jsonl`, an
+//! append-only list of the devices admitted to it ([`Library::admit`]); a
+//! track for a call is accepted only from a device on that list, or one
+//! already in that call's manifests (calls from before the list existed)
+//! ([`Library::was_in`], [`Puller::offer_into`]). The check reads only that
+//! call's folder, never which call the device is in now.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 
 use castcorder_port_disk::{Storage, StorageFile};
@@ -225,12 +236,28 @@ fn sidecars(file: &str) -> [String; 2] {
     [format!("{file}.obao"), format!("{file}.journal")]
 }
 
+/// The list of devices admitted to a call, in its directory.
+pub const MEMBERS: &str = "devices.jsonl";
+
+#[derive(Serialize, Deserialize)]
+struct Member {
+    device: String,
+}
+
+/// A call's [`MEMBERS`] file, loaded.
+struct Members<F: StorageFile> {
+    file: F,
+    len: u64,
+    devices: BTreeSet<String>,
+}
+
 /// One call's tracks on the host's disk, with a manifest per take.
 pub struct Library<S: Storage> {
     call: String,
     dir: S,
     cfg: SyncConfig,
     takes: BTreeMap<u32, Take<S>>,
+    members: Option<Members<S::File>>,
 }
 
 impl<S: Storage> Library<S> {
@@ -244,7 +271,88 @@ impl<S: Storage> Library<S> {
             dir,
             cfg,
             takes: BTreeMap::new(),
+            members: None,
         })
+    }
+
+    fn members(&mut self) -> io::Result<&mut Members<S::File>> {
+        if self.members.is_none() {
+            let existed = self.dir.exists(MEMBERS)?;
+            let mut file = self.dir.open(MEMBERS)?;
+            if !existed {
+                self.dir.sync_dir()?;
+            }
+            let len = file.len()?;
+            let mut buf = vec![0u8; len as usize];
+            castcorder_transfer::io::read_exact_at(&mut file, 0, &mut buf)?;
+            let mut devices = BTreeSet::new();
+            let mut valid = 0;
+            for line in buf.split_inclusive(|b| *b == b'\n') {
+                if !line.ends_with(b"\n") {
+                    break;
+                }
+                let Ok(m) = serde_json::from_slice::<Member>(&line[..line.len() - 1]) else {
+                    break;
+                };
+                devices.insert(m.device);
+                valid += line.len();
+            }
+            if valid as u64 != len {
+                warn!(call = %self.call, kept = valid, len, "device list had a torn tail; truncated");
+                file.set_len(valid as u64)?;
+                file.sync()?;
+            }
+            self.members = Some(Members {
+                file,
+                len: valid as u64,
+                devices,
+            });
+        }
+        Ok(self.members.as_mut().expect("loaded above"))
+    }
+
+    /// Record (durably) that `device` was admitted to this call: from now
+    /// on it may deliver this call's tracks from any connection.
+    pub fn admit(&mut self, device: &str) -> io::Result<()> {
+        if device.is_empty() {
+            return Ok(());
+        }
+        let call = self.call.clone();
+        let m = self.members()?;
+        if m.devices.contains(device) {
+            return Ok(());
+        }
+        let mut line = serde_json::to_vec(&Member {
+            device: device.into(),
+        })
+        .map_err(io::Error::other)?;
+        line.push(b'\n');
+        m.file.write_at(m.len, &line)?;
+        m.file.sync()?;
+        m.len += line.len() as u64;
+        m.devices.insert(device.into());
+        info!(call = %call, device = %device, "device admitted to the call");
+        Ok(())
+    }
+
+    /// Whether `device` was admitted to this call. Reads only this call's
+    /// folder.
+    pub fn was_in(&mut self, device: &str) -> io::Result<bool> {
+        Ok(!device.is_empty() && self.members()?.devices.contains(device))
+    }
+
+    /// Whether `device` has an item in the manifests of these takes of this
+    /// call (take 0: its logs). For calls from before the device list: the
+    /// caller, which knows the take folders, may then [`admit`](Self::admit)
+    /// it. Only call it with takes whose folders exist (opening a take
+    /// creates its folder).
+    pub fn in_manifests(&mut self, device: &str, takes: &[TakeId]) -> io::Result<bool> {
+        for take in takes {
+            if self.take(*take)?.entries.keys().any(|(d, _)| d == device) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Free bytes on the volume holding the library.
@@ -547,7 +655,79 @@ fn blake3_hash(root: &[u8; 32]) -> castcorder_transfer::blake3::Hash {
     castcorder_transfer::blake3::Hash::from_bytes(*root)
 }
 
+/// The calls a puller files into: the open call (the one the guest is in)
+/// and, by key, other calls it delivers tracks of ([`Puller::offer_into`]).
+pub trait Libraries<S: Storage> {
+    /// The open call's library.
+    fn open_call(&mut self) -> &mut Library<S>;
+    /// Another call's library, if the caller has it open.
+    fn other_call(&mut self, key: &str) -> Option<&mut Library<S>>;
+}
+
+/// One library alone: no other calls.
+impl<S: Storage> Libraries<S> for Library<S> {
+    fn open_call(&mut self) -> &mut Library<S> {
+        self
+    }
+    fn other_call(&mut self, _key: &str) -> Option<&mut Library<S>> {
+        None
+    }
+}
+
+/// The open call's library and other calls' libraries by key.
+pub struct CallSet<'a, S: Storage> {
+    /// The open call.
+    pub open: &'a mut Library<S>,
+    /// Other calls, by the key their items were offered under.
+    pub others: &'a mut BTreeMap<String, Library<S>>,
+}
+
+impl<S: Storage> Libraries<S> for CallSet<'_, S> {
+    fn open_call(&mut self) -> &mut Library<S> {
+        self.open
+    }
+    fn other_call(&mut self, key: &str) -> Option<&mut Library<S>> {
+        self.others.get_mut(key)
+    }
+}
+
+/// The library an item files into: `None` is the open call.
+fn library_of<'a, S: Storage, L: Libraries<S>>(
+    libs: &'a mut L,
+    call: Option<&str>,
+) -> io::Result<&'a mut Library<S>> {
+    match call {
+        None => Ok(libs.open_call()),
+        Some(k) => libs
+            .other_call(k)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("call {k} not open"))),
+    }
+}
+
+/// Calls sort oldest first: `2026-11-15` < `2026-11-15-2` < `2026-11-15-10`.
+fn call_order(call: &str) -> (String, u32) {
+    if let Some((date, n)) = call.rsplit_once('-')
+        && date.len() == 10
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+    {
+        return (date.into(), n.parse().unwrap_or(u32::MAX));
+    }
+    (call.into(), 1)
+}
+
+/// The queue order: audio, video, logs; within each, oldest call, then
+/// oldest take, then name (see [`sync_order`]).
+type QueueKey = (u8, (String, u32), u32, String, Option<String>);
+
+fn queue_key(call_id: &str, key: Option<&str>, offer: &TrackOffer) -> QueueKey {
+    let (kind, take, name) = sync_order(offer);
+    (kind, call_order(call_id), take, name, key.map(String::from))
+}
+
 struct Pull<F: StorageFile> {
+    /// The call it files into (`None`: the open call).
+    call: Option<String>,
     entry: ManifestEntry,
     receiver: Receiver<F>,
     verified_recorded: bool,
@@ -561,7 +741,7 @@ pub struct Puller<S: Storage, C: MessageChannel> {
     call: String,
     participant: String,
     channel: C,
-    queue: BTreeMap<(u8, u32, String), TrackOffer>,
+    queue: BTreeMap<QueueKey, TrackOffer>,
     /// Items to confirm: (root, name). The DONE names the item, so identical
     /// items of this guest are confirmed one by one.
     done: VecDeque<([u8; 32], String)>,
@@ -591,28 +771,65 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
     /// Record the guest's offer and queue the track (or, if already verified,
     /// queue the confirmation the guest needs to delete its copy).
     pub fn offer(&mut self, lib: &mut Library<S>, offer: &TrackOffer) -> io::Result<ManifestEntry> {
+        self.offer_in(None, lib, offer)
+    }
+
+    /// Record an offer of a track recorded in another call (`lib`, which the
+    /// caller then serves as [`Libraries::other_call`] under `key`) and queue
+    /// it, as [`offer`](Self::offer). Refused (`PermissionDenied`, nothing
+    /// recorded) unless `member`, the connection's verified device, was
+    /// admitted to that call ([`Library::was_in`]): which call the guest is in
+    /// now does not matter.
+    pub fn offer_into(
+        &mut self,
+        key: &str,
+        lib: &mut Library<S>,
+        member: &str,
+        offer: &TrackOffer,
+    ) -> io::Result<ManifestEntry> {
+        if !lib.was_in(member)? {
+            warn!(call = %lib.call(), device = %member, take = offer.take.0, track = %offer.name,
+                "track offered for a call this device was not in; refused");
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("this device was not in call {}", lib.call()),
+            ));
+        }
+        self.offer_in(Some(key), lib, offer)
+    }
+
+    fn offer_in(
+        &mut self,
+        key: Option<&str>,
+        lib: &mut Library<S>,
+        offer: &TrackOffer,
+    ) -> io::Result<ManifestEntry> {
         let e = lib.offer(&self.participant, offer)?;
         if e.verified {
-            info!(call = %self.call, device = %offer.device, take = offer.take.0, track = %e.file,
+            info!(call = %lib.call(), device = %offer.device, take = offer.take.0, track = %e.file,
                 "track offered again but already received; confirming");
             self.done.push_back((offer.root, offer.name.clone()));
         } else if !self.current.as_ref().is_some_and(|c| {
-            c.entry.offer.device == offer.device && c.entry.offer.name == offer.name
+            c.call.as_deref() == key
+                && c.entry.offer.device == offer.device
+                && c.entry.offer.name == offer.name
         }) {
-            self.queue.insert(sync_order(offer), offer.clone());
+            self.queue
+                .insert(queue_key(lib.call(), key, offer), offer.clone());
         }
         Ok(e)
     }
 
-    /// The tracks completed (verified and confirmed) since the last call.
+    /// The open call's tracks completed (verified and confirmed) since the
+    /// last call (other calls' are only logged).
     pub fn take_completed(&mut self) -> Vec<ManifestEntry> {
         std::mem::take(&mut self.completed)
     }
 
-    /// The track being received now, if any: its manifest entry, the transfer
-    /// units already on disk and the units in the whole track.
+    /// The open call's track being received now, if any: its manifest entry,
+    /// the transfer units already on disk and the units in the whole track.
     pub fn receiving(&self) -> Option<(&ManifestEntry, u64, u64)> {
-        self.current.as_ref().map(|c| {
+        self.current.as_ref().filter(|c| c.call.is_none()).map(|c| {
             (
                 &c.entry,
                 c.receiver.units_have(),
@@ -647,9 +864,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         !self.closed
     }
 
-    fn start_next(&mut self, lib: &mut Library<S>) -> io::Result<()> {
-        while let Some((_, offer)) = self.queue.pop_first() {
+    fn start_next<L: Libraries<S>>(&mut self, libs: &mut L) -> io::Result<()> {
+        while let Some((key, offer)) = self.queue.pop_first() {
+            let call = key.4;
             let take = offer.take;
+            let Ok(lib) = library_of(libs, call.as_deref()) else {
+                warn!(call = ?call, device = %offer.device, track = %offer.name,
+                    "call no longer open; track dropped until offered again");
+                continue;
+            };
             let Some(entry) = lib.entry(take, &offer.device, &offer.name)? else {
                 continue;
             };
@@ -662,13 +885,14 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             let have = receiver.units_have();
             let total = receiver.geometry().n_units();
             if have > 0 {
-                info!(call = %self.call, device = %entry.offer.device, take = take.0, track = %entry.file,
+                info!(call = %lib.call(), device = %entry.offer.device, take = take.0, track = %entry.file,
                     units_have = have, units = total, "sync resume");
             } else {
-                info!(call = %self.call, device = %entry.offer.device, take = take.0, track = %entry.file,
+                info!(call = %lib.call(), device = %entry.offer.device, take = take.0, track = %entry.file,
                     units = total, size = entry.offer.size, "sync start");
             }
             self.current = Some(Pull {
+                call,
                 entry,
                 receiver,
                 verified_recorded: false,
@@ -683,7 +907,7 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
     /// Move everything that can move now. While `recording`, no new requests go
     /// out (data already requested is still taken). Returns whether anything
     /// happened. Disk errors are returned; channel errors close the puller.
-    pub fn poll(&mut self, lib: &mut Library<S>, recording: bool) -> io::Result<bool> {
+    pub fn poll<L: Libraries<S>>(&mut self, libs: &mut L, recording: bool) -> io::Result<bool> {
         if self.closed || self.broken {
             return Ok(false);
         }
@@ -700,7 +924,7 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             progress = true;
         }
         if self.current.is_none() && !recording {
-            self.start_next(lib)?;
+            self.start_next(libs)?;
         }
         loop {
             let m = match self.channel.try_recv() {
@@ -771,7 +995,8 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 };
                 if cur.receiver.state() == State::Verified && !cur.verified_recorded {
                     // The DONE about to go out lets the guest delete: record first.
-                    lib.mark_verified(o.take, &o.device, &o.name)?;
+                    library_of(libs, cur.call.as_deref())?
+                        .mark_verified(o.take, &o.device, &o.name)?;
                     cur.verified_recorded = true;
                 }
                 progress = true;
@@ -785,12 +1010,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             let c = self.current.take().expect("current is set");
             let entry = c.entry;
             drop(c.receiver);
+            let lib = library_of(libs, c.call.as_deref())?;
             lib.finish(o.take, &o.device, &o.name)?;
-            info!(call = %self.call, device = %o.device, take = o.take.0, track = %entry.file,
+            info!(call = %lib.call(), device = %o.device, take = o.take.0, track = %entry.file,
                 size = o.size, "sync done: track verified and confirmed");
             let mut entry = entry;
             entry.verified = true;
-            self.completed.push(entry);
+            if c.call.is_none() {
+                self.completed.push(entry);
+            }
             progress = true;
         }
         Ok(progress)
