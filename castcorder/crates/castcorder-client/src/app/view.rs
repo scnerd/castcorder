@@ -307,6 +307,23 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
             _ => format!("Last attempt: {c}"),
         }
     };
+    // The background sync after Leave (or on a page opened to finish one).
+    let sync_text = move || {
+        let left = ui.sync_left.get();
+        if left > 0 {
+            let state = ui.sync.get();
+            let state = if state.is_empty() {
+                "waiting".to_string()
+            } else {
+                state
+            };
+            format!(
+                "Sending your recordings to the host: {left} file(s) left ({state}). Keep this page open."
+            )
+        } else {
+            ui.sync_done.get()
+        }
+    };
     let last_error = move || ui.errors.get().last().cloned().unwrap_or_default();
     view! {
         <div class="lobby" hidden=move || ui.joined.get()>
@@ -349,6 +366,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                     </div>
                     <button id="join" class="btn primary big" disabled=move || ui.joined.get() on:click=on_join>"Join call"</button>
                     <span class="lobby-status">{status}</span>
+                    <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
                     <span class="lobby-error" hidden=move || ui.errors.get().is_empty()>{last_error}</span>
                     <details class="advanced">
                         <summary>"Connection settings"</summary>
@@ -697,6 +715,9 @@ pub(super) fn App() -> impl IntoView {
         takes: RwSignal::new(None),
         progress: RwSignal::new(Default::default()),
         delivered: RwSignal::new(Default::default()),
+        sync: RwSignal::new(String::new()),
+        sync_left: RwSignal::new(0),
+        sync_done: RwSignal::new(String::new()),
         muted: RwSignal::new(false),
         mute_tip: RwSignal::new(false),
         theme: RwSignal::new(stored_theme()),

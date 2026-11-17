@@ -605,6 +605,45 @@ impl Room {
         Ok(Admission::Enter)
     }
 
+    /// Decide on a sync-only connection of verified `device` (see
+    /// [`admit_offer`](Self::admit_offer) for `alias`). It joins no call, so
+    /// none of the call's gates apply (lock, password, waiting for a
+    /// producer): only a device kicked from this room is refused. Each item
+    /// it delivers is authorized on its own, against the call it was recorded
+    /// in.
+    pub fn admit_sync(
+        &self,
+        device: &str,
+        alias: Option<&str>,
+        at_host: bool,
+    ) -> Result<(), Refusal> {
+        let r = if !valid_device(device) {
+            Err(Refusal::BadDevice)
+        } else if !at_host && self.banned(device, alias) {
+            Err(Refusal::Kicked)
+        } else {
+            Ok(())
+        };
+        match r {
+            Ok(()) => decision(device, "guest", "sync", true, "device key verified"),
+            Err(e) => decision(device, "guest", "sync", false, e.reason()),
+        }
+        r
+    }
+
+    /// Whether the pre-key id `old` is bound to the key-derived id `device`
+    /// (old outbox items keep their manifest keys).
+    pub fn is_alias(&self, old: &str, device: &str) -> bool {
+        self.saved.aliases.get(old).is_some_and(|d| d == device)
+    }
+
+    /// Whether `device` (or the pre-key id `alias` it would bind) was kicked
+    /// from this room.
+    pub fn banned(&self, device: &str, alias: Option<&str>) -> bool {
+        self.record_for(device, alias).is_some_and(|d| d.banned)
+            || self.saved.devices.get(device).is_some_and(|d| d.banned)
+    }
+
     /// The transport accepted an admitted offer as `conn`: bind its device.
     pub fn accepted(&mut self, conn: ConnId, device: &str, at_host: bool) {
         self.conns.insert(

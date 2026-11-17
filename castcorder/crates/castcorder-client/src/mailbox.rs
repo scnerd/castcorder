@@ -123,7 +123,8 @@ impl Mailbox {
     /// Seal `sdp` (with the call secret, `name`, the device id, its key
     /// `proof` and the password, if any) to the link's host, send
     /// it, and open the host's answer SDP. A refusal (wrong call secret, host
-    /// offline) is an error naming why.
+    /// offline) is an error naming why. `sync_only`: a sync-only connection.
+    #[allow(clippy::too_many_arguments)]
     pub async fn exchange(
         &self,
         link: &CallLink,
@@ -132,6 +133,7 @@ impl Mailbox {
         password: Option<&str>,
         sdp: &str,
         proof: castcorder_link::DeviceProof,
+        sync_only: bool,
     ) -> Result<String, JsValue> {
         let mut ephemeral = [0u8; 32];
         web_sys::window()
@@ -145,6 +147,7 @@ impl Mailbox {
             device: device.to_string(),
             password: password.map(str::to_string),
             proof: Some(proof),
+            sync_only,
         };
         let (sealed, guest) = GuestSeal::seal(&link.host, ephemeral, to_json(&plain).as_bytes())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -74,6 +74,16 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
     /// A guest whose video is sent as two simulcast layers, "h" and "l" (with
     /// `simulcast`), as a Chromium guest sends it.
     pub fn with_simulcast(socket: S, clock: C, simulcast: bool) -> (Self, String) {
+        Self::build(socket, clock, Some(simulcast))
+    }
+
+    /// A sync-only guest: its first offer has the two data channels alone.
+    pub fn sync_only(socket: S, clock: C) -> (Self, String) {
+        Self::build(socket, clock, None)
+    }
+
+    /// With media (`Some(simulcast)`) or data channels only (`None`).
+    fn build(socket: S, clock: C, media: Option<bool>) -> (Self, String) {
         let base = Instant::now();
         let now = base + clock.monotonic();
         let mut rtc = Rtc::builder()
@@ -85,23 +95,30 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
             .build(now);
         rtc.add_local_candidate(Candidate::host(socket.local_addr(), "udp").unwrap());
         let mut api = rtc.sdp_api();
-        let audio_mid = api.add_media(
-            MediaKind::Audio,
-            Direction::SendOnly,
-            Some("own".into()),
-            None,
-            None,
-        );
-        let video_mid = api.add_media(
-            MediaKind::Video,
-            Direction::SendOnly,
-            Some("own".into()),
-            None,
-            simulcast.then(|| Simulcast {
-                send: vec![SimulcastLayer::new("h"), SimulcastLayer::new("l")],
-                recv: vec![],
-            }),
-        );
+        let (audio_mid, video_mid) = match media {
+            Some(simulcast) => {
+                let audio_mid = api.add_media(
+                    MediaKind::Audio,
+                    Direction::SendOnly,
+                    Some("own".into()),
+                    None,
+                    None,
+                );
+                let video_mid = api.add_media(
+                    MediaKind::Video,
+                    Direction::SendOnly,
+                    Some("own".into()),
+                    None,
+                    simulcast.then(|| Simulcast {
+                        send: vec![SimulcastLayer::new("h"), SimulcastLayer::new("l")],
+                        recv: vec![],
+                    }),
+                );
+                (audio_mid, video_mid)
+            }
+            // No media: these mids name nothing.
+            None => (Mid::from("none-a"), Mid::from("none-v")),
+        };
         api.add_channel("control".into());
         api.add_channel("data".into());
         let (offer, pending) = api.apply().unwrap();

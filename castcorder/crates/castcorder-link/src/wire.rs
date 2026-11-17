@@ -169,6 +169,15 @@ pub struct OfferPlain {
     /// offers without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof: Option<crate::identity::DeviceProof>,
+    /// A sync-only connection: data channels only, no media, not a
+    /// participant; it only delivers the device's recordings (absent: a
+    /// call connection).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sync_only: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What the host seals back: an answer SDP, or why the guest was refused.
@@ -255,5 +264,9 @@ mod tests {
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));
         assert_eq!(old.proof, None);
+        assert!(!old.sync_only);
+        // A call connection's offer does not name sync_only at all.
+        let again: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
+        assert!(!to_json(&again).contains("sync_only"));
     }
 }

@@ -658,35 +658,44 @@ fn blake3_hash(root: &[u8; 32]) -> castcorder_transfer::blake3::Hash {
 /// The calls a puller files into: the open call (the one the guest is in)
 /// and, by key, other calls it delivers tracks of ([`Puller::offer_into`]).
 pub trait Libraries<S: Storage> {
-    /// The open call's library.
-    fn open_call(&mut self) -> &mut Library<S>;
+    /// The open call's library (`None`: no call is open, as for a host
+    /// serving only sync-only connections).
+    fn open_call(&mut self) -> Option<&mut Library<S>>;
     /// Another call's library, if the caller has it open.
     fn other_call(&mut self, key: &str) -> Option<&mut Library<S>>;
 }
 
 /// One library alone: no other calls.
 impl<S: Storage> Libraries<S> for Library<S> {
-    fn open_call(&mut self) -> &mut Library<S> {
-        self
+    fn open_call(&mut self) -> Option<&mut Library<S>> {
+        Some(self)
     }
     fn other_call(&mut self, _key: &str) -> Option<&mut Library<S>> {
         None
     }
 }
 
-/// The open call's library and other calls' libraries by key.
+/// The open call's library and other calls' libraries by key. One folder
+/// has one [`Library`] at a time (two would append to one manifest at stale
+/// offsets): items a connection not in the open call delivers for it (a
+/// sync-only connection) are offered under `open_key` and file into `open`.
 pub struct CallSet<'a, S: Storage> {
-    /// The open call.
-    pub open: &'a mut Library<S>,
+    /// The open call, if any.
+    pub open: Option<&'a mut Library<S>>,
+    /// The key the open call goes by in `others`' key space, if any.
+    pub open_key: Option<&'a str>,
     /// Other calls, by the key their items were offered under.
     pub others: &'a mut BTreeMap<String, Library<S>>,
 }
 
 impl<S: Storage> Libraries<S> for CallSet<'_, S> {
-    fn open_call(&mut self) -> &mut Library<S> {
-        self.open
+    fn open_call(&mut self) -> Option<&mut Library<S>> {
+        self.open.as_deref_mut()
     }
     fn other_call(&mut self, key: &str) -> Option<&mut Library<S>> {
+        if self.open_key == Some(key) {
+            return self.open.as_deref_mut();
+        }
         self.others.get_mut(key)
     }
 }
@@ -697,7 +706,9 @@ fn library_of<'a, S: Storage, L: Libraries<S>>(
     call: Option<&str>,
 ) -> io::Result<&'a mut Library<S>> {
     match call {
-        None => Ok(libs.open_call()),
+        None => libs
+            .open_call()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no call open")),
         Some(k) => libs
             .other_call(k)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("call {k} not open"))),

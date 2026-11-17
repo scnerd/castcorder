@@ -10,13 +10,14 @@
 //!   link or null) and `"lan"` (the LAN https links the host prints), so the
 //!   host machine's page can show the call link before anyone joins.
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
-//!   "password":P?,"proof":PROOF}` (any content type; PROOF is castcorder-link
-//!   `identity::DeviceProof` with audience HOST; required) and
+//!   "password":P?,"proof":PROOF,"sync":B?}` (any content type; PROOF is
+//!   castcorder-link `identity::DeviceProof` with audience HOST; required) and
 //!   returns the answer in the same
 //!   shape. The room decides first (castcorder-host `room`): an offer on the
 //!   localhost listener is at the host machine; a refusal is 403 (`kicked:`,
 //!   `locked:`, `wrong_password:`, `bad_device:`) or 503 (`waiting:` a
-//!   producer-gated call with no producer in it yet).
+//!   producer-gated call with no producer in it yet). `"sync":true` asks for
+//!   a sync-only connection (docs/design.md "Background sync").
 //! - Producer controls go over the control channel (castcorder-protocol
 //!   `Request::StartTake`, `Request::Room`), authorized per device role. For
 //!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
@@ -331,6 +332,9 @@ struct Sdp {
     /// The device key proof (audience: the host id).
     #[serde(default)]
     proof: Option<castcorder_link::DeviceProof>,
+    /// A sync-only connection (data channels only, not a participant).
+    #[serde(default)]
+    sync: bool,
 }
 
 /// The HTTP status of an offer refusal: 503 while waiting for a producer,
@@ -447,6 +451,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 proof: offer.proof,
                 audience: app.host_id.clone(),
                 at_host: producer,
+                sync_only: offer.sync,
                 reply,
             }) {
                 Some(Ok(sdp)) => json(

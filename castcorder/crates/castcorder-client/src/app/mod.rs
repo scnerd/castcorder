@@ -47,6 +47,7 @@
 //! preview tile. JS handles live in a thread-local [`Engine`]; Leptos signals
 //! hold only plain values.
 
+mod background;
 mod capture;
 mod data;
 mod home;
@@ -171,7 +172,18 @@ struct Engine {
     data: Option<RtcDataChannel>,
     /// Roots offered to the host on this connection.
     offered: BTreeSet<[u8; 32]>,
-    offer_requests: Vec<RequestId>,
+    /// Track offers awaiting their answer, with the root each offered.
+    offer_requests: Vec<(RequestId, [u8; 32])>,
+    /// Background sync ([`background`]): after Leave (or on a page opened
+    /// without joining), a sync-only connection delivers what the outbox
+    /// still holds for this host; its state lives here until the next join.
+    sync_only: bool,
+    /// Roots the host refused on this sync-only connection (kept here).
+    refused: BTreeSet<[u8; 32]>,
+    /// The host refused the device itself: no more sync-only attempts.
+    sync_refused: bool,
+    /// Items delivered by the background sync so far.
+    sync_delivered: usize,
     rpc: Option<RpcClient<DcChannel>>,
     join_request: Option<RequestId>,
     status_request: Option<RequestId>,
@@ -389,6 +401,13 @@ struct Ui {
     progress: RwSignal<std::collections::BTreeMap<String, u8>>,
     /// Items the host confirmed (their local copies are deleted).
     delivered: RwSignal<BTreeSet<String>>,
+    /// The background sync, in words (empty: none): what a sync-only
+    /// connection is doing after Leave, until everything is delivered.
+    sync: RwSignal<String>,
+    /// Background sync: items of this host still to deliver.
+    sync_left: RwSignal<usize>,
+    /// Background sync: how it ended (empty while it runs or never did).
+    sync_done: RwSignal<String>,
     /// Muted in the call: the live stream's microphone is off. The raw
     /// microphone, which is the recording, is never touched.
     muted: RwSignal<bool>,
@@ -481,7 +500,8 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
         match string(&d, "type").as_str() {
             "ready" => {
                 MSTP_IN_WORKER.set(Some(get(&d, "mstpInWorker").is_truthy()));
-                post_worker(&worker_cmd("list"), None)
+                post_worker(&worker_cmd("list"), None);
+                background::worker_ready(ui);
             }
             "source-ok" | "source-failed" => {
                 let id = num(&d, "id");
@@ -549,7 +569,10 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 ui.tracks_json.set(stringify(&arr));
             }
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
-            "outbox" => offer_tracks(&d),
+            "outbox" => {
+                offer_tracks(&d);
+                background::on_outbox(ui, &d);
+            }
             "xfer-out" => send_frames(&get(&d, "frames")),
             "xfer-progress" => ui.progress.set(
                 Array::from(&get(&d, "items"))
@@ -571,6 +594,7 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 }
                 let ctx = with_engine(|e| e.ctx.clone());
                 info!(call = %ctx.call, device = %ctx.device, track = %string(&d, "name"), "track synced to the host; local copy deleted");
+                background::synced(ui);
             }
             _ => {}
         }
@@ -579,4 +603,14 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
     onmsg.forget();
     with_engine(|e| e.worker = Some(worker));
     Ok(())
+}
+
+/// Where connection states are shown: the background sync's line while a
+/// sync-only connection is in use, else the call's.
+fn status_line(ui: Ui) -> RwSignal<String> {
+    if with_engine(|e| e.sync_only) {
+        ui.sync
+    } else {
+        ui.connection
+    }
 }

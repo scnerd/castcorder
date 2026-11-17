@@ -214,6 +214,41 @@ fn kick_bans_the_device_and_it_cannot_rejoin() {
     assert!(!room.role(3).producer);
 }
 
+/// A sync-only connection (cast-xsh) joins no call: locked, password and
+/// producer gate do not apply; a banned device is refused, a valid id needed.
+#[test]
+fn sync_only_admits_by_device_key_and_refuses_a_banned_device() {
+    let mut room = Room::new(false);
+    let h = host_page(&mut room);
+    enter(&mut room, 2, "dev-b", false, None).unwrap();
+    enter(&mut room, 3, "dev-c", false, None).unwrap();
+    room.apply(h, &RoomAction::Lock(true), SALT).unwrap();
+    room.apply(h, &RoomAction::SetPassword(Some("pw".into())), SALT)
+        .unwrap();
+    room.apply(
+        h,
+        &RoomAction::Kick {
+            participant: ParticipantId(3),
+        },
+        SALT,
+    )
+    .unwrap();
+    for c in [1, 2, 3] {
+        room.left(c);
+    }
+    // Nobody is in, the room is gated, locked and has a password: a call
+    // connection of an unknown device would not get in.
+    assert!(room.admit("dev-new", false, Some("pw")).is_err());
+    assert_eq!(room.admit_sync("dev-new", None, false), Ok(()));
+    assert_eq!(room.admit_sync("dev-b", None, false), Ok(()));
+    assert_eq!(room.admit_sync("dev-c", None, false), Err(Refusal::Kicked));
+    assert!(room.banned("dev-c", None) && !room.banned("dev-b", None));
+    assert_eq!(room.admit_sync("", None, false), Err(Refusal::BadDevice));
+    // Admission changes nothing: no record, no connection.
+    assert!(room.device("dev-new").is_none());
+    assert!(!room.producer_present());
+}
+
 #[test]
 fn a_gated_call_makes_guests_wait_until_a_producer_is_in_it() {
     let mut room = Room::new(false);

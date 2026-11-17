@@ -49,9 +49,18 @@ pub(super) fn offer_tracks(msg: &JsValue) {
             let Some(rpc) = e.rpc.as_mut() else {
                 return;
             };
-            if e.participant.is_none() || !e.offered.insert(offer.root) {
+            if e.participant.is_none() && !e.sync_only {
                 return;
             }
+            // A sync-only connection is in no call: it delivers only tracks
+            // that name theirs (those from before rooms wait for a join).
+            if e.sync_only && (room.is_empty() || call.is_empty()) {
+                return;
+            }
+            if !e.offered.insert(offer.root) {
+                return;
+            }
+            let root = offer.root;
             let request = if room.is_empty() || call.is_empty() {
                 info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size, "offering track to the host");
                 Request::OfferTrack(offer)
@@ -67,7 +76,7 @@ pub(super) fn offer_tracks(msg: &JsValue) {
                 }
             };
             match rpc.send(request) {
-                Ok(id) => e.offer_requests.push(id),
+                Ok(id) => e.offer_requests.push((id, root)),
                 Err(err) => warn!(error = ?err, "OfferTrack not sent"),
             }
         });

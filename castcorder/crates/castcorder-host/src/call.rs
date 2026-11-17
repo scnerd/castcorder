@@ -23,6 +23,7 @@ use castcorder_protocol::{
 use std::path::PathBuf;
 
 mod routing;
+mod sync;
 pub use routing::{CallView, RoomView, Rooms};
 
 use crate::room::{Admission, Effect, Need, Room};
@@ -70,6 +71,9 @@ pub enum Command {
         audience: String,
         /// The offer came from the host machine itself (the localhost page).
         at_host: bool,
+        /// A sync-only connection: data channels only, not a participant,
+        /// admitted by its device key alone ([`sync`]).
+        sync_only: bool,
         /// Where the answer goes; a refusal starts with its code
         /// (`waiting:`, `kicked:`, `locked:`, `wrong_password:`, ...).
         reply: mpsc::Sender<Result<String, String>>,
@@ -333,6 +337,9 @@ pub struct Call {
     recorders_dirty: bool,
     /// When the recorders are next checked anyway (roles change too).
     recorders_due_us: i64,
+    /// Sync-only connections ([`sync`]): not participants, never counted
+    /// as anyone in the call.
+    syncers: BTreeMap<GuestId, sync::Syncer>,
 }
 
 /// How often the library volume's free space is read (host timeline, us).
@@ -453,6 +460,7 @@ impl Call {
             recorders_sent: BTreeMap::new(),
             recorders_dirty: false,
             recorders_due_us: 0,
+            syncers: BTreeMap::new(),
         };
         call.save_room();
         call
@@ -817,13 +825,26 @@ impl Call {
         let recording = matches!(self.status, TakeStatus::Recording { .. });
         let mut gone = Vec::new();
         let mut completed: Vec<TakeId> = Vec::new();
-        let Some(library) = self.library.as_mut() else {
-            return;
-        };
+        let open_key = self
+            .call_id
+            .as_ref()
+            .map(|c| format!("{}/{c}", self.room_name));
         let mut libs = CallSet {
-            open: library,
+            open: self.library.as_mut(),
+            open_key: open_key.as_deref(),
             others: &mut self.elsewhere,
         };
+        // Sync-only connections go below the live call: they ask for nothing
+        // while a take records or a guest in the call is still syncing.
+        let busy = self.pullers.values().any(|p| !p.is_idle());
+        self.remove.extend(sync::poll_syncers(
+            &mut self.syncers,
+            &mut libs,
+            recording || busy,
+        ));
+        if libs.open.is_none() {
+            return;
+        }
         for (id, p) in &mut self.pullers {
             if let Err(e) = p.poll(&mut libs, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
@@ -1185,7 +1206,7 @@ impl Call {
                 TakeStatus::Idle => None,
             },
             last_take: self.last_take,
-            syncing: self.pullers.values().filter(|p| !p.is_idle()).count(),
+            syncing: self.pullers.values().filter(|p| !p.is_idle()).count() + self.syncing(),
             attention: self.device_disk().iter().filter(|d| d.low).count()
                 + self.unmet.len()
                 + self.recorders.mic_lost(),
@@ -1208,7 +1229,8 @@ impl Call {
                     .map(|p| format!("{} (host microphone)", p.name)),
             )
             .collect();
-        serde_json::json!({ "take": take, "guests": guests }).to_string()
+        serde_json::json!({ "take": take, "guests": guests, "sync_only": self.syncers_json() })
+            .to_string()
     }
 
     fn broadcast(&mut self) {
@@ -1378,6 +1400,11 @@ impl Call {
                     let deadline = host.poll();
                     while let Some(e) = host.next_event() {
                         match e {
+                            HostEvent::GuestGone { guest, reason }
+                                if self.syncers.contains_key(&guest) =>
+                            {
+                                self.sync_gone(guest, &reason);
+                            }
                             HostEvent::GuestGone { guest, reason } => {
                                 info!(guest = guest.0, reason = ?reason, "guest left");
                                 self.rpc.remove(&guest);
@@ -1412,6 +1439,7 @@ impl Call {
                     if self.serve() {
                         host.poll();
                     }
+                    self.serve_syncers();
                     for id in std::mem::take(&mut self.remove) {
                         // Kicked (or refused at Join): flush its last answer,
                         // then drop it; it is reported gone next poll.
@@ -1445,8 +1473,24 @@ impl Call {
                 proof,
                 audience,
                 at_host,
+                sync_only,
                 reply,
             } => {
+                if sync_only {
+                    // Beside any live call, in any room: not a participant.
+                    let r = self.offer_sync(
+                        host,
+                        room.as_deref(),
+                        &name,
+                        &offer_sdp,
+                        &device,
+                        proof.as_ref(),
+                        &audience,
+                        at_host,
+                    );
+                    let _ = reply.send(r);
+                    return;
+                }
                 // Only one call is live at a time: an offer for another room
                 // waits until this one empties; one for a room not loaded
                 // loads its security first.
