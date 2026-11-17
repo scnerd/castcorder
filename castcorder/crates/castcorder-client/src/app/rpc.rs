@@ -295,6 +295,8 @@ pub(super) fn pump_rpc(ui: Ui) {
                         set(&msg, "device", e.ctx.device.as_str());
                         samples.push(msg);
                     }
+                    // Remembered for "Rooms you joined".
+                    super::rejoin::remember(&c);
                     ui.call_ref.set(Some(c));
                 }
                 Event::Calls(list) => ui.calls.set(list),

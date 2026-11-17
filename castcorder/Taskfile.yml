@@ -95,7 +95,7 @@ tasks:
       Run from the repo root with: task test:browser
     dir: crates/castcorder-client/browser-test
     cmds:
-      - cargo build --release --locked -p castcorder-host
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
       - cd .. && trunk build --release
       - npm install --no-audit --no-fund
       - node setup.mjs

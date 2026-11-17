@@ -75,9 +75,36 @@ pub fn call_link(url: &str) -> Result<String, DeepLinkError> {
     ))
 }
 
+/// The link that opens "Rooms you joined" (docs/design.md "Rejoining"): the
+/// rooms and calls this install's call window has been in, listed in its
+/// lobby. The host machine's home links to it.
+pub const ROOMS: &str = "castcorder://rooms";
+
+/// Whether `url` is [`ROOMS`] (any case, a trailing slash tolerated).
+pub fn is_rooms_link(url: &str) -> bool {
+    url.trim().trim_end_matches('/').eq_ignore_ascii_case(ROOMS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rooms_link_is_recognised_and_is_no_call_link() {
+        for url in [
+            ROOMS,
+            "castcorder://rooms/",
+            "CastCorder://Rooms",
+            " castcorder://rooms
+",
+        ] {
+            assert!(is_rooms_link(url), "{url}");
+            assert!(call_link(url).is_err(), "{url}");
+        }
+        let f = fragment();
+        assert!(!is_rooms_link(&format!("castcorder://rooms/#{f}")));
+        assert!(!is_rooms_link("castcorder://roomsx"));
+    }
     use castcorder_link::{CallSecret, HostKey};
 
     fn fragment() -> String {
