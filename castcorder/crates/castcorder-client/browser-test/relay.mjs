@@ -35,12 +35,12 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import dgram from 'node:dgram';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { callDir } from './lib/helpers.mjs';
+import { COTURN_IMAGE, docker, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -58,7 +58,6 @@ for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
   if (!existsSync(f)) { console.log('FAIL missing ' + f); process.exit(1); }
 }
 const VERSION = '0.0.0';
-const COTURN_IMAGE = 'coturn/coturn:4.6';
 // Lifetime of minted TURN credentials (s). The host renews at 80% of it, so
 // the first renewal lands mid-test; everything after it must finish before
 // the second (at 160%), when the guests' own credentials (minted once, at
@@ -81,66 +80,6 @@ async function waitFor(fn, what, timeout = 30000, interval = 200) {
     if (Date.now() - t0 > timeout) throw new Error('timeout waiting for ' + what);
     await sleep(interval);
   }
-}
-
-const docker = (args) => execFileSync('docker', args, {
-  encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, MSYS_NO_PATHCONV: '1' },
-}).trim();
-
-// One STUN Binding request; true if anything answers within `ms`.
-function stunAnswers(ip, port, ms = 700) {
-  return new Promise((resolve) => {
-    const s = dgram.createSocket('udp4');
-    const req = Buffer.alloc(20);
-    req.writeUInt16BE(1, 0);
-    req.writeUInt32BE(0x2112A442, 4);
-    randomBytes(12).copy(req, 8);
-    const done = (v) => { clearTimeout(t); try { s.close(); } catch { /* closed */ } resolve(v); };
-    const t = setTimeout(() => done(false), ms);
-    s.on('message', () => done(true));
-    s.on('error', () => done(false));
-    s.send(req, port, ip);
-  });
-}
-
-// The local address this machine sends from toward ip:port (connecting a UDP
-// socket sends nothing).
-function localAddressToward(ip, port) {
-  return new Promise((resolve, reject) => {
-    const s = dgram.createSocket('udp4');
-    s.connect(port, ip, (e) => {
-      if (e) { s.close(); reject(e); return; }
-      const a = s.address().address;
-      s.close();
-      resolve(a);
-    });
-  });
-}
-
-// Where this machine reaches the container's published UDP port. Docker Desktop
-// forwards UDP on 127.0.0.1; a Docker Engine inside WSL2 only forwards TCP to
-// Windows' localhost, so there the WSL VM's own address is used. Override with
-// CASTCORDER_TURN_HOST.
-async function reachableDockerAddress(port) {
-  let candidates = process.env.CASTCORDER_TURN_HOST ? [process.env.CASTCORDER_TURN_HOST] : ['127.0.0.1'];
-  if (!process.env.CASTCORDER_TURN_HOST) {
-    const probe = CONTAINER + '-ip';
-    try {
-      docker(['run', '-d', '--name', probe, '--network', 'host', '--entrypoint', '/bin/cat', COTURN_IMAGE, '/proc/net/fib_trie']);
-      await sleep(1500);
-      const trie = docker(['logs', probe]).split('\n');
-      for (let i = 1; i < trie.length; i++) {
-        const m = trie[i - 1].match(/\|-- (\d+\.\d+\.\d+\.\d+)/);
-        if (m && trie[i].includes('/32 host LOCAL') && !m[1].startsWith('127.')) candidates.push(m[1]);
-      }
-    } catch { /* not a Linux daemon we can inspect */ }
-    try { docker(['rm', '-f', probe]); } catch { /* gone */ }
-    candidates = [...new Set(candidates)];
-  }
-  for (let round = 0; round < 15; round++) {
-    for (const ip of candidates) if (await stunAnswers(ip, port)) return ip;
-  }
-  throw new Error('coturn does not answer on port ' + port + ' at any of ' + candidates.join(', '));
 }
 
 const procs = [];
@@ -193,20 +132,11 @@ let coturnLog = '';
 let passed = false;
 let rv, host;
 try {
-  try {
-    docker(['version', '--format', '{{.Server.Version}}']);
-  } catch (e) {
-    throw new Error('docker is not reachable (set DOCKER_HOST?): ' + String(e.stderr || e.message).trim());
-  }
-  docker(['run', '-d', '--rm', '--name', CONTAINER, '-p', '3478/udp', '-p', '9641/tcp', COTURN_IMAGE,
-    '-n', '--listening-port=3478', '--realm=castcorder.test', '--fingerprint',
-    '--use-auth-secret', '--static-auth-secret=' + SECRET, '--min-port=49160', '--max-port=49200',
-    '--prometheus', '--prometheus-username-labels', '--user-quota=32', '--max-bps=2500000',
-    '--no-tls', '--no-dtls', '--no-tcp-relay', '--no-cli', '--log-file=stdout', '--simple-log', '--verbose']);
-  const mapped = docker(['port', CONTAINER, '3478/udp']).split('\n')[0];
-  const TURN_PORT = Number(mapped.split(':').pop());
-  const TURN_IP = await reachableDockerAddress(TURN_PORT);
-  const TURN_URL = 'turn:' + TURN_IP + ':' + TURN_PORT + '?transport=udp';
+  const turn = await startCoturn(CONTAINER, SECRET, {
+    publish: ['9641/tcp'],
+    extra: ['--prometheus', '--prometheus-username-labels', '--user-quota=32', '--max-bps=2500000'],
+  });
+  const [TURN_IP, TURN_PORT, TURN_URL] = [turn.ip, turn.port, turn.url];
   console.log('coturn (' + COTURN_IMAGE + ', Docker) answering STUN at ' + TURN_IP + ':' + TURN_PORT + '/udp');
 
   const METRICS_PORT = Number(docker(['port', CONTAINER, '9641/tcp']).split('\n')[0].split(':').pop());
@@ -392,8 +322,8 @@ try {
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
   for (const [, st] of procs) st.p.kill();
-  try { if (!coturnLog) coturnLog = docker(['logs', CONTAINER]); } catch { /* not started */ }
-  try { docker(['rm', '-f', CONTAINER]); } catch { /* not started */ }
+  const last = stopCoturn(CONTAINER);
+  if (!coturnLog) coturnLog = last;
 }
 for (const [name, st] of procs) writeFileSync(join(RESULTS, 'relay-' + name + '.log'), st.out + '\n--- stderr ---\n' + st.err);
 writeFileSync(join(RESULTS, 'relay-coturn.log'), coturnLog.replaceAll(SECRET, '<secret>'));

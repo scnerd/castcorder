@@ -44,8 +44,9 @@ pub fn unb64(s: &str) -> Option<Vec<u8>> {
     B64.decode(s).ok()
 }
 
-/// One ICE server, in the browser's RTCIceServer shape.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// One ICE server, in the browser's RTCIceServer shape (plus `expires`,
+/// which browsers ignore).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IceServer {
     /// `stun:host:port` (and later `turn:` URLs).
     pub urls: Vec<String>,
@@ -55,6 +56,11 @@ pub struct IceServer {
     /// TURN credential, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    /// When the credentials expire (unix seconds). Coturn REST usernames
+    /// also start with it (`<expiry>:<host id>`); Cloudflare's are opaque,
+    /// so a host renews by this field when it is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<u64>,
 }
 
 /// Error codes the server sends.
@@ -75,6 +81,10 @@ pub mod code {
     /// are minted for it until its usage falls back under the budget. Direct
     /// connections are unaffected.
     pub const RELAY_QUOTA: &str = "relay_quota";
+    /// The server has a relay but could not mint credentials just now (its
+    /// relay is misconfigured, or the relay provider's API failed). Direct
+    /// connections are unaffected.
+    pub const RELAY_UNAVAILABLE: &str = "relay_unavailable";
 }
 
 /// A frame from the server.
@@ -369,8 +379,7 @@ mod tests {
                 stun_port: Some(3479),
                 ice_servers: vec![IceServer {
                     urls: vec!["stun:x:3479".into()],
-                    username: None,
-                    credential: None
+                    ..Default::default()
                 }],
                 relay_error: None,
             }),

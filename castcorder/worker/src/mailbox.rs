@@ -10,10 +10,16 @@
 //! The host pings us when quiet (castcorder-host `PING_AFTER`); the runtime
 //! answers protocol pings without waking the object, so an idle host costs
 //! nothing while connected.
+//!
+//! The one thing kept in the object's storage is the host key's daily count
+//! of relay credentials ([`RelayDay`] under [`RELAY_DAY`]), so the daily cap
+//! (`RELAY_DAILY_CAP`, [`crate::relay`]) survives hibernation and restarts.
 
 use std::cell::RefCell;
 
-use castcorder_link::wire::{ServerMsg, b64, to_json};
+use castcorder_link::HostId;
+use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
+use castcorder_mailbox::turn::RelayDay;
 use castcorder_mailbox::{
     ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, RelayAsk, fill_registered,
     relay_host,
@@ -32,6 +38,9 @@ struct Saved {
     id: ConnId,
     state: ConnState,
 }
+
+/// The storage key of the host key's [`RelayDay`].
+const RELAY_DAY: &str = "relay-day";
 
 fn now() -> Millis {
     Date::now().as_millis()
@@ -111,6 +120,48 @@ impl HostMailbox {
         self.save_all();
     }
 
+    /// Relay credentials naming `host` for `conn`, if this deployment has a
+    /// relay: the shared decision (host online, the daily cap, the host key's
+    /// bucket), then the count stored, then the mint. Storage operations only
+    /// between reading and writing the count (the input gate keeps them
+    /// atomic); the mint, an outbound fetch for Cloudflare, comes after.
+    async fn grant(
+        &self,
+        conn: ConnId,
+        host: HostId,
+        ask: RelayAsk,
+        now: Millis,
+    ) -> Option<std::result::Result<IceServer, String>> {
+        let turn = relay::turn(&self.env)?;
+        let cap = relay::daily_cap(&self.env);
+        let storage = self.state.storage();
+        let day: RelayDay = match storage.get(RELAY_DAY).await {
+            Ok(d) => d.unwrap_or_default(),
+            Err(e) => {
+                tracing::error!(error = %e, "relay count unreadable; refusing relay credentials");
+                return Some(Err(format!(
+                    "{}: the relay count is unavailable",
+                    castcorder_link::wire::code::RELAY_UNAVAILABLE
+                )));
+            }
+        };
+        let over = day.exhausted(cap, now);
+        if over.is_some() {
+            tracing::warn!(host = %host.short(), cap, "relay credentials refused: daily cap reached");
+        }
+        let decided = self.mb.borrow_mut().relay(conn, host, ask, over, now);
+        if let Err(why) = decided {
+            return Some(Err(why));
+        }
+        if let Ok(next) = day.take(cap, now) {
+            if let Err(e) = storage.put(RELAY_DAY, next).await {
+                tracing::error!(error = %e, "relay count not stored");
+            }
+            tracing::info!(host = %host.short(), today = next.count, cap, "relay credentials counted");
+        }
+        Some(turn.mint(&host, now / 1000).await)
+    }
+
     fn closed(&self, ws: &WebSocket) {
         if let Some(id) = Self::conn_of(ws) {
             let outs = self.mb.borrow_mut().close(id);
@@ -172,16 +223,10 @@ impl DurableObject for HostMailbox {
             .accept_websocket_with_tags(&pair.server, &[&id.to_string()]);
         let mut ice_servers = relay::stun(&self.env);
         let mut relay_error = None;
-        if let (Some(turn), Some(host)) = (relay::turn(&self.env), relay_host(&query)) {
+        if let Some(host) = relay_host(&query)
+            && let Some(minted) = self.grant(id, host, RelayAsk::Hello, now).await
+        {
             // Only for a host that is connected now (the shared decision).
-            let decided = self
-                .mb
-                .borrow_mut()
-                .relay(id, host, RelayAsk::Hello, None, now);
-            let minted = match decided {
-                Ok(()) => turn.mint(&host).await,
-                Err(why) => Err(why),
-            };
             match minted {
                 Ok(s) => ice_servers.push(s),
                 Err(why) => relay_error = Some(why),
@@ -223,15 +268,9 @@ impl DurableObject for HostMailbox {
         let now = now();
         let mut outs = self.mb.borrow_mut().receive(id, &text, now);
         let registered = self.mb.borrow().just_registered(id, &outs);
-        if let (Some(turn), Some(host)) = (relay::turn(&self.env), registered) {
-            let decided = self
-                .mb
-                .borrow_mut()
-                .relay(id, host, RelayAsk::Registered, None, now);
-            let grant = match decided {
-                Ok(()) => turn.mint(&host).await,
-                Err(why) => Err(why),
-            };
+        if let Some(host) = registered
+            && let Some(grant) = self.grant(id, host, RelayAsk::Registered, now).await
+        {
             fill_registered(&mut outs, id, grant);
         }
         self.dispatch(outs);

@@ -898,9 +898,12 @@ dependencies = [
 name = "castcorder-mailbox"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "castcorder-link",
+ "hmac",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "tracing",
 ]
 
@@ -950,14 +953,11 @@ name = "castcorder-rendezvous"
 version = "0.0.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
  "castcorder-link",
  "castcorder-mailbox",
  "getrandom 0.3.4",
- "hmac",
  "serde",
  "serde_json",
- "sha1 0.11.0",
  "tokio",
  "tracing",
  "tracing-subscriber",

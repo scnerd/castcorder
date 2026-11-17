@@ -10,8 +10,9 @@
 //!   at the edge, and hands the upgrade to that host key's Durable Object
 //!   ([`mailbox::HostMailbox`]), which runs the shared mailbox state machine
 //!   with hibernatable WebSockets.
-//! - Relay (TURN) credentials are a seam ([`relay`]): none yet (cast-lxt.3);
-//!   the hello carries STUN only.
+//! - Relay (TURN) credentials ([`relay`]): Cloudflare Realtime TURN, or a
+//!   coturn with a shared secret, minted for a host and its guests under a
+//!   per-host-key daily cap kept in the Durable Object's storage.
 
 use castcorder_link::wire::{ServerMsg, code, to_json};
 use worker::{Context, Env, Request, Response, Result, WebSocketPair, event};

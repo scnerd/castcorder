@@ -412,6 +412,7 @@ fn ice_servers(hub: &Hub, headers: &HeaderMap) -> Vec<IceServer> {
         urls: vec![format!("stun:{h}:{port}")],
         username: None,
         credential: None,
+        expires: None,
     })
     .into_iter()
     .collect()
