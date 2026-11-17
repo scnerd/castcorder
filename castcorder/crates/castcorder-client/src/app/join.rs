@@ -3,6 +3,8 @@
 use super::*;
 
 pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
+    // A sync-only connection gives way to the call connection.
+    background::stop(ui);
     let epoch = join_epoch().wrapping_add(1);
     JOIN_EPOCH.set(epoch);
     let key = crate::identity::device().await?;
@@ -22,10 +24,7 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
         let _ = s.set_item(NAME_KEY, &name);
     }
     let url = ui.signal_url.get_untracked();
-    let call = match LINK.with(|l| l.borrow().clone()) {
-        Some(link) => format!("link-{}", link.host.short()),
-        None => url.clone(),
-    };
+    let call = host_scope(&url);
     let ctx = Ctx {
         host_scope: call.clone(),
         call,
@@ -89,8 +88,9 @@ pub(super) fn connect(ui: Ui, epoch: u32) {
         e.attempts
     });
     // A guest waiting for a producer keeps saying so while it asks again.
-    if !ui.connection.get_untracked().starts_with("waiting") {
-        ui.connection.set(if attempt == 0 {
+    let line = status_line(ui);
+    if !line.get_untracked().starts_with("waiting") {
+        line.set(if attempt == 0 {
             "connecting".into()
         } else {
             format!("reconnecting... (attempt {attempt})")
@@ -105,6 +105,8 @@ pub(super) fn connect(ui: Ui, epoch: u32) {
             if why.starts_with(crate::mailbox::REJECTED) && why.contains("waiting:") {
                 // A producer-gated call with no producer in it yet.
                 wait_for_producer(ui, epoch);
+            } else if why.starts_with(crate::mailbox::REJECTED) && with_engine(|e| e.sync_only) {
+                background::refused(ui, &why);
             } else if why.starts_with(crate::mailbox::REJECTED) {
                 // The host refused this device (wrong call secret, kicked,
                 // locked, wrong password): retrying cannot help. Leave (a
@@ -146,8 +148,7 @@ pub(super) fn wait_for_producer(ui: Ui, epoch: u32) {
     let ctx = with_engine(|e| e.ctx.clone());
     info!(call = %ctx.call, device = %ctx.device, "waiting for the host or a producer to join");
     disconnect();
-    ui.connection
-        .set("waiting for the host or a producer to join".into());
+    status_line(ui).set("waiting for the host or a producer to join".into());
     let cb = Closure::once_into_js(move || {
         with_engine(|e| e.retry = None);
         if !stale(epoch) {
@@ -194,26 +195,58 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     };
     // Stored before the next await so a drop or leave always closes it.
     with_engine(|e| e.pc = Some(pc.clone()));
-    if let Some(live) = live.as_ref() {
+    let sync_only = with_engine(|e| e.sync_only);
+    // A sync-only connection offers the two data channels alone.
+    if !sync_only {
+        add_media(&pc, live.as_ref(), camera.as_ref(), &ctx)?;
+    }
+    let control = pc.create_data_channel("control");
+    control.set_binary_type(RtcDataChannelType::Arraybuffer);
+    let data = pc.create_data_channel("data");
+    data.set_binary_type(RtcDataChannelType::Arraybuffer);
+    data.set_buffered_amount_low_threshold(DATA_LOW);
+    connect_channels(ui, &pc, &control, &data, epoch, current);
+    let answer_sdp = signal_offer(&pc, &ctx, mailbox.as_ref(), link.as_ref(), current).await?;
+    drop(mailbox);
+    let Some(answer_sdp) = answer_sdp else {
+        return Ok(());
+    };
+    if !current() {
+        return Ok(());
+    }
+    let remote = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
+    remote.set_sdp(&answer_sdp);
+    JsFuture::from(pc.set_remote_description(&remote)).await?;
+    info!(call = %ctx.call, device = %ctx.device, sync_only, "answer applied");
+    Ok(())
+}
+
+/// The call connection's send-only audio and video transceivers.
+fn add_media(
+    pc: &RtcPeerConnection,
+    live: Option<&MediaStream>,
+    camera: Option<&MediaStream>,
+    ctx: &Ctx,
+) -> Result<(), JsValue> {
+    if let Some(live) = live {
         for t in live.get_audio_tracks().iter() {
             let init = object();
             set(&init, "direction", "sendonly");
             set(&init, "streams", Array::of1(live));
-            call(&pc, "addTransceiver", &[&t, &init])?;
+            call(pc, "addTransceiver", &[&t, &init])?;
         }
     }
     // The wire contract's first offer carries audio and video m-lines; the
     // video one exists with or without a camera, so turning the camera on
     // or off later only swaps its track.
     let cam_track: JsValue = camera
-        .as_ref()
         .and_then(first_video)
         .map(JsValue::from)
         .unwrap_or_else(|| JsValue::from_str("video"));
     let video_init = |encodings: Option<Array>| {
         let init = object();
         set(&init, "direction", "sendonly");
-        if let Some(live) = live.as_ref() {
+        if let Some(live) = live {
             set(&init, "streams", Array::of1(live));
         }
         if let Some(enc) = encodings {
@@ -222,24 +255,33 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
         init
     };
     let video = match send_encodings() {
-        Some(enc) => match call(&pc, "addTransceiver", &[&cam_track, &video_init(Some(enc))]) {
+        Some(enc) => match call(pc, "addTransceiver", &[&cam_track, &video_init(Some(enc))]) {
             Ok(t) => t,
             Err(e) => {
                 warn!(error = %describe(&e), "simulcast refused; sending one video encoding");
-                call(&pc, "addTransceiver", &[&cam_track, &video_init(None)])?
+                call(pc, "addTransceiver", &[&cam_track, &video_init(None)])?
             }
         },
-        None => call(&pc, "addTransceiver", &[&cam_track, &video_init(None)])?,
+        None => call(pc, "addTransceiver", &[&cam_track, &video_init(None)])?,
     };
     let sender = get(&video, "sender");
     let encodings = stringify(&get(&call(&sender, "getParameters", &[])?, "encodings"));
     info!(call = %ctx.call, device = %ctx.device, camera = camera.is_some(), encodings = %encodings, "video sender ready");
     with_engine(|e| e.video_sender = Some(sender));
-    let control = pc.create_data_channel("control");
-    control.set_binary_type(RtcDataChannelType::Arraybuffer);
-    let data = pc.create_data_channel("data");
-    data.set_binary_type(RtcDataChannelType::Arraybuffer);
-    data.set_buffered_amount_low_threshold(DATA_LOW);
+    Ok(())
+}
+
+/// Wire the connection's channels and state to the engine: "data" to the
+/// worker's outbox, "control" to the protocol client (a call connection
+/// sends Join when it opens; a sync-only one asks the outbox for its offers).
+fn connect_channels(
+    ui: Ui,
+    pc: &RtcPeerConnection,
+    control: &RtcDataChannel,
+    data: &RtcDataChannel,
+    epoch: u32,
+    current: impl Fn() -> bool + Copy + 'static,
+) {
     let ondata = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
         if current() {
             on_data_message(ev);
@@ -274,7 +316,7 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
         let state = format!("{:?}", pc2.connection_state()).to_lowercase();
         let (ctx, attempts) = with_engine(|e| (e.ctx.clone(), e.attempts));
         info!(call = %ctx.call, device = %ctx.device, state = %state, "connection state");
-        ui.connection.set(match state.as_str() {
+        status_line(ui).set(match state.as_str() {
             "new" | "connecting" if attempts > 0 => {
                 format!("reconnecting... (attempt {attempts})")
             }
@@ -295,15 +337,22 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
         if !current() {
             return;
         }
-        let ctx = with_engine(|e| {
+        let (ctx, sync_only) = with_engine(|e| {
             e.last_rx = js_sys::Date::now();
-            e.ctx.clone()
+            (e.ctx.clone(), e.sync_only)
         });
-        info!(call = %ctx.call, device = %ctx.device, "control channel open; sending Join");
         let rpc = RpcClient::new(DcChannel {
             dc: ctl.clone(),
             incoming: Rc::default(),
         });
+        if sync_only {
+            info!(call = %ctx.call, device = %ctx.device, "sync-only control channel open; offering the outbox");
+            with_engine(|e| e.rpc = Some(rpc));
+            send_signal(&Signal::Hb);
+            background::connected(ui);
+            return;
+        }
+        info!(call = %ctx.call, device = %ctx.device, "control channel open; sending Join");
         with_engine(|e| {
             let mut rpc = rpc;
             match rpc.send(Request::Join {
@@ -324,18 +373,30 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
         e.control = Some(control.clone());
         e.data = Some(data.clone());
     });
+}
 
+/// Make the offer and signal it (through the rendezvous for a call link,
+/// else to the host's `/offer`); the answer SDP, or `None` if this attempt
+/// is stale.
+async fn signal_offer(
+    pc: &RtcPeerConnection,
+    ctx: &Ctx,
+    mailbox: Option<&crate::mailbox::Mailbox>,
+    link: Option<&CallLink>,
+    current: impl Fn() -> bool,
+) -> Result<Option<String>, JsValue> {
+    let sync_only = with_engine(|e| e.sync_only);
     let offer = JsFuture::from(pc.create_offer()).await?;
     if !current() {
-        return Ok(());
+        return Ok(None);
     }
     let local = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
     local.set_sdp(&string(&offer, "sdp"));
     JsFuture::from(pc.set_local_description(&local)).await?;
     if !current() {
-        return Ok(());
+        return Ok(None);
     }
-    let answer_sdp = match (&mailbox, &link) {
+    let answer_sdp = match (mailbox, link) {
         (Some(mb), Some(link)) => {
             // No trickle: wait (briefly) for every candidate, srflx included,
             // before sealing the offer.
@@ -345,15 +406,15 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
             {
                 crate::mailbox::sleep_ms(50).await;
                 if !current() {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
             let sdp = pc
                 .local_description()
                 .map(|d| d.sdp())
                 .unwrap_or_else(|| string(&offer, "sdp"));
-            let proof = sign_offer(&ctx, &link.host.encode(), &sdp).await?;
-            info!(call = %ctx.call, device = %ctx.device, gathering = ?pc.ice_gathering_state(), "offer sealed to the host through the rendezvous");
+            let proof = sign_offer(ctx, &link.host.encode(), &sdp).await?;
+            info!(call = %ctx.call, device = %ctx.device, sync_only, gathering = ?pc.ice_gathering_state(), "offer sealed to the host through the rendezvous");
             mb.exchange(
                 link,
                 &ctx.name,
@@ -361,20 +422,22 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
                 ctx.password.as_deref(),
                 &sdp,
                 proof,
+                sync_only,
             )
             .await?
         }
-        _ => direct_offer(&url, &ctx, &string(&offer, "sdp")).await?,
+        _ => direct_offer(&ctx.url, ctx, &string(&offer, "sdp"), sync_only).await?,
     };
-    drop(mailbox);
-    if !current() {
-        return Ok(());
+    Ok(Some(answer_sdp))
+}
+
+/// The host's scope for tracks and logs: `link-<host>` for a page opened
+/// from a call link, else the signaling URL.
+pub(super) fn host_scope(url: &str) -> String {
+    match LINK.with(|l| l.borrow().clone()) {
+        Some(link) => format!("link-{}", link.host.short()),
+        None => url.to_string(),
     }
-    let remote = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
-    remote.set_sdp(&answer_sdp);
-    JsFuture::from(pc.set_remote_description(&remote)).await?;
-    info!(call = %ctx.call, device = %ctx.device, "answer applied");
-    Ok(())
 }
 
 /// Sign an offer of exactly `sdp` (as sent) to `audience` with the device key.
@@ -418,7 +481,12 @@ pub(super) async fn lan_host_id(url: &str) -> Result<String, JsValue> {
 
 /// LAN mode: POST the offer to the host's own `/offer`, signed for the host
 /// id `GET /role` names, and return the answer SDP.
-pub(super) async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<String, JsValue> {
+pub(super) async fn direct_offer(
+    url: &str,
+    ctx: &Ctx,
+    sdp: &str,
+    sync_only: bool,
+) -> Result<String, JsValue> {
     let host = lan_host_id(url).await?;
     let proof = sign_offer(ctx, &host, sdp).await?;
     let proof = js_sys::JSON::parse(&castcorder_link::wire::to_json(&proof))?;
@@ -427,6 +495,9 @@ pub(super) async fn direct_offer(url: &str, ctx: &Ctx, sdp: &str) -> Result<Stri
     set(&body, "sdp", sdp);
     set(&body, "device", ctx.device.as_str());
     set(&body, "proof", proof);
+    if sync_only {
+        set(&body, "sync", true);
+    }
     if let Some(p) = &ctx.password {
         set(&body, "password", p.as_str());
     }

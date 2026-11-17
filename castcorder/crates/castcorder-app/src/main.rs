@@ -5,7 +5,10 @@
 //! until Quit in the tray menu, which finishes the open files and stops it.
 //! "Start at login" in the tray menu is off until turned on there.
 //! `castcorder://` links (at startup, or handed over by a second launch) open
-//! the https call link in a call window.
+//! the https call link in a call window. Closing that window leaves the call
+//! and hides it, so its page goes on delivering the recordings over a
+//! sync-only connection; the last link opened is remembered and reopened
+//! hidden at the next start (at login too) to finish that sync.
 //!
 //! Usage: `castcorder-app [host flags] [--hidden] [--smoke] [--no-register]
 //! [castcorder://LINK]`; the host flags are `castcorder-host`'s. `--smoke`
@@ -21,8 +24,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use castcorder_app::AppArgs;
-use castcorder_app::deeplink;
 use castcorder_app::host_control::{Badge, HostControl, tray_badge, tray_text};
+use castcorder_app::{deeplink, remembered};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
@@ -97,6 +100,17 @@ fn main() {
             {
                 api.prevent_close();
                 let _ = window.hide();
+            }
+            // Closing a call window leaves the call (as its Leave button
+            // does) and hides it: its page goes on delivering the recordings
+            // over a sync-only connection from the tray.
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && window.label() == CALL
+                && let Some(w) = window.app_handle().get_webview_window(CALL)
+            {
+                api.prevent_close();
+                let _ = w.eval("document.getElementById('leave')?.click()");
+                let _ = w.hide();
             }
         })
         .on_page_load(|webview, payload| {
@@ -240,7 +254,19 @@ fn setup(app: &AppHandle, args: &AppArgs) {
     });
     if let Some(link) = &args.link {
         open_link(app, link);
+    } else if !args.smoke
+        && let Some(url) = data_dir(app).and_then(|d| remembered::recall(&d))
+    {
+        // The last call's page, hidden: it delivers what its outbox still
+        // holds (at login too), without joining.
+        tracing::info!("reopening the last call link hidden, to finish syncing");
+        call_window(app, &url, false);
     }
+}
+
+/// The app's data folder (the last call link is kept there).
+fn data_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_data_dir().ok()
 }
 
 fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
@@ -438,16 +464,29 @@ fn open_link(app: &AppHandle, link: &str) {
             return;
         }
     };
-    let Ok(parsed) = url.parse() else { return };
     tracing::info!("opening a call link");
+    if let Some(dir) = data_dir(app)
+        && let Err(e) = remembered::remember(&dir, link)
+    {
+        tracing::warn!(error = %e, "call link not remembered; it will not sync after a restart");
+    }
+    call_window(app, &url, true);
+}
+
+/// Show `url` in the call window (made if needed), or load it hidden.
+fn call_window(app: &AppHandle, url: &str, visible: bool) {
+    let Ok(parsed) = url.parse() else { return };
     if let Some(w) = app.get_webview_window(CALL) {
         let _ = w.navigate(parsed);
-        show(app, CALL);
+        if visible {
+            show(app, CALL);
+        }
         return;
     }
     if let Err(e) = WebviewWindowBuilder::new(app, CALL, WebviewUrl::External(parsed))
         .title("Castcorder call")
         .inner_size(1100.0, 760.0)
+        .visible(visible)
         .build()
     {
         tracing::warn!(error = %e, "no call window");

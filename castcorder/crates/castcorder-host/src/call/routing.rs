@@ -239,8 +239,9 @@ impl Call {
 
     /// Forget the open call (nothing is live).
     fn close_call(&mut self) {
+        self.park_open();
         self.library = None;
-        self.elsewhere.clear();
+        self.forget_elsewhere();
         self.call_id = None;
         self.call_dir = None;
         self.last_take = 0;
@@ -287,8 +288,15 @@ impl Call {
         let room_dir = self.rooms.room_dir(&self.room_name);
         let call_dir = room_dir.join(id);
         let root = FsStorage::new(&room_dir).map_err(|e| format!("room folder: {e}"))?;
-        let mut library = Library::open(&root, id, SyncConfig::default())
-            .map_err(|e| format!("open call {id}: {e}"))?;
+        // One library per folder: a sync-only connection may be filing into
+        // this call already, or into the one closing now.
+        let key = format!("{}/{id}", self.room_name);
+        let mut library = match self.elsewhere.remove(&key) {
+            Some(l) => l,
+            None => Library::open(&root, id, SyncConfig::default())
+                .map_err(|e| format!("open call {id}: {e}"))?,
+        };
+        self.park_open();
         if rooms::read_meta(&call_dir).is_none()
             && let Err(e) = rooms::touch(&call_dir, self.rooms.now_ms())
         {
@@ -307,8 +315,8 @@ impl Call {
             self.drop_puller(*g);
         }
         // No puller is left to file into another call (and this one may
-        // have been among them).
-        self.elsewhere.clear();
+        // have been among them); sync-only connections may still be.
+        self.forget_elsewhere();
         self.library = Some(library);
         self.last_take = takes.last().copied().unwrap_or(0);
         self.call_id = Some(id.to_string());
@@ -469,47 +477,24 @@ impl Call {
         if call.room == self.room_name && self.call_id.as_deref() == Some(call.call.as_str()) {
             return self.offer_track(id, offer);
         }
-        let refuse = |kind, message: String| Response::Error { kind, message };
-        let Some(p) = self.pullers.get_mut(&id) else {
-            return refuse(ErrorKind::InvalidState, "Join first".into());
+        let join_first = || Response::Error {
+            kind: ErrorKind::InvalidState,
+            message: "Join first".into(),
         };
         let Some(member) = self.room.device_of(id.0).map(str::to_string) else {
-            return refuse(ErrorKind::InvalidState, "Join first".into());
+            return join_first();
+        };
+        let Some(mut p) = self.pullers.remove(&id) else {
+            return join_first();
         };
         let device = self.room.offer_device(id.0, &offer.device);
-        let offer = &TrackOffer {
+        let offer = TrackOffer {
             device,
             ..offer.clone()
         };
-        let key = format!("{}/{}", call.room, call.call);
-        let mut library = match self.elsewhere.remove(&key) {
-            Some(l) => l,
-            None => match call_library(&self.rooms, call, &member) {
-                Ok(l) => l,
-                Err(message) => {
-                    warn!(guest = id.0, device = %member, room = %call.room, call = %call.call,
-                        take = offer.take.0, track = %offer.name, reason = %message,
-                        "track for another call refused");
-                    return refuse(ErrorKind::NotAllowed, message);
-                }
-            },
-        };
-        let r = p.offer_into(&key, &mut library, &member, offer);
-        self.elsewhere.insert(key, library);
-        match r {
-            Ok(e) => {
-                info!(guest = id.0, device = %member, room = %call.room, call = %call.call,
-                    take = offer.take.0, track = %e.file, "track of another call offered");
-                Response::TrackAccepted {
-                    file: e.file,
-                    received: e.verified,
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                refuse(ErrorKind::NotAllowed, e.to_string())
-            }
-            Err(e) => refuse(ErrorKind::Other, e.to_string()),
-        }
+        let r = self.deliver(id, &mut p, &member, call, &offer);
+        self.pullers.insert(id, p);
+        r
     }
 
     /// The loaded room's calls as producers see them.
@@ -641,7 +626,7 @@ pub fn call_library(
     Err(format!("this device was not in call {}", call.call))
 }
 
-fn read_room(dir: &Path) -> Room {
+pub(super) fn read_room(dir: &Path) -> Room {
     std::fs::read_to_string(dir.join("room.json"))
         .ok()
         .and_then(|t| Room::from_json(&t).ok())

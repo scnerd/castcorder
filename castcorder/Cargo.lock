@@ -782,11 +782,15 @@ dependencies = [
 name = "castcorder-app"
 version = "0.0.0"
 dependencies = [
+ "castcorder-core",
  "castcorder-host",
  "castcorder-link",
  "castcorder-port-capture",
  "castcorder-port-clock",
+ "castcorder-port-disk",
  "castcorder-port-net",
+ "castcorder-protocol",
+ "castcorder-transfer",
  "castcorder-transport",
  "serde_json",
  "str0m",

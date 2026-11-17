@@ -74,6 +74,19 @@ impl World {
         (self.guests.len() - 1, answer)
     }
 
+    /// A sync-only guest: data channels alone, accepted with `accept_sync`.
+    fn join_sync(&mut self, device: &str) -> usize {
+        let n = self.guests.len() as u8 + 2;
+        let (mut g, offer) = Guest::sync_only(
+            self.net.bind(ip(n)),
+            self.time.clock(SimClockConfig::default()),
+        );
+        let (id, answer) = self.host.accept_sync(device, &offer).unwrap();
+        g.accept_answer(&answer);
+        self.guests.push((id, Some(g)));
+        self.guests.len() - 1
+    }
+
     fn g(&mut self, i: usize) -> &mut Guest {
         self.guests[i].1.as_mut().unwrap()
     }
@@ -247,6 +260,46 @@ fn control_carries_protocol_messages_and_data_round_trips() {
     w.run_until(Duration::from_secs(2), |w| w.g(0).data_in.len() == 8);
     assert!(w.g(0).data_in.iter().all(|m| *m == chunk));
     w.run_until(Duration::from_secs(1), |_| data.buffered() == 0);
+}
+
+/// A sync-only connection beside a live call: its data channels work, it is
+/// never sent anyone's media nor renegotiated with, and the call's guests
+/// keep exactly each other's tracks. A sync-only offer with media is refused.
+#[test]
+fn a_sync_only_connection_carries_data_and_no_media() {
+    let mut w = World::two_guests();
+    let c = w.join_sync("C");
+    w.run_until(Duration::from_secs(5), |w| w.g(c).channels_open());
+    let cid = w.id(c);
+    for _ in 0..50 {
+        w.g(0).send_audio(&[1, 2, 3]);
+        w.run_for(Duration::from_millis(20));
+    }
+    assert!(!w.g(1).received_from("A-", MediaKind::Audio).is_empty());
+    assert!(w.g(c).received.is_empty(), "a sync-only guest got media");
+    assert_eq!(w.g(c).offers_received, 0, "the host renegotiated with it");
+    assert_eq!(w.host.stats(cid).unwrap().tracks_out_open, 0);
+    for i in [0, 1] {
+        let id = w.id(i);
+        assert_eq!(w.host.stats(id).unwrap().tracks_out_open, 2);
+    }
+    // Its data channel round-trips like any guest's.
+    let mut data = w.host.data(cid).unwrap();
+    assert!(w.g(c).send_data(b"range"));
+    let mut seen = None;
+    w.run_until(Duration::from_secs(1), |_| {
+        seen = data.try_recv().unwrap();
+        seen.is_some()
+    });
+    assert_eq!(seen.unwrap(), b"range");
+    data.send(b"done".to_vec()).unwrap();
+    w.run_until(Duration::from_secs(1), |w| !w.g(c).data_in.is_empty());
+    // Still connected later: heartbeats keep it.
+    w.run_for(Duration::from_secs(6));
+    assert!(w.gone(cid).is_none());
+    // An offer with media is not a sync-only offer.
+    let (_, media_offer) = Guest::new(w.net.bind(ip(40)), w.time.clock(SimClockConfig::default()));
+    assert!(w.host.accept_sync("D", &media_offer).is_err());
 }
 
 /// Sharp edge 1. A burst far beyond 30 DTLS records arrives in one host poll (the

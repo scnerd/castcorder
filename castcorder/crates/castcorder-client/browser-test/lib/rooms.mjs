@@ -17,7 +17,11 @@ import { openGuest } from './guest.mjs';
 //   and the guest's next take lands there; the home lists both calls;
 // - a guest leaves mid-take and joins a later call: its take syncs into the
 //   call it was recorded in and leaves OPFS; a track for a call it was never
-//   in is refused and stays on the device (cast-6qm).
+//   in is refused and stays on the device (cast-6qm);
+// - a guest leaves mid-take and stays on the page: once another room's call
+//   is live, its take syncs over a sync-only connection into the call it was
+//   recorded in, the lobby showing progress and then what it kept; a guest
+//   kicked mid-take is refused sync-only and keeps its take (cast-xsh).
 export async function roomsChecks() {
   const { MODE, exe, dist, RESULTS } = ctx;
   const LIB = join(RESULTS, 'library-rooms-' + MODE);
@@ -157,6 +161,8 @@ export async function roomsChecks() {
   await P.click('#take-start');
   await waitFor(async () => (await text(P, '#take-result')).includes('"take":3'), 'take 3 started', 10000);
   await sleep(2500);
+  // Held: this leave must not sync it sync-only (cast-xsh); a later join does.
+  await G.evaluate(() => { window.__castcorderHoldSync = true; });
   await G.click('#leave');
   await sleep(500);
   await P.click('#take-stop');
@@ -204,6 +210,64 @@ export async function roomsChecks() {
     'a track for a call G was never in stays on the device: ' + left.join(' '));
   check(!existsSync(join(foreignDir, 'take01')), 'nothing was written into a call G was never in');
   check(!existsSync(join(callDirs(LIB, ROOM).find((d) => d.endsWith(third)), 'take03')), 'the third call got no take 3');
-  for (const p of [P, G]) await p.click('#leave');
-  await waitFor(async () => !(await live()), 'the room empties once more', 20000);
+  // Background sync (cast-xsh): G records take 1 of the third call and
+  // leaves mid-take; its page keeps the track and shows it waiting (held
+  // by the test hook). P leaves and opens the other room, main-show. G's
+  // page then delivers the take over a sync-only connection into the third
+  // call while main-show is live, and says what it kept (the foreign track).
+  const thirdDir = callDirs(LIB, ROOM).find((d) => d.endsWith(third));
+  const syncState = () => text(G, '#sync-state');
+  await waitFor(async () => P.isEnabled('#take-start'), 'P can start take 1 of the third call', 15000);
+  await P.click('#take-start');
+  await waitFor(async () => (await text(P, '#take-result')).includes('"take":1'), 'take 1 of the third call started', 10000);
+  await sleep(2500);
+  await G.evaluate(() => { window.__castcorderHoldSync = true; });
+  await G.click('#leave');
+  await sleep(500);
+  await P.click('#take-stop');
+  await waitFor(async () => (await text(P, '#take-status')).startsWith('idle'), 'take 1 of the third call stopped', 10000);
+  await waitFor(async () => /file\(s\) left/.test(await syncState()), 'G shows its recordings waiting to sync', 30000);
+  check(!synced(thirdDir, 'take01', 2), 'G\x27s take is not on the host while held: ' + (await syncState()));
+  check((await opfsNames(G)).some((f) => f.startsWith('take0001')), 'G kept its take 1 after Leave');
+  await P.click('#leave');
+  await waitFor(async () => !(await live()), 'the late show empties', 20000);
+  await P.goto(HTTP7 + '/?room=main-show');
+  await P.click('#join');
+  await waitFor(async () => (await rooms()).find((r) => r.name === 'main-show').live, 'main-show is live', 40000);
+  const accepted = () => (ctx.host7Log.match(/sync-only connection accepted/g) || []).length;
+  const before = accepted();
+  await G.evaluate(() => { window.__castcorderHoldSync = false; });
+  await waitFor(async () => synced(thirdDir, 'take01', 2), 'G\x27s take lands in the third call over a sync-only connection', 60000);
+  const now = await rooms();
+  check(accepted() > before && now.find((r) => r.name === 'main-show').live && !now.find((r) => r.name === ROOM).live,
+    'the host accepted the sync-only connection beside main-show\x27s live call; the late show stayed closed');
+  await waitFor(async () => !(await opfsNames(G)).some((f) => f.startsWith('take0001')), 'G\x27s take left OPFS', 30000);
+  await waitFor(async () => (await syncState()).includes('could not be delivered'), 'G says what it kept', 30000);
+  check((await opfsNames(G)).includes('foreign-take0001.wav'), 'the refused foreign track stays on G: ' + (await syncState()));
+  check(true, 'a guest that left synced over a sync-only connection, beside another room\x27s live call');
+
+  // Kicked: G joins main-show, records, and is kicked mid-take; its
+  // sync-only connection is refused and the take stays on the device.
+  await G.goto(G.url().replace('room=' + ROOM, 'room=main-show'));
+  await G.evaluate(() => { window.__castcorderHoldSync = true; });
+  await G.click('#join');
+  await waitFor(async () => (await text(G, '#state')) === 'connected', 'G joins main-show', 40000);
+  await waitFor(async () => P.isEnabled('#take-start'), 'P can start a main-show take', 15000);
+  await P.click('#take-start');
+  await waitFor(async () => (await text(P, '#take-result')).includes('"take":'), 'a main-show take started', 10000);
+  await sleep(2500);
+  await waitFor(async () => (await text(P, '#guests')).includes('Gil'), 'P lists G', 10000);
+  await P.click('#guests li[data-name="Gil"] button.kick');
+  await waitFor(async () => (await text(G, '#state')) === 'removed from the call by a producer', 'G removed', 30000);
+  await P.click('#take-stop');
+  await waitFor(async () => (await text(P, '#take-status')).startsWith('idle'), 'the main-show take stopped', 10000);
+  const kept = await waitFor(async () => {
+    const n = (await opfsNames(G)).filter((f) => f.startsWith('take0001') && f.endsWith('.json'));
+    return n.length > 0 ? n : null;
+  }, 'G kept its main-show take', 15000);
+  await G.evaluate(() => { window.__castcorderHoldSync = false; });
+  await waitFor(async () => (await syncState()).includes('did not take your recordings'), 'G\x27s sync-only connection is refused', 30000);
+  check((await opfsNames(G)).includes(kept[0]), 'a kicked device keeps its take: ' + (await syncState()));
+  await P.click('#leave');
+  await waitFor(async () => !(await live()), 'main-show empties', 20000);
 }

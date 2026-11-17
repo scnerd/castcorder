@@ -270,6 +270,9 @@ pub(crate) struct Guest {
     /// The (minimum, desired) kbps last given to str0m's estimator.
     bwe_asked: Option<(u64, u64)>,
     pub(crate) stats: GuestStats,
+    /// A sync-only connection ([`crate::Host::accept_sync`]): it is never
+    /// sent anyone's media.
+    pub(crate) sync_only: bool,
 }
 
 impl Guest {
@@ -311,6 +314,7 @@ impl Guest {
             allocate_now: false,
             bwe_asked: None,
             stats: GuestStats::default(),
+            sync_only: false,
         }
     }
 
@@ -844,6 +848,9 @@ impl Guest {
     }
 
     pub(crate) fn handle_track_open(&mut self, track_in: Weak<TrackIn>) {
+        if self.sync_only {
+            return;
+        }
         self.tracks_out.push(TrackOut {
             track_in,
             state: TrackOutState::ToOpen,

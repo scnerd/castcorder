@@ -176,7 +176,7 @@ pub(super) fn connection_lost(ui: Ui, epoch: u32, reason: &str) {
         e.attempts
     });
     let delay = reconnect_delay_ms(attempt);
-    ui.connection.set(format!(
+    status_line(ui).set(format!(
         "reconnecting... (attempt {attempt} in {} s)",
         delay / 1000
     ));
@@ -367,6 +367,13 @@ pub(super) fn acquire_wake_lock(epoch: u32) {
 /// The page became visible or the network came back: take the wake lock
 /// again, check the connection, and retry at once if one is waiting.
 pub(super) fn on_wake(ui: Ui) {
+    if with_engine(|e| e.sync_only) {
+        // A background sync waiting to reconnect tries at once.
+        let epoch = join_epoch();
+        check_connection(ui, epoch);
+        retry_now(ui, epoch);
+        return;
+    }
     if !ui.joined.get_untracked() {
         return;
     }
@@ -442,6 +449,9 @@ pub(super) fn leave(ui: Ui) {
     ui.level.set(0.0);
     ui.levels.set(VecDeque::new());
     DOCK_FLOOR.with(|f| *f.borrow_mut() = Default::default());
+    // Whatever this call left in the outbox goes on syncing, sync-only,
+    // while the page stays open.
+    background::start(ui, engine.ctx);
 }
 
 pub(super) fn db(x: f64) -> String {

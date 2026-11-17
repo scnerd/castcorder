@@ -87,6 +87,7 @@ pub(super) fn pump_rpc(ui: Ui) {
     let mut samples = Vec::new();
     let mut relabel = false;
     let mut chips = false;
+    let mut refusals = false;
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -162,15 +163,18 @@ pub(super) fn pump_rpc(ui: Ui) {
                 None => e.disk_requests.push(id),
             }
         }
-        for id in std::mem::take(&mut e.offer_requests) {
+        for (id, root) in std::mem::take(&mut e.offer_requests) {
             match rpc.take_response(id) {
                 Some(Response::TrackAccepted { file, received }) => {
                     info!(call = %ctx.call, device = %ctx.device, file = %file, received, "host accepted track offer");
                 }
                 Some(other) => {
-                    warn!(call = %ctx.call, device = %ctx.device, response = ?other, "track offer refused")
+                    warn!(call = %ctx.call, device = %ctx.device, response = ?other, "track offer refused");
+                    // Kept on this device; a background sync stops waiting for it.
+                    e.refused.insert(root);
+                    refusals = true;
                 }
-                None => e.offer_requests.push(id),
+                None => e.offer_requests.push((id, root)),
             }
         }
         for id in std::mem::take(&mut e.pings) {
@@ -298,6 +302,9 @@ pub(super) fn pump_rpc(ui: Ui) {
         }
         (statuses, e.ctx.clone())
     });
+    if refusals {
+        background::recount(ui);
+    }
     if relabel {
         relabel_tiles();
     }

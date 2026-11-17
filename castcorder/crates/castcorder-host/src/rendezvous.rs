@@ -595,6 +595,7 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 proof: o.proof,
                 audience: cfg.key.id().encode(),
                 at_host: false,
+                sync_only: o.sync_only,
                 reply: reply_tx,
             });
             match sent
@@ -737,6 +738,7 @@ mod tests {
                     1,
                     "v=0",
                 )),
+                sync_only: false,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -767,8 +769,10 @@ mod tests {
                 proof,
                 audience,
                 at_host,
+                sync_only,
                 reply,
             } => {
+                assert!(!sync_only);
                 assert_eq!((name.as_str(), offer_sdp.as_str()), ("B!", "v=0"));
                 // The secret picked the room.
                 assert_eq!(room.as_deref(), Some("show"));
@@ -830,6 +834,7 @@ mod tests {
             device: "dev-b".into(),
             password: None,
             proof: None,
+            sync_only: false,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())

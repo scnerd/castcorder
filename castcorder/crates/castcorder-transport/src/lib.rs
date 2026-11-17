@@ -30,7 +30,9 @@
 //! # Wire contract for guests
 //!
 //! - The first offer contains the guest's send-only audio and video and two data
-//!   channels labelled "control" and "data" (reliable, ordered).
+//!   channels labelled "control" and "data" (reliable, ordered). A sync-only
+//!   connection ([`Host::accept_sync`]) offers the two data channels alone;
+//!   it is never sent media, so the host never renegotiates with it.
 //! - Binary frames on "control" are castcorder-protocol messages; text frames are
 //!   the transport's JSON frames in [`signal`]. A guest must answer every
 //!   `{"type":"offer"}` with `{"type":"answer"}`, must never send an offer, and must
@@ -663,6 +665,35 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         device: &str,
         offer_sdp: &str,
     ) -> Result<(GuestId, String), AcceptError> {
+        self.accept_inner(device, offer_sdp, false)
+    }
+
+    /// Accept a sync-only connection's first offer: data channels only
+    /// ("control" and "data", the same wire contract otherwise). An offer
+    /// with any media section is refused; the guest is never sent anyone's
+    /// media and its own is never forwarded (it has none).
+    pub fn accept_sync(
+        &mut self,
+        device: &str,
+        offer_sdp: &str,
+    ) -> Result<(GuestId, String), AcceptError> {
+        if offer_sdp
+            .lines()
+            .any(|l| l.starts_with("m=") && !l.starts_with("m=application"))
+        {
+            return Err(AcceptError::Rejected(
+                "a sync-only connection carries no media".into(),
+            ));
+        }
+        self.accept_inner(device, offer_sdp, true)
+    }
+
+    fn accept_inner(
+        &mut self,
+        device: &str,
+        offer_sdp: &str,
+        sync_only: bool,
+    ) -> Result<(GuestId, String), AcceptError> {
         let offer = SdpOffer::from_sdp_string(offer_sdp)
             .map_err(|e| AcceptError::BadSdp(format!("{e}")))?;
         let (now, now_d) = self.now();
@@ -723,7 +754,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         let id = GuestId(self.next_id);
         self.next_id += 1;
         let span = info_span!("guest", call = %self.config.call, device = %device, guest = id.0);
-        span.in_scope(|| info!("guest accepted"));
+        span.in_scope(|| info!(sync_only, "guest accepted"));
         let mut g = Guest::new(
             id,
             device.to_string(),
@@ -734,7 +765,9 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.config.initial_bandwidth_estimate_kbps,
             self.config.bandwidth_cap_kbps,
         );
-        // Renegotiate on join: the newcomer gets every existing track.
+        g.sync_only = sync_only;
+        // Renegotiate on join: the newcomer gets every existing track (a
+        // sync-only connection none: see `Guest::handle_track_open`).
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {
             g.handle_track_open(Arc::downgrade(&t.id));
         }

@@ -102,7 +102,8 @@ impl Host {
 
     fn poll(&mut self) {
         let mut set = CallSet {
-            open: &mut self.open,
+            open: Some(&mut self.open),
+            open_key: None,
             others: &mut self.others,
         };
         self.puller.poll(&mut set, false).unwrap();
@@ -226,4 +227,84 @@ fn membership_survives_a_restart_and_a_torn_append() {
     let mut lib = Library::open(&root, OLD, cfg()).unwrap();
     assert!(lib.was_in("dev-bob").unwrap());
     assert!(lib.was_in(DEVICE).unwrap());
+}
+
+/// A sync-only connection (cast-xsh): the guest left before syncing and is in
+/// no call; the host has no call open for it. Every item is offered under its
+/// call's key and pulled by key. Halfway, the host opens that very call (someone
+/// joins it): the library moves to the open slot under the same key, so the
+/// transfer carries on into the one library of that folder, and completes.
+#[test]
+fn a_sync_only_connection_files_by_key_and_survives_the_call_opening() {
+    let host_disk = SimDisk::new(21);
+    let root = host_disk.subdir("room").unwrap();
+    Library::open(&root, OLD, cfg())
+        .unwrap()
+        .admit(DEVICE)
+        .unwrap();
+    let guest = SimDisk::new(22);
+    let mut outbox: GuestOutbox<SimFile> = GuestOutbox::new("host", cfg());
+    let names = ["s-old-1-mic", "s-old-2-mic"];
+    for (i, name) in names.iter().enumerate() {
+        let file = format!("{name}.wav");
+        let mut f = guest.open(&file).unwrap();
+        f.write_at(0, &data(50 + i, 200 * 1024 + i)).unwrap();
+        f.sync().unwrap();
+        outbox
+            .add(
+                offer(name, i as u32 + 1, SourceKind::Audio),
+                guest.open(&file).unwrap(),
+            )
+            .unwrap();
+    }
+    let (mut g, h) = mem_link(None, None);
+    // Not in any call: the puller's own call names nothing.
+    let mut puller: Puller<SimDisk, MemEnd> = Puller::new("", "Alice", h);
+    let mut others: BTreeMap<String, Library<SimDisk>> = BTreeMap::new();
+    let key = format!("room/{OLD}");
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    for o in outbox.pending() {
+        puller.offer_into(&key, &mut lib, DEVICE, &o).unwrap();
+    }
+    others.insert(key.clone(), lib);
+    let mut open: Option<Library<SimDisk>> = None;
+    let mut confirmed = Vec::new();
+    for step in 0..20_000 {
+        for c in outbox.pump(&mut g, MAX_BUFFERED).unwrap() {
+            guest.remove(&format!("{}.wav", c.name)).unwrap();
+            confirmed.push(c.name);
+        }
+        if step == 2 {
+            // Someone joins that call: it becomes the host's open call.
+            assert!(
+                puller.receiving().is_none(),
+                "another call's pull is not the open call's"
+            );
+            assert!(confirmed.is_empty(), "midway: nothing confirmed yet");
+            open = others.remove(&key);
+            assert!(open.is_some());
+        }
+        let open_key = open.is_some().then_some(key.as_str());
+        let mut set = CallSet {
+            open: open.as_mut(),
+            open_key,
+            others: &mut others,
+        };
+        puller.poll(&mut set, false).unwrap();
+        if confirmed.len() == names.len() && puller.is_idle() {
+            break;
+        }
+    }
+    assert_eq!(confirmed, names);
+    assert!(open.is_some(), "the call opened midway");
+    drop(open);
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    for (i, name) in names.iter().enumerate() {
+        let take = TakeId(i as u32 + 1);
+        let entry = lib.entry(take, DEVICE, name).unwrap().unwrap();
+        assert!(entry.verified, "{name} verified");
+        let dir = lib.take_dir(take).unwrap();
+        assert_eq!(contents(dir, &entry.file), data(50 + i, 200 * 1024 + i));
+    }
+    assert!(guest.list().unwrap().is_empty());
 }
