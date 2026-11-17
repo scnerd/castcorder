@@ -23,8 +23,8 @@
 use super::*;
 
 thread_local! {
-    /// The deliverable roots the outbox last listed.
-    static LISTED: RefCell<Vec<[u8; 32]>> = const { RefCell::new(Vec::new()) };
+    /// The deliverable items the outbox last listed.
+    static LISTED: RefCell<Vec<OfferKey>> = const { RefCell::new(Vec::new()) };
     /// Seconds since the outbox was last listed while not connected.
     static IDLE_TICKS: Cell<u32> = const { Cell::new(0) };
 }
@@ -135,22 +135,19 @@ pub(super) fn on_outbox(ui: Ui, msg: &JsValue) {
         Array::from(&get(msg, "rooms")),
         Array::from(&get(msg, "calls")),
     );
-    let mut roots = Vec::new();
+    let mut items = Vec::new();
     for (i, bytes) in Array::from(&get(msg, "offers")).iter().enumerate() {
-        let named = rooms
-            .get(i as u32)
-            .as_string()
-            .is_some_and(|r| !r.is_empty())
-            && calls
-                .get(i as u32)
-                .as_string()
-                .is_some_and(|c| !c.is_empty());
+        let room = rooms.get(i as u32).as_string().unwrap_or_default();
+        let call = calls.get(i as u32).as_string().unwrap_or_default();
         let bytes = Uint8Array::new(&bytes).to_vec();
-        if let (true, Ok(offer)) = (named, castcorder_protocol::decode::<TrackOffer>(&bytes)) {
-            roots.push(offer.root);
+        if room.is_empty() || call.is_empty() {
+            continue;
+        }
+        if let Ok(offer) = castcorder_protocol::decode::<TrackOffer>(&bytes) {
+            items.push(offer_key(&offer));
         }
     }
-    LISTED.with(|l| *l.borrow_mut() = roots);
+    LISTED.with(|l| *l.borrow_mut() = items);
     recount(ui);
 }
 

@@ -1,10 +1,14 @@
 //! Two guests offer byte-identical tracks (and logs) in the same take (tier 2).
 //! Each must land under its own name, bit-exact, and no guest may delete
 //! before its own copy is verified: the host's disk crashes at every
-//! confirmation. One guest also holds two identical tracks of its own.
+//! confirmation. One guest also holds two identical tracks of its own, and one
+//! records a later take bit-identical to one it already delivered on the same
+//! connection.
+
+use std::collections::BTreeSet;
 
 use castcorder_core::library::{Library, Puller};
-use castcorder_core::outbox::GuestOutbox;
+use castcorder_core::outbox::{GuestOutbox, OfferKey, offer_key};
 use castcorder_core::sync::SyncConfig;
 use castcorder_port_disk::{SimDisk, Storage, StorageFile};
 use castcorder_protocol::{SourceId, SourceKind, TakeId, TrackOffer};
@@ -353,4 +357,110 @@ fn identical_track_added_mid_sync_is_not_confirmed_by_the_earlier_done() {
     }
     assert!(confirmed_b);
     assert!(outbox.pending().is_empty());
+}
+
+/// One device on one connection records a take, delivers it, then records a
+/// later take that is bit-identical (a tone of whole-sample period cut to the
+/// same length, or digital silence). The guest offers what its outbox lists
+/// on every pass, each item once per connection, by [`offer_key`] as the
+/// browser guest does: the later take must still be offered, land in its own
+/// file, verified and bit-exact, and be confirmed (cast-rxd: a root-keyed
+/// "already offered" check skipped it and it stayed on the device).
+#[test]
+fn a_later_identical_take_on_the_same_connection_is_offered_and_lands() {
+    let mut audio = vec![0u8; 40 * 1024 + 5];
+    fill_pseudo_random(21, 0, &mut audio);
+    let guest = SimDisk::new(31);
+    for n in ["take0001-100-mic.wav", "take0002-200-mic.wav"] {
+        let mut f = guest.open(n).unwrap();
+        f.write_at(0, &audio).unwrap();
+        f.sync().unwrap();
+    }
+    guest.sync_dir().unwrap();
+    let offer = |take: u32, name: &str| TrackOffer {
+        device: "dev-pat".into(),
+        take: TakeId(take),
+        source: SourceId("mic".into()),
+        kind: SourceKind::Audio,
+        name: name.into(),
+        size: 0,
+        root: [0; 32],
+        format: "wav".into(),
+    };
+
+    let host_disk = SimDisk::new(32);
+    let host_root = host_disk.subdir("library").unwrap();
+    let mut lib = Library::open(&host_root, CALL, cfg()).unwrap();
+    let mut outbox = GuestOutbox::new(CALL, cfg());
+    let (mut ge, he) = mem_link(None, None);
+    let mut puller = Puller::new(CALL, "Pat", he);
+    // The connection's "offered" set, as the browser guest keeps it.
+    let mut offered: BTreeSet<OfferKey> = BTreeSet::new();
+    let mut confirmed: Vec<String> = Vec::new();
+    let mut run = |outbox: &mut GuestOutbox<_>,
+                   lib: &mut Library<_>,
+                   offered: &mut BTreeSet<OfferKey>,
+                   confirmed: &mut Vec<String>,
+                   want: &str| {
+        for step in 0..10_000 {
+            assert!(step < 9_999, "stuck before {want} was confirmed");
+            for o in outbox.pending() {
+                if offered.insert(offer_key(&o)) {
+                    puller.offer(lib, &o).unwrap();
+                }
+            }
+            for o in outbox.pump(&mut ge, 64 * 1024).unwrap() {
+                confirmed.push(o.name);
+            }
+            if confirmed.iter().any(|n| n == want) {
+                return;
+            }
+            puller.poll(lib, false).unwrap();
+        }
+    };
+
+    let t1 = outbox
+        .add(
+            offer(1, "take0001-100-mic"),
+            guest.open("take0001-100-mic.wav").unwrap(),
+        )
+        .unwrap();
+    run(
+        &mut outbox,
+        &mut lib,
+        &mut offered,
+        &mut confirmed,
+        "take0001-100-mic",
+    );
+    // Take 2 is recorded on the same connection, after take 1 was delivered.
+    let t2 = outbox
+        .add(
+            offer(2, "take0002-200-mic"),
+            guest.open("take0002-200-mic.wav").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(t1.root, t2.root, "the takes are bit-identical");
+    assert_ne!(offer_key(&t1), offer_key(&t2));
+    run(
+        &mut outbox,
+        &mut lib,
+        &mut offered,
+        &mut confirmed,
+        "take0002-200-mic",
+    );
+
+    assert!(outbox.pending().is_empty(), "nothing is left on the device");
+    let mut files = Vec::new();
+    for (take, name) in [(1, "take0001-100-mic"), (2, "take0002-200-mic")] {
+        let e = lib.entry(TakeId(take), "dev-pat", name).unwrap().unwrap();
+        assert!(e.verified, "{name} not verified");
+        let dir = host_root
+            .subdir(CALL)
+            .unwrap()
+            .subdir(&format!("take{take:02}"))
+            .unwrap();
+        assert_eq!(contents(&dir, &e.file), audio, "{name} not bit-exact");
+        files.push(format!("take{take:02}/{}", e.file));
+    }
+    assert_ne!(files[0], files[1]);
 }

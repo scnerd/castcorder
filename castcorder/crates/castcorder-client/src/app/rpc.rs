@@ -163,7 +163,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                 None => e.disk_requests.push(id),
             }
         }
-        for (id, root) in std::mem::take(&mut e.offer_requests) {
+        for (id, key) in std::mem::take(&mut e.offer_requests) {
             match rpc.take_response(id) {
                 Some(Response::TrackAccepted { file, received }) => {
                     info!(call = %ctx.call, device = %ctx.device, file = %file, received, "host accepted track offer");
@@ -171,10 +171,10 @@ pub(super) fn pump_rpc(ui: Ui) {
                 Some(other) => {
                     warn!(call = %ctx.call, device = %ctx.device, response = ?other, "track offer refused");
                     // Kept on this device; a background sync stops waiting for it.
-                    e.refused.insert(root);
+                    e.refused.insert(key);
                     refusals = true;
                 }
-                None => e.offer_requests.push((id, root)),
+                None => e.offer_requests.push((id, key)),
             }
         }
         for id in std::mem::take(&mut e.pings) {

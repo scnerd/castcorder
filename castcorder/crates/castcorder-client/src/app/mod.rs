@@ -66,6 +66,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, VecDeque};
 use std::rc::Rc;
 
+use castcorder_core::outbox::{OfferKey, offer_key};
 use castcorder_protocol::rpc::{MessageChannel, RpcClient};
 use castcorder_protocol::{
     Event, PROTOCOL_VERSION, ParticipantId, Request, RequestId, Response, Role, RoomAction,
@@ -171,16 +172,16 @@ struct Engine {
     pc: Option<RtcPeerConnection>,
     control: Option<RtcDataChannel>,
     data: Option<RtcDataChannel>,
-    /// Roots offered to the host on this connection.
-    offered: BTreeSet<[u8; 32]>,
-    /// Track offers awaiting their answer, with the root each offered.
-    offer_requests: Vec<(RequestId, [u8; 32])>,
+    /// Items offered to the host on this connection.
+    offered: BTreeSet<OfferKey>,
+    /// Track offers awaiting their answer, with the item each offered.
+    offer_requests: Vec<(RequestId, OfferKey)>,
     /// Background sync ([`background`]): after Leave (or on a page opened
     /// without joining), a sync-only connection delivers what the outbox
     /// still holds for this host; its state lives here until the next join.
     sync_only: bool,
-    /// Roots the host refused on this sync-only connection (kept here).
-    refused: BTreeSet<[u8; 32]>,
+    /// Items the host refused on this sync-only connection (kept here).
+    refused: BTreeSet<OfferKey>,
     /// The host refused the device itself: no more sync-only attempts.
     sync_refused: bool,
     /// Items delivered by the background sync so far.

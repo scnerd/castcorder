@@ -29,8 +29,10 @@ pub(super) fn pull_frames() {
 }
 
 /// Offer the worker's outbox (`outbox {offers, rooms, calls}`) to the host,
-/// each root once per connection: `OfferTrack` for this call's tracks and
-/// those from before rooms, `OfferCallTrack` for another call's.
+/// each item once per connection (by [`OfferKey`], never by root alone:
+/// byte-identical items are offered one by one): `OfferTrack` for this
+/// call's tracks and those from before rooms, `OfferCallTrack` for another
+/// call's.
 pub(super) fn offer_tracks(msg: &JsValue) {
     let ctx = with_engine(|e| e.ctx.clone());
     let (rooms, calls) = (
@@ -57,10 +59,10 @@ pub(super) fn offer_tracks(msg: &JsValue) {
             if e.sync_only && (room.is_empty() || call.is_empty()) {
                 return;
             }
-            if !e.offered.insert(offer.root) {
+            let key = offer_key(&offer);
+            if !e.offered.insert(key.clone()) {
                 return;
             }
-            let root = offer.root;
             let request = if room.is_empty() || call.is_empty() {
                 info!(call = %ctx.call, device = %ctx.device, take = offer.take.0, track = %offer.name, size = offer.size, "offering track to the host");
                 Request::OfferTrack(offer)
@@ -76,7 +78,7 @@ pub(super) fn offer_tracks(msg: &JsValue) {
                 }
             };
             match rpc.send(request) {
-                Ok(id) => e.offer_requests.push((id, root)),
+                Ok(id) => e.offer_requests.push((id, key)),
                 Err(err) => warn!(error = ?err, "OfferTrack not sent"),
             }
         });
