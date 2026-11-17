@@ -103,22 +103,23 @@ All four live in the GitHub environment `production` (names exactly):
    (the one place the default lives; the deploy job warns while they differ).
 3. **Find the account id.** On the **Workers & Pages** page, under **Account details**,
    select the copy button next to **Account ID** (or press Ctrl+K and run `Copy account ID`). Keep it for step 6.
-4. **Create the deploy API token.** Go to **Manage account** > **Account API tokens**
+4. **Create the deploy API token.** Go to the **Account API tokens** page
    (<https://dash.cloudflare.com/?to=/:account/api-tokens>) and select **Create Token**.
-   Next to the **Edit Cloudflare Workers** template select **Use template**. Name it
-   `castcorder deploy`. Under **Account Resources** choose **Include** and this account;
-   under **Zone Resources** choose **Include** > **All zones from an account** and this
-   account (there are no zones; nothing else is needed). Select **Continue to
-   summary**, then **Create Token**, and copy the token (shown only once).
-5. **Create the Realtime TURN key.** Open **Realtime** > **TURN Server**
-   (<https://dash.cloudflare.com/?to=/:account/calls>) and select **Create**. Name the
-   key `castcorder-production`. Copy its **Turn Token ID** and its **API Token** (shown
-   only once). The Worker uses this long-lived key to mint short-lived credentials; it
-   is never sent to hosts or guests.
+   Under **Permission policies**, open the **Custom** dropdown and select **Edit
+   Cloudflare Workers**. Name the token `castcorder deploy` and scope it to this account
+   only (if the form also asks for zones, pick all zones of this account; there are
+   none). Select **Continue to summary**, then **Create Token**, and copy the token
+   (shown only once).
+5. **Create the Realtime TURN key.** Open the Realtime TURN page of the dashboard
+   (<https://dash.cloudflare.com/?to=/:account/calls>) and create a TURN key, named
+   `castcorder-production`. Copy its **Turn Token ID** and its **API token** (the token
+   is shown only once). The Worker uses this long-lived key to mint short-lived
+   credentials; it is never sent to hosts or guests.
 6. **Add the GitHub secrets.** In the GitHub repository go to **Settings** >
-   **Environments** > **New environment**, name it `production`, and select **Configure
-   environment**. Under **Deployment branches and tags** choose **Selected branches and
-   tags** and add `main`. Under **Environment secrets** select **Add environment
+   **Environments**. If `production` is already listed (the first push to `main` after
+   this workflow landed creates it), select it; otherwise select **New environment**,
+   name it `production`, and select **Configure environment**. Under **Deployment
+   branches and tags** choose **Selected branches and tags** and add `main`. Under **Environment secrets** select **Add environment
    secret** four times: `CLOUDFLARE_API_TOKEN` (step 4), `CLOUDFLARE_ACCOUNT_ID` (step
    3), `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` (step 5). Optional: also add the two
    `CF_TURN_*` values under **Settings** > **Secrets and variables** > **Actions** >
