@@ -91,3 +91,7 @@ _Avoid_: Part, fragment, chunk
 **Outbox**:
 A participant's local store of tracks the host has not yet confirmed receiving. It syncs to the host whenever the host is connected and no take is recording, audio before video, oldest take first.
 _Avoid_: Upload queue, pending uploads
+
+**Sync-only Connection**:
+A device's connection to the host that only delivers its outbox: no media, not a participant, never counted as anyone in a call. A device opens one whenever it is in no call and its outbox holds tracks for that host (a guest that left, the app in the tray, a page reopened later). The host admits it by device key beside any live call, refuses a device kicked from the room, and accepts each track only for a call the device was in.
+_Avoid_: Background connection, upload session

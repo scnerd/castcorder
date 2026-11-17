@@ -5,12 +5,14 @@
 //!
 //! This library is the part without a webview, so it is tested in
 //! `task check`: [`host_control`] (start and stop the in-process host),
-//! [`deeplink`] (map `castcorder://` to the https call link) and the app's
-//! flags ([`AppArgs`]). The Tauri shell is the `castcorder-app` binary
+//! [`deeplink`] (map `castcorder://` to the https call link), [`remembered`]
+//! (the last call link, reopened hidden at start so its page syncs) and the
+//! app's flags ([`AppArgs`]). The Tauri shell is the `castcorder-app` binary
 //! (feature `desktop`).
 
 pub mod deeplink;
 pub mod host_control;
+pub mod remembered;
 
 use std::path::{Path, PathBuf};
 

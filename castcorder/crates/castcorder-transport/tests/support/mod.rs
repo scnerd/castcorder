@@ -287,6 +287,15 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
         self.rtc.channel(id).unwrap().write(true, bytes).unwrap()
     }
 
+    /// Bytes queued on "data" not yet sent.
+    pub fn data_buffered(&mut self) -> usize {
+        let Some(id) = self.data else { return 0 };
+        self.rtc
+            .channel(id)
+            .map(|mut c| c.buffered_amount())
+            .unwrap_or(0)
+    }
+
     fn pt_for(&mut self, mid: Mid, codec: Codec) -> Option<str0m::media::Pt> {
         let w = self.rtc.writer(mid)?;
         w.payload_params()

@@ -25,6 +25,8 @@ use super::*;
 thread_local! {
     /// The deliverable roots the outbox last listed.
     static LISTED: RefCell<Vec<[u8; 32]>> = const { RefCell::new(Vec::new()) };
+    /// Seconds since the outbox was last listed while not connected.
+    static IDLE_TICKS: Cell<u32> = const { Cell::new(0) };
 }
 
 /// The storage worker is ready: a page opened without joining delivers what
@@ -34,6 +36,8 @@ pub(super) fn worker_ready(ui: Ui) {
     if home::is_home_page() || ui.joined.get_untracked() {
         return;
     }
+    // A join started meanwhile wins: never start under a join in flight.
+    let before = join_epoch();
     spawn_local(async move {
         let key = match crate::identity::device().await {
             Ok(k) => k,
@@ -42,7 +46,7 @@ pub(super) fn worker_ready(ui: Ui) {
                 return;
             }
         };
-        if ui.joined.get_untracked() || with_engine(|e| e.sync_only) {
+        if join_epoch() != before || ui.joined.get_untracked() || with_engine(|e| e.sync_only) {
             return;
         }
         let url = ui.signal_url.get_untracked();
@@ -236,6 +240,15 @@ fn tick(ui: Ui, epoch: u32) {
         send_signal(&Signal::Hb);
         check_connection(ui, epoch);
     } else {
+        // A track still being finalised when last listed shows up later.
+        let n = IDLE_TICKS.get() + 1;
+        IDLE_TICKS.set(n % RELIST_SECONDS);
+        if n == RELIST_SECONDS && !with_engine(|e| e.sync_refused) {
+            ask_outbox();
+        }
         recount(ui);
     }
 }
+
+/// How often an idle background sync lists the outbox again.
+const RELIST_SECONDS: u32 = 10;

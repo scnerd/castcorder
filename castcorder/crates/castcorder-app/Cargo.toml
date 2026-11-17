@@ -53,7 +53,11 @@ tauri-plugin-single-instance = { version = "2", optional = true, features = [
 tauri-build = { version = "2", optional = true, features = [] }
 
 [dev-dependencies]
+castcorder-core.workspace = true
 castcorder-port-capture.workspace = true
+castcorder-port-disk.workspace = true
+castcorder-protocol.workspace = true
+castcorder-transfer.workspace = true
 castcorder-port-clock.workspace = true
 castcorder-port-net.workspace = true
 castcorder-transport.workspace = true
