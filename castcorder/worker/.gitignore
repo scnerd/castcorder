@@ -1,0 +1,7 @@
+# worker-build output, staged client bundles, local tools and wrangler state
+/build/
+/assets/
+/.tools/
+/node_modules/
+/.wrangler/
+/.dev.vars

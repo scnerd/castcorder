@@ -52,7 +52,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          workspaces: castcorder
+          # castcorder/worker is its own workspace (the Cloudflare Worker, wasm32).
+          workspaces: |
+            castcorder
+            castcorder/worker
 
       - name: Format and clippy
         run: task lint
@@ -248,7 +251,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
-          workspaces: castcorder
+          workspaces: |
+            castcorder
+            castcorder/worker
 
       - name: Install trunk
         uses: taiki-e/install-action@v2
@@ -283,6 +288,12 @@ jobs:
       # the host, rendezvous and client builds (and the null sink) set up for the relay test.
       - name: System test (call link through the rendezvous)
         run: task test:system
+
+      # The same system test against the Cloudflare Worker under `wrangler dev`
+      # (ADR 0004): local only, no account. Builds worker-build and wrangler inside
+      # castcorder/worker first.
+      - name: System test against the Worker (wrangler dev)
+        run: task test:system:worker
 
       - name: Upload system logs
         if: failure()

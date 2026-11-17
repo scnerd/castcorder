@@ -39,8 +39,14 @@ use tungstenite::{Message, WebSocket};
 use crate::call::Command;
 
 /// Silence longer than this means the connection is dead (the server pings
-/// every 20 s).
+/// every 20 s, and the host pings after [`PING_AFTER`] of silence).
 const READ_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Silence after which the host pings the rendezvous itself. A Worker
+/// rendezvous (ADR 0004) holds the host's connection in a hibernating Durable
+/// Object, which sends no pings of its own; the runtime answers ours without
+/// waking it, and the pong is the traffic that keeps [`READ_TIMEOUT`] away.
+const PING_AFTER: Duration = Duration::from_secs(20);
 
 /// How often a blocked read wakes to check the credential renewal deadline.
 const POLL: Duration = Duration::from_secs(1);
@@ -319,6 +325,7 @@ fn read_msg_until(
     stop: Option<&AtomicBool>,
 ) -> Result<Option<ServerMsg>, String> {
     let mut quiet = Instant::now();
+    let mut pinged = false;
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
@@ -327,7 +334,10 @@ fn read_msg_until(
                     .ok_or_else(|| format!("unrecognised frame {t}"));
             }
             Ok(Message::Close(_)) => return Err("closed by the rendezvous".into()),
-            Ok(_) => quiet = Instant::now(),
+            Ok(_) => {
+                quiet = Instant::now();
+                pinged = false;
+            }
             Err(tungstenite::Error::Io(e))
                 if matches!(
                     e.kind(),
@@ -342,6 +352,11 @@ fn read_msg_until(
                 }
                 if quiet.elapsed() >= READ_TIMEOUT {
                     return Err("no traffic from the rendezvous".into());
+                }
+                if !pinged && quiet.elapsed() >= PING_AFTER {
+                    // A failed ping shows up as silence, then READ_TIMEOUT.
+                    let _ = ws.send(Message::Ping(Vec::new().into()));
+                    pinged = true;
                 }
             }
             Err(e) => return Err(e.to_string()),
@@ -359,7 +374,8 @@ pub fn exchange(
 ) -> Result<Vec<u8>, String> {
     let t = target(base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
-    let (mut ws, _) = tungstenite::client(t.ws_url.as_str(), stream).map_err(|e| e.to_string())?;
+    let url = castcorder_link::wire::mailbox_url(&t.ws_url, to);
+    let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     let ServerMsg::Hello { .. } = read_msg(&mut ws)? else {
         return Err("expected hello".into());
     };
@@ -432,8 +448,10 @@ fn session(
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
     // The rendezvous gives this host relay (TURN) credentials in `registered`,
     // once it has proved its key (a `?host=` here would ask for them in the
-    // hello, which is refused while this host is not yet online).
-    let (mut ws, _) = tungstenite::client(t.ws_url.as_str(), stream).map_err(|e| e.to_string())?;
+    // hello, which is refused while this host is not yet online). It names
+    // its own mailbox, which a Worker rendezvous routes on (ADR 0004).
+    let url = castcorder_link::wire::mailbox_url(&t.ws_url, &cfg.key.id());
+    let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     let ServerMsg::Hello {
         nonce, stun_port, ..
     } = read_msg(&mut ws)?

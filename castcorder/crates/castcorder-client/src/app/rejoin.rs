@@ -322,7 +322,10 @@ async fn ask(room: &Room) -> Result<HostStatus, String> {
         let hash = room.url.split_once('#').map(|(_, h)| h).unwrap_or_default();
         let link = CallLink::parse_fragment(&format!("#{hash}")).map_err(|e| e.to_string())?;
         let origin = room.url.split('/').take(3).collect::<Vec<_>>().join("/");
-        let ws = format!("{}/ws", origin.replacen("http", "ws", 1));
+        let ws = castcorder_link::wire::mailbox_url(
+            &format!("{}/ws", origin.replacen("http", "ws", 1)),
+            &link.host,
+        );
         let mb = crate::mailbox::Mailbox::open(&ws)
             .await
             .map_err(|e| describe(&e))?;

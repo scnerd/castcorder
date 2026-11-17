@@ -1,0 +1,256 @@
+//! One Durable Object per host key: that host's WebSocket and its guests',
+//! held with the hibernation API, around the shared mailbox state machine
+//! ([`castcorder_mailbox::Mailbox`]).
+//!
+//! Hibernation drops this object's memory while its WebSockets stay open, so
+//! each connection carries its [`Saved`] mailbox state as its attachment (and
+//! its connection id as its tag) and the constructor restores them all.
+//! Rate-limit buckets are not saved: an object hibernates only after some
+//! seconds without traffic, by which time the buckets have mostly refilled.
+//! The host pings us when quiet (castcorder-host `PING_AFTER`); the runtime
+//! answers protocol pings without waking the object, so an idle host costs
+//! nothing while connected.
+
+use std::cell::RefCell;
+
+use castcorder_link::wire::{ServerMsg, b64, to_json};
+use castcorder_mailbox::{
+    ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, RelayAsk, fill_registered,
+    relay_host,
+};
+use serde::{Deserialize, Serialize};
+use worker::{
+    Date, DurableObject, Env, Request, Response, Result, State, WebSocket,
+    WebSocketIncomingMessage, WebSocketPair, durable_object,
+};
+
+use crate::relay;
+
+/// What a connection's attachment holds.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    id: ConnId,
+    state: ConnState,
+}
+
+fn now() -> Millis {
+    Date::now().as_millis()
+}
+
+/// 32 random bytes for a registration nonce.
+fn nonce() -> Result<[u8; 32]> {
+    use worker::wasm_bindgen::JsCast;
+    let crypto: web_sys::Crypto =
+        worker::js_sys::Reflect::get(&worker::js_sys::global(), &"crypto".into())?
+            .dyn_into()
+            .map_err(|_| worker::Error::RustError("no crypto".into()))?;
+    let mut n = [0u8; 32];
+    crypto.get_random_values_with_u8_array(&mut n)?;
+    Ok(n)
+}
+
+/// A host key's mailbox.
+#[durable_object]
+pub struct HostMailbox {
+    state: State,
+    env: Env,
+    mb: RefCell<Mailbox>,
+}
+
+impl HostMailbox {
+    fn conn_of(ws: &WebSocket) -> Option<ConnId> {
+        ws.deserialize_attachment::<String>()
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Saved>(&s).ok())
+            .map(|s| s.id)
+    }
+
+    fn socket(&self, conn: ConnId) -> Option<WebSocket> {
+        self.state
+            .get_websockets_with_tag(&conn.to_string())
+            .into_iter()
+            .next()
+    }
+
+    /// Save every live connection's state beside it (roles change on other
+    /// connections than the one an event came on: a replaced host, guests
+    /// whose host left).
+    fn save_all(&self) {
+        let mb = self.mb.borrow();
+        for ws in self.state.get_websockets() {
+            if let Some(id) = Self::conn_of(&ws)
+                && let Some(state) = mb.conn_state(id)
+                && let Ok(s) = serde_json::to_string(&Saved { id, state })
+            {
+                let _ = ws.serialize_attachment(s);
+            }
+        }
+    }
+
+    /// Carry out `outs`. A closed connection is gone from the mailbox at once
+    /// (its close event then finds nothing), and what that tells others is
+    /// carried out too.
+    fn dispatch(&self, outs: Vec<Out>) {
+        let mut queue = std::collections::VecDeque::from(outs);
+        while let Some(o) = queue.pop_front() {
+            match o {
+                Out::Send(c, m) => {
+                    if let Some(ws) = self.socket(c) {
+                        let _ = ws.send_with_str(to_json(&m));
+                    }
+                }
+                Out::Close(c) => {
+                    if let Some(ws) = self.socket(c) {
+                        let _ = ws.close(Some(1000), Some("closed by the rendezvous"));
+                    }
+                    queue.extend(self.mb.borrow_mut().close(c));
+                }
+            }
+        }
+        self.save_all();
+    }
+
+    fn closed(&self, ws: &WebSocket) {
+        if let Some(id) = Self::conn_of(ws) {
+            let outs = self.mb.borrow_mut().close(id);
+            self.dispatch(outs);
+        }
+    }
+}
+
+impl DurableObject for HostMailbox {
+    fn new(state: State, env: Env) -> Self {
+        let mut mb = Mailbox::new(Limits::default());
+        let mut restored = 0;
+        for ws in state.get_websockets() {
+            let saved = ws
+                .deserialize_attachment::<String>()
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str::<Saved>(&s).ok());
+            if let Some(s) = saved
+                && mb.restore(s.id, &s.state)
+            {
+                restored += 1;
+            }
+        }
+        // Fresh ids for every incarnation (ms clock, three digits to spare,
+        // still exact in a JavaScript number): a late answer to a guest that
+        // left before hibernation never reaches a newer guest.
+        mb.first_id(now() * 1000);
+        if restored > 0 {
+            tracing::info!(connections = restored, "mailbox woke from hibernation");
+        }
+        Self {
+            state,
+            env,
+            mb: RefCell::new(mb),
+        }
+    }
+
+    async fn fetch(&self, req: Request) -> Result<Response> {
+        let query = req.url()?.query().unwrap_or_default().to_string();
+        // The Worker routed here on this; it is this object's host key.
+        let scope = castcorder_mailbox::mailbox_of(&query);
+        let ip = crate::client_ip(&req);
+        let peer = std::net::SocketAddr::new(ip, 0);
+        let nonce = nonce()?;
+        let pair = WebSocketPair::new()?;
+        let now = now();
+        let opened = self.mb.borrow_mut().open(ip, peer, nonce, scope, now);
+        let id = match opened {
+            Ok(id) => id,
+            Err(refusal) => {
+                pair.server.accept()?;
+                pair.server.send_with_str(to_json(&refusal))?;
+                pair.server.close(Some(1008), Some("refused"))?;
+                return Response::from_websocket(pair.client);
+            }
+        };
+        self.state
+            .accept_websocket_with_tags(&pair.server, &[&id.to_string()]);
+        let mut ice_servers = relay::stun(&self.env);
+        let mut relay_error = None;
+        if let (Some(turn), Some(host)) = (relay::turn(&self.env), relay_host(&query)) {
+            // Only for a host that is connected now (the shared decision).
+            let decided = self
+                .mb
+                .borrow_mut()
+                .relay(id, host, RelayAsk::Hello, None, now);
+            let minted = match decided {
+                Ok(()) => turn.mint(&host).await,
+                Err(why) => Err(why),
+            };
+            match minted {
+                Ok(s) => ice_servers.push(s),
+                Err(why) => relay_error = Some(why),
+            }
+        }
+        let hello = ServerMsg::Hello {
+            nonce: b64(&nonce),
+            stun_port: None,
+            ice_servers,
+            relay_error,
+        };
+        if let Some(state) = self.mb.borrow().conn_state(id) {
+            let _ = pair
+                .server
+                .serialize_attachment(serde_json::to_string(&Saved { id, state })?);
+        }
+        pair.server.send_with_str(to_json(&hello))?;
+        Response::from_websocket(pair.client)
+    }
+
+    async fn websocket_message(
+        &self,
+        ws: WebSocket,
+        message: WebSocketIncomingMessage,
+    ) -> Result<()> {
+        let Some(id) = Self::conn_of(&ws) else {
+            let _ = ws.close(Some(1011), Some("unknown connection"));
+            return Ok(());
+        };
+        let WebSocketIncomingMessage::String(text) = message else {
+            return Ok(()); // binary frames are ignored, as by the rendezvous
+        };
+        if text.len() > MAX_FRAME {
+            tracing::warn!(conn = id, bytes = text.len(), "frame too large; closing");
+            let _ = ws.close(Some(1009), Some("frame too large"));
+            self.closed(&ws);
+            return Ok(());
+        }
+        let now = now();
+        let mut outs = self.mb.borrow_mut().receive(id, &text, now);
+        let registered = self.mb.borrow().just_registered(id, &outs);
+        if let (Some(turn), Some(host)) = (relay::turn(&self.env), registered) {
+            let decided = self
+                .mb
+                .borrow_mut()
+                .relay(id, host, RelayAsk::Registered, None, now);
+            let grant = match decided {
+                Ok(()) => turn.mint(&host).await,
+                Err(why) => Err(why),
+            };
+            fill_registered(&mut outs, id, grant);
+        }
+        self.dispatch(outs);
+        Ok(())
+    }
+
+    async fn websocket_close(
+        &self,
+        ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _was_clean: bool,
+    ) -> Result<()> {
+        self.closed(&ws);
+        Ok(())
+    }
+
+    async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
+        self.closed(&ws);
+        Ok(())
+    }
+}

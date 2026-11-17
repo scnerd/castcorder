@@ -68,6 +68,30 @@ tasks:
       - node setup.mjs
       - node system.mjs
 
+  test:system:worker:
+    desc: Tier 3 system test against the Cloudflare Worker under wrangler dev instead of castcorder-rendezvous (no Cloudflare account needed)
+    summary: |
+      As test:system, with CASTCORDER_RENDEZVOUS=worker: system.mjs stages the
+      client build as the Worker's static assets (castcorder/worker/assets),
+      runs `wrangler dev` on OS-picked loopback ports with no STUN servers, and
+      the host and guests reach the host key's Durable Object. The host stays
+      idle for 50 s first, so its Durable Object hibernates and must restore
+      the host's connection, and the host's own pings must keep it alive.
+      Other build dirs: CARGO_TARGET_DIR=... task test:system:worker CLIENT_DIST=dist-agent
+    dir: castcorder/crates/castcorder-client/browser-test
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
+      CASTCORDER_RENDEZVOUS: worker
+    cmds:
+      - task: worker:build
+      - cargo build --release --locked -p castcorder-host
+      - cd .. && trunk build --release --dist {{.CLIENT_DIST}}
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node system.mjs
+
   test:relay:
     desc: Forced-relay system test - a relay-only host and two relay-only Chromium guests hold a call through coturn (needs Docker)
     summary: |

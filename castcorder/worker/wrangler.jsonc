@@ -1,0 +1,35 @@
+// The Castcorder Worker (ADR 0004): the client bundles as static assets at
+// /v/<version>/ and the rendezvous at /ws, one Durable Object per host key.
+// Built by `task worker:build` (worker-build); run locally with `task worker:dev`.
+// No account id here: deploying is cast-lxt.4.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "castcorder",
+  "main": "build/index.js",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    // Staged by `task worker:assets`: assets/v/<version>/ per client build.
+    "directory": "./assets",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MAILBOX", "class_name": "HostMailbox" }]
+  },
+  // The free plan only offers SQLite-backed Durable Objects.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HostMailbox"] }],
+  // Per-IP connections at the edge, across every host's mailbox (each
+  // Durable Object also limits per IP and per host key within its mailbox).
+  "ratelimits": [
+    {
+      "name": "CONNECTIONS",
+      "namespace_id": "1001",
+      "simple": { "limit": 120, "period": 60 }
+    }
+  ],
+  "vars": {
+    // Space-separated stun: URLs every hello carries.
+    "STUN_URLS": "stun:stun.cloudflare.com:3478"
+  },
+  "observability": { "enabled": true }
+}

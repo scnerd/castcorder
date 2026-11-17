@@ -1,0 +1,24 @@
+[package]
+name = "castcorder-mailbox"
+description = "Castcorder rendezvous mailbox: routing, rate limits and relay decisions, without I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "AGPL-3.0-or-later"
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# No sockets, no clock, no randomness: the rendezvous (castcorder-rendezvous)
+# and the Cloudflare Worker (castcorder/worker) wrap this crate, so it must build
+# for wasm32-unknown-unknown as well as natively.
+[dependencies]
+castcorder-link.workspace = true
+serde = { workspace = true, features = ["std"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# Connection state round-trips through JSON, as a Durable Object attachment does.
+serde_json.workspace = true

@@ -41,6 +41,13 @@ repos:
         types: [rust]
         exclude: "^castcorder/spikes/"
         pass_filenames: false
+      # The Cloudflare Worker is its own workspace (castcorder/worker).
+      - id: cargo-fmt-worker
+        name: cargo fmt (worker)
+        language: system
+        entry: cargo fmt --manifest-path castcorder/worker/Cargo.toml
+        files: '^castcorder/worker/.*\.rs$'
+        pass_filenames: false
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
