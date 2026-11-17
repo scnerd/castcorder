@@ -23,6 +23,7 @@ use castcorder_protocol::{
 use std::path::PathBuf;
 
 mod routing;
+mod status;
 mod sync;
 pub use routing::{CallView, RoomView, Rooms};
 
@@ -74,9 +75,26 @@ pub enum Command {
         /// A sync-only connection: data channels only, not a participant,
         /// admitted by its device key alone ([`sync`]).
         sync_only: bool,
+        /// Rejoin this call of the room (`None`: its current call): see
+        /// [`status`].
+        call: Option<String>,
         /// Where the answer goes; a refusal starts with its code
         /// (`waiting:`, `kicked:`, `locked:`, `wrong_password:`, ...).
         reply: mpsc::Sender<Result<String, String>>,
+    },
+    /// A status query: every room of this host the device was in
+    /// ([`status`]). Opens nothing and loads no room.
+    HostStatus {
+        /// The device id the query presented.
+        device: String,
+        /// The device key proof over `nonce`.
+        proof: Option<castcorder_link::DeviceProof>,
+        /// The fresh nonce the proof signs (in place of an SDP).
+        nonce: String,
+        /// This host's id (encoded): what the proof must be signed for.
+        audience: String,
+        /// The rooms, or why the query was refused.
+        reply: mpsc::Sender<Result<castcorder_link::wire::HostStatus, String>>,
     },
     /// Start a take.
     StartTake {
@@ -1474,6 +1492,7 @@ impl Call {
                 audience,
                 at_host,
                 sync_only,
+                call,
                 reply,
             } => {
                 if sync_only {
@@ -1515,11 +1534,14 @@ impl Call {
                 }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
-                    // The first one in opens the room's current call.
-                    Ok(Admission::Enter) => self.enter_call().and_then(|()| {
-                        host.accept(&crate::http::stream_name(&name), &offer_sdp)
-                            .map_err(|e| e.to_string())
-                    }),
+                    // The first one in opens the room's current call (or
+                    // the call it rejoins).
+                    Ok(Admission::Enter) => self
+                        .enter_named(&device, alias, at_host, call.as_deref())
+                        .and_then(|()| {
+                            host.accept(&crate::http::stream_name(&name), &offer_sdp)
+                                .map_err(|e| e.to_string())
+                        }),
                 };
                 let r = r.map(|(id, answer)| {
                     // Admitted and accepted: only now may it take over an
@@ -1568,6 +1590,15 @@ impl Call {
                     "at the host machine",
                 );
                 let _ = reply.send(self.stop_take());
+            }
+            Command::HostStatus {
+                device,
+                proof,
+                nonce,
+                audience,
+                reply,
+            } => {
+                let _ = reply.send(self.host_status(&device, proof.as_ref(), &nonce, &audience));
             }
             Command::Live { reply } => {
                 let _ = reply.send(self.live());

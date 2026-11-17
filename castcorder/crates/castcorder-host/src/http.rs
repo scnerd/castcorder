@@ -17,7 +17,10 @@
 //!   localhost listener is at the host machine; a refusal is 403 (`kicked:`,
 //!   `locked:`, `wrong_password:`, `bad_device:`) or 503 (`waiting:` a
 //!   producer-gated call with no producer in it yet). `"sync":true` asks for
-//!   a sync-only connection (docs/design.md "Background sync").
+//!   a sync-only connection (docs/design.md "Background sync");
+//!   `"call":ID` rejoins that call; `"status":true` is a status query (the
+//!   proof signs a nonce in `sdp`) answered with castcorder-link
+//!   `HostStatus` JSON (docs/design.md "Rejoining").
 //! - Producer controls go over the control channel (castcorder-protocol
 //!   `Request::StartTake`, `Request::Room`), authorized per device role. For
 //!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
@@ -335,6 +338,12 @@ struct Sdp {
     /// A sync-only connection (data channels only, not a participant).
     #[serde(default)]
     sync: bool,
+    /// A status query (`sdp` is then the nonce the proof signs).
+    #[serde(default)]
+    status: bool,
+    /// Rejoin this call of the room.
+    #[serde(default)]
+    call: Option<String>,
 }
 
 /// The HTTP status of an offer refusal: 503 while waiting for a producer,
@@ -344,7 +353,7 @@ fn refusal_status(message: &str) -> u16 {
     let code = message.split_once(':').map(|(c, _)| c).unwrap_or_default();
     match code {
         "waiting" => 503,
-        "kicked" | "locked" | "wrong_password" | "bad_device" => 403,
+        "kicked" | "locked" | "wrong_password" | "bad_device" | "not_current" => 403,
         _ => 400,
     }
 }
@@ -442,6 +451,20 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 Ok(o) => o,
                 Err(e) => return text(400, format!("bad offer json: {e}")),
             };
+            if offer.status {
+                // A status query: the rooms this device was in, no call.
+                return match ask(app, |reply| Command::HostStatus {
+                    device: offer.device,
+                    proof: offer.proof,
+                    nonce: offer.sdp,
+                    audience: app.host_id.clone(),
+                    reply,
+                }) {
+                    Some(Ok(st)) => json(200, castcorder_link::wire::to_json(&st)),
+                    Some(Err(e)) => text(refusal_status(&e), e),
+                    None => gone(),
+                };
+            }
             match ask(app, |reply| Command::Offer {
                 room,
                 name,
@@ -452,6 +475,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 audience: app.host_id.clone(),
                 at_host: producer,
                 sync_only: offer.sync,
+                call: offer.call,
                 reply,
             }) {
                 Some(Ok(sdp)) => json(

@@ -116,7 +116,7 @@ impl Call {
     }
 
     /// `f` on the security of `room`: the loaded one, else as saved.
-    fn judge<T>(&self, room: &str, f: impl FnOnce(&Room) -> T) -> T {
+    pub(super) fn judge<T>(&self, room: &str, f: impl FnOnce(&Room) -> T) -> T {
         if room == self.room_name {
             f(&self.room)
         } else {
