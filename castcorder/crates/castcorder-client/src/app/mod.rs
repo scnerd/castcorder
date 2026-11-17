@@ -56,6 +56,7 @@ mod lifecycle;
 mod media;
 mod meters;
 mod native;
+mod person;
 mod recordings;
 mod recvideo;
 mod rejoin;

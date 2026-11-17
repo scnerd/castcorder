@@ -11,6 +11,13 @@
 //!   host machine granted the role, or the host's own native participant.
 //!   Only the host machine grants or revokes, and only to a trusted device.
 //! - Trusted device: one that joined while a producer was present.
+//! - Owner device (docs/design.md "Persons and linked devices"): one whose
+//!   offer carries a certificate of this host's own person (castcorder-host
+//!   `person`). A room belongs to that person, so the owner's devices are
+//!   trusted producers in every room of this host: they enter like the host
+//!   machine (no password, lock, gate or ban applies; revoking a device is
+//!   cast-40e.6), but they are not the host machine, so they cannot appoint
+//!   producers. It is decided per offer, never saved in `room.json`.
 //! - Admission (non-host-machine offers), in order: banned (kicked) device,
 //!   password, lock (trusted devices only), then gating (a producer-gated
 //!   call makes guests wait until a producer is in it, unless they are
@@ -135,7 +142,29 @@ struct Saved {
 struct Conn {
     device: String,
     at_host: bool,
+    /// One of the room owner's devices (a certificate of this host's person).
+    owner: bool,
     joined: bool,
+}
+
+/// Where an offer comes from, beyond its verified device key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Seat {
+    /// From the host machine itself (the localhost page).
+    pub at_host: bool,
+    /// From one of the room owner's devices (its certificate verified).
+    pub owner: bool,
+}
+
+impl Seat {
+    /// An offer from the host machine (`at_host`) or a guest.
+    #[cfg(test)]
+    pub fn host(at_host: bool) -> Self {
+        Self {
+            at_host,
+            owner: false,
+        }
+    }
 }
 
 /// Why an offer or a join was refused. [`Refusal::message`] starts with a
@@ -392,7 +421,7 @@ impl Room {
             .get(&c.device)
             .is_some_and(|d| d.producer && d.trusted && !d.banned);
         Role {
-            producer: c.at_host || granted,
+            producer: c.at_host || c.owner || granted,
             host_machine: c.at_host,
         }
     }
@@ -560,6 +589,7 @@ impl Room {
     /// bind, the offer is judged by the old id's record (its ban, trust and
     /// producer grant), but nothing is bound here; the caller binds it with
     /// [`bind_alias`](Self::bind_alias) only once the offer entered.
+    #[cfg(test)]
     pub fn admit_offer(
         &self,
         device: &str,
@@ -567,10 +597,23 @@ impl Room {
         at_host: bool,
         password: Option<&str>,
     ) -> Result<Admission, Refusal> {
+        self.admit_offer_as(device, alias, Seat::host(at_host), password)
+    }
+
+    /// [`admit_offer`](Self::admit_offer) for an offer from `seat`.
+    pub fn admit_offer_as(
+        &self,
+        device: &str,
+        alias: Option<&str>,
+        seat: Seat,
+        password: Option<&str>,
+    ) -> Result<Admission, Refusal> {
         let rec = self.record_for(device, alias);
-        let r = self.admit_inner(device, rec, at_host, password);
-        let role = if at_host {
+        let r = self.admit_inner(device, rec, seat, password);
+        let role = if seat.at_host {
             "host-machine"
+        } else if seat.owner {
+            "owner"
         } else if rec.is_some_and(|d| d.producer) {
             "producer"
         } else {
@@ -594,14 +637,15 @@ impl Room {
         &self,
         device: &str,
         rec: Option<&DeviceRecord>,
-        at_host: bool,
+        seat: Seat,
         password: Option<&str>,
     ) -> Result<Admission, Refusal> {
         if !valid_device(device) {
             return Err(Refusal::BadDevice);
         }
-        if at_host {
-            // Whoever is at the host is always a producer and always enters.
+        if seat.at_host || seat.owner {
+            // Whoever is at the host, or on one of the owner's devices, is
+            // always a producer and always enters.
             return Ok(Admission::Enter);
         }
         if rec.is_some_and(|d| d.banned) {
@@ -629,15 +673,10 @@ impl Room {
     /// producer): only a device kicked from this room is refused. Each item
     /// it delivers is authorized on its own, against the call it was recorded
     /// in.
-    pub fn admit_sync(
-        &self,
-        device: &str,
-        alias: Option<&str>,
-        at_host: bool,
-    ) -> Result<(), Refusal> {
+    pub fn admit_sync(&self, device: &str, alias: Option<&str>, seat: Seat) -> Result<(), Refusal> {
         let r = if !valid_device(device) {
             Err(Refusal::BadDevice)
-        } else if !at_host && self.banned(device, alias) {
+        } else if !seat.at_host && !seat.owner && self.banned(device, alias) {
             Err(Refusal::Kicked)
         } else {
             Ok(())
@@ -666,6 +705,24 @@ impl Room {
     /// was ever in this room, and as what; `None` for a device the room never
     /// saw, which a status query then treats as unknown.
     pub fn membership(&self, device: &str, alias: Option<&str>) -> Option<Membership> {
+        self.membership_as(device, alias, false)
+    }
+
+    /// [`membership`](Self::membership); an `owner` device (one of the
+    /// room owner's) is a trusted producer of every room, seen or not.
+    pub fn membership_as(
+        &self,
+        device: &str,
+        alias: Option<&str>,
+        owner: bool,
+    ) -> Option<Membership> {
+        if owner {
+            return Some(Membership {
+                removed: false,
+                trusted: true,
+                producer: true,
+            });
+        }
         let rec = self
             .record_for(device, alias)
             .or_else(|| self.saved.devices.get(device));
@@ -680,12 +737,19 @@ impl Room {
     }
 
     /// The transport accepted an admitted offer as `conn`: bind its device.
+    #[cfg(test)]
     pub fn accepted(&mut self, conn: ConnId, device: &str, at_host: bool) {
+        self.accepted_as(conn, device, Seat::host(at_host));
+    }
+
+    /// [`accepted`](Self::accepted) for an offer from `seat`.
+    pub fn accepted_as(&mut self, conn: ConnId, device: &str, seat: Seat) {
         self.conns.insert(
             conn,
             Conn {
                 device: device.to_string(),
-                at_host,
+                at_host: seat.at_host,
+                owner: seat.owner,
                 joined: false,
             },
         );
@@ -700,7 +764,7 @@ impl Room {
             decision("?", "guest", "join", false, "no admitted connection");
             return Err(Refusal::BadDevice);
         };
-        if !c.at_host && self.saved.devices.get(&c.device).is_some_and(|d| d.banned) {
+        if !c.at_host && !c.owner && self.saved.devices.get(&c.device).is_some_and(|d| d.banned) {
             decision(&c.device, "guest", "join", false, Refusal::Kicked.reason());
             return Err(Refusal::Kicked);
         }
@@ -908,7 +972,7 @@ impl Room {
                         participant: ParticipantId(*id),
                         name: rec.map(|d| d.name.clone()).unwrap_or_default(),
                         device: c.device.clone(),
-                        trusted: c.at_host || rec.is_some_and(|d| d.trusted),
+                        trusted: c.at_host || c.owner || rec.is_some_and(|d| d.trusted),
                         producer: role.producer,
                         host_machine: role.host_machine,
                     }

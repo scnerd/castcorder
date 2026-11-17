@@ -188,6 +188,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     <button id="create-room" class="btn" disabled=move || new_name.get().trim().is_empty() on:click=create>"Create room"</button>
                     <span id="home-message" class="small muted">{move || message.get()}</span>
                 </div>
+                <super::person::PersonCard/>
                 <ul id="rooms" class="list">
                     <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
                         {

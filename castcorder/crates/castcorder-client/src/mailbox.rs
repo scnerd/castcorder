@@ -147,11 +147,15 @@ impl Mailbox {
             sync_only,
             status: false,
             call: call.map(str::to_string),
+            cert: crate::identity::cert(),
+            link: None,
         };
         match self.ask(link, &plain).await? {
             AnswerPlain::Sdp(sdp) => Ok(sdp),
             AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
-            AnswerPlain::Status(_) => Err(JsValue::from_str("the host answered a status")),
+            AnswerPlain::Status(_) | AnswerPlain::Link(_) => {
+                Err(JsValue::from_str("the host answered something else"))
+            }
         }
     }
 
@@ -176,26 +180,40 @@ impl Mailbox {
             sync_only: false,
             status: true,
             call: None,
+            cert: crate::identity::cert(),
+            link: None,
         };
         match self.ask(link, &plain).await? {
             AnswerPlain::Status(st) => Ok(st),
             AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
             // An older host takes it for an offer.
-            AnswerPlain::Sdp(_) => Err(JsValue::from_str("no_status: the host is too old")),
+            AnswerPlain::Sdp(_) | AnswerPlain::Link(_) => {
+                Err(JsValue::from_str("no_status: the host is too old"))
+            }
         }
     }
 
     /// Seal `plain` to the link's host, send it, and open its answer.
     async fn ask(&self, link: &CallLink, plain: &OfferPlain) -> Result<AnswerPlain, JsValue> {
+        self.sealed(&link.host, plain).await
+    }
+
+    /// Seal `plain` to `host`, send it, and open its answer (a link request,
+    /// castcorder-link `person`, names its host by the link code).
+    pub async fn sealed(
+        &self,
+        host: &castcorder_link::HostId,
+        plain: &OfferPlain,
+    ) -> Result<AnswerPlain, JsValue> {
         let mut ephemeral = [0u8; 32];
         web_sys::window()
             .expect("window")
             .crypto()?
             .get_random_values_with_u8_array(&mut ephemeral)?;
-        let (sealed, guest) = GuestSeal::seal(&link.host, ephemeral, to_json(plain).as_bytes())
+        let (sealed, guest) = GuestSeal::seal(host, ephemeral, to_json(plain).as_bytes())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let frame = ClientMsg::Offer {
-            to: link.host.encode(),
+            to: host.encode(),
             sealed: b64(&sealed),
         };
         self.ws.send_with_str(&to_json(&frame))?;

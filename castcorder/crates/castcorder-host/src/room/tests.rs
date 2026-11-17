@@ -239,11 +239,17 @@ fn sync_only_admits_by_device_key_and_refuses_a_banned_device() {
     // Nobody is in, the room is gated, locked and has a password: a call
     // connection of an unknown device would not get in.
     assert!(room.admit("dev-new", false, Some("pw")).is_err());
-    assert_eq!(room.admit_sync("dev-new", None, false), Ok(()));
-    assert_eq!(room.admit_sync("dev-b", None, false), Ok(()));
-    assert_eq!(room.admit_sync("dev-c", None, false), Err(Refusal::Kicked));
+    assert_eq!(room.admit_sync("dev-new", None, Seat::default()), Ok(()));
+    assert_eq!(room.admit_sync("dev-b", None, Seat::default()), Ok(()));
+    assert_eq!(
+        room.admit_sync("dev-c", None, Seat::default()),
+        Err(Refusal::Kicked)
+    );
     assert!(room.banned("dev-c", None) && !room.banned("dev-b", None));
-    assert_eq!(room.admit_sync("", None, false), Err(Refusal::BadDevice));
+    assert_eq!(
+        room.admit_sync("", None, Seat::default()),
+        Err(Refusal::BadDevice)
+    );
     // Admission changes nothing: no record, no connection.
     assert!(room.device("dev-new").is_none());
     assert!(!room.producer_present());
@@ -735,4 +741,59 @@ fn a_status_query_tells_members_only() {
     let key = castcorder_link::identity::device_id(&[7; 32]);
     assert_eq!(room.membership(&key, Some(uuid)), member(true, true));
     assert_eq!(room.membership(&key, None), None);
+}
+
+/// One of the room owner's devices (a certificate of this host's person)
+/// enters a gated, locked, password-protected room with nobody in it, even
+/// after a kick, and is a trusted producer there, but never the host
+/// machine: it cannot appoint producers. A status query names it a producer
+/// of a room it was never in. Nothing of it is saved as owner.
+#[test]
+fn an_owner_device_is_a_trusted_producer_but_not_the_host_machine() {
+    let mut room = Room::new(false);
+    let h = host_page(&mut room);
+    enter(&mut room, 2, "dev-o", false, None).unwrap();
+    room.apply(h, &RoomAction::Lock(true), SALT).unwrap();
+    room.apply(h, &RoomAction::SetPassword(Some("pw".into())), SALT)
+        .unwrap();
+    room.apply(
+        h,
+        &RoomAction::Kick {
+            participant: ParticipantId(2),
+        },
+        SALT,
+    )
+    .unwrap();
+    room.left(h);
+    room.left(2);
+    let owner = Seat {
+        at_host: false,
+        owner: true,
+    };
+    // A guest with the same device key but no certificate waits or is kept out.
+    assert!(
+        room.admit_offer_as("dev-o", None, Seat::default(), Some("pw"))
+            .is_err()
+    );
+    assert_eq!(
+        room.admit_offer_as("dev-o", None, owner, None),
+        Ok(Admission::Enter)
+    );
+    room.accepted_as(5, "dev-o", owner);
+    let role = room.join(5, "Ann's laptop").unwrap();
+    assert!(role.producer && !role.host_machine);
+    assert!(room.producer_present());
+    let p = &room.state(None).participants[0];
+    assert!(p.trusted && p.producer && !p.host_machine);
+    assert!(
+        room.authorize(5, Need::Producer, "start take").is_ok()
+            && room
+                .authorize(5, Need::HostMachine, "grant producer")
+                .is_err()
+    );
+    assert_eq!(room.admit_sync("dev-o", None, owner), Ok(()));
+    let m = room.membership_as("dev-never", None, true).unwrap();
+    assert!(m.producer && m.trusted && !m.removed);
+    assert!(room.membership("dev-never", None).is_none());
+    assert!(!room.to_json().contains("owner"));
 }
