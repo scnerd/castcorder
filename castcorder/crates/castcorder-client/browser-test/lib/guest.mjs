@@ -11,9 +11,6 @@ const FIREFOX_PREFS = {
   'media.volume_scale': '0.0',
 };
 
-// Firefox guests launched so far (each gets its own fake tone).
-let launches = 0;
-
 // `display`: the display name joined with (default `name`); the host's
 // stream ids carry it with only letters and digits kept.
 export async function openGuest(name, extraArgs, base, setup, display = name, query = '') {
@@ -21,11 +18,10 @@ export async function openGuest(name, extraArgs, base, setup, display = name, qu
   logs[name] = logs[name] || [];
   let browser, ctx;
   if (MODE === 'firefox') {
-    // Distinct fake tones per guest: identical recordings would share one
-    // content root, and the host library keys tracks by root (one entry for
-    // both guests). Two guests on one tone (P and G in rooms.mjs) recorded
-    // bit-identical takes and one of them never landed.
-    const tone = name === 'A' ? 1000 : 1100 + (launches++ % 40) * 25;
+    // A on 1000 Hz, every other guest on one shared 1500 Hz tone on purpose:
+    // P and G in rooms.mjs record bit-identical takes (one content root),
+    // and each must still land under its own name (cast-rxd).
+    const tone = name === 'A' ? 1000 : 1500;
     const prefs = { ...FIREFOX_PREFS, 'media.navigator.audio.fake_frequency': tone };
     browser = await firefox.launch({ headless: true, firefoxUserPrefs: prefs });
     ctx = await browser.newContext({ ignoreHTTPSErrors: true });

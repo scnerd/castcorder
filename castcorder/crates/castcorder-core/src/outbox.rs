@@ -23,6 +23,19 @@ use tracing::{info, warn};
 
 use crate::sync::{SyncConfig, hex, sync_order};
 
+/// An outbox item as a guest offers it to the host: its take, its name (unique
+/// on the device) and its root. A caller that offers each item once per
+/// connection must keep this, never the root alone: byte-identical items
+/// (digital silence, a digital source, a tone of whole-sample period cut to
+/// the same length in another take or call) share a root, and an item skipped
+/// as "already offered" would stay on the device (cast-rxd).
+pub type OfferKey = (u32, String, [u8; 32]);
+
+/// The [`OfferKey`] of `offer`.
+pub fn offer_key(offer: &TrackOffer) -> OfferKey {
+    (offer.take.0, offer.name.clone(), offer.root)
+}
+
 /// One participant's outbox: the tracks it still has to deliver.
 pub struct GuestOutbox<F: StorageFile> {
     call: String,
