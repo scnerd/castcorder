@@ -1,56 +1,219 @@
-//! ICE servers the Worker hands out, and the seam for relay (TURN)
-//! credentials.
+//! ICE servers the Worker hands out: STUN for every hello, and relay (TURN)
+//! credentials for a host and its guests (ADR 0004).
 //!
-//! STUN comes from the `STUN_URLS` var (space- or comma-separated `stun:`
-//! URLs; `stun:stun.cloudflare.com:3478` by default, empty in tests that run
-//! on loopback). Relay credentials are cast-lxt.3 (Cloudflare Realtime TURN):
-//! [`turn`] returns `None` until then, and the mailbox
-//! ([`crate::mailbox::HostMailbox`]) already asks the shared decision
-//! ([`castcorder_mailbox::Mailbox::relay`]: host online, per-host-key bucket)
-//! before calling [`Turn::mint`], exactly as castcorder-rendezvous does for
-//! coturn.
+//! Configuration (`wrangler.jsonc` `vars`, secrets with `wrangler secret put`;
+//! both read the same way, so tests pass secrets with `wrangler dev --var`):
+//!
+//! - `STUN_URLS`: space- or comma-separated `stun:` URLs every hello carries
+//!   (`stun:stun.cloudflare.com:3478`; empty in tests on loopback).
+//! - `RELAY`: which relay mints credentials:
+//!   - `cloudflare`: Cloudflare Realtime TURN. Secrets `CF_TURN_KEY_ID` and
+//!     `CF_TURN_API_TOKEN` (the TURN key's id and API token). Each mint is one
+//!     call to the Realtime API's `generate-ice-servers`; the `turn:` and
+//!     `turns:` URLs it returns are passed on (UDP, TCP, and TLS on 443)
+//!     except any on port 53, which browsers block.
+//!   - `coturn`: a coturn with `use-auth-secret`, the same REST scheme as
+//!     castcorder-rendezvous ([`castcorder_mailbox::turn::coturn_rest`]).
+//!     `TURN_URLS` (space- or comma-separated `turn:` URLs) and the secret
+//!     `TURN_SECRET`. For a self-hosted Worker in front of coturn, and for CI,
+//!     which exercises this relay path against a real coturn.
+//!   - empty or `none`: no relay; hellos carry STUN only.
+//! - `TURN_TTL`: how long minted credentials last, in seconds (default
+//!   [`DEFAULT_TTL`]). The host renews at 80% of it.
+//! - `RELAY_DAILY_CAP`: how many credentials one host key may mint per UTC
+//!   day (default [`DEFAULT_DAILY_CAP`]); counted in the host key's Durable
+//!   Object storage ([`crate::mailbox`]), so hibernation does not reset it.
+//!
+//! A configured relay that cannot mint (a missing secret, an API failure)
+//! answers with a `relay_unavailable` `relay_error`, never silently with no
+//! relay. The mailbox ([`crate::mailbox::HostMailbox`]) asks the shared
+//! decision ([`castcorder_mailbox::Mailbox::relay`]: host online, the daily
+//! cap, the per-host-key bucket) before calling [`Turn::mint`], exactly as
+//! castcorder-rendezvous does for coturn.
 
 use castcorder_link::HostId;
-use castcorder_link::wire::IceServer;
-use worker::Env;
+use castcorder_link::wire::{IceServer, code};
+use serde::Deserialize;
+use worker::{Env, Fetch, Headers, Method, Request, RequestInit};
+
+/// Credential lifetime without `TURN_TTL`: a day, as castcorder-rendezvous's
+/// `--turn-ttl` default. Long enough for any call; the host renews at 80%.
+pub const DEFAULT_TTL: u64 = 86_400;
+
+/// Credentials per host key per UTC day without `RELAY_DAILY_CAP`. A host
+/// mints about two a day for itself (connecting, renewing at 80% of a day's
+/// TTL, the odd reconnect); every guest connection that names the host
+/// (joining, rejoining, a status query, background sync) mints one. A busy
+/// host with several recordings a day, a handful of guests each and some
+/// reconnects stays under a hundred; 300 leaves room for that and still
+/// stops a leaked call link from minting without bound.
+pub const DEFAULT_DAILY_CAP: u32 = 300;
+
+/// The Realtime TURN API (Cloudflare docs: Realtime, TURN, Generate
+/// Credentials).
+const CF_API: &str = "https://rtc.live.cloudflare.com/v1/turn/keys";
+
+/// A non-empty, trimmed var or secret.
+fn var(env: &Env, name: &str) -> Option<String> {
+    let v = env.var(name).ok()?.to_string();
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.to_string())
+}
+
+fn split_urls(v: &str) -> Vec<String> {
+    v.split([' ', ','])
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .collect()
+}
 
 /// STUN servers for every hello.
 pub fn stun(env: &Env) -> Vec<IceServer> {
-    let urls: Vec<String> = env
-        .var("STUN_URLS")
-        .map(|v| v.to_string())
-        .unwrap_or_default()
-        .split([' ', ','])
-        .filter(|u| !u.is_empty())
-        .map(str::to_string)
-        .collect();
+    let urls = var(env, "STUN_URLS")
+        .map(|v| split_urls(&v))
+        .unwrap_or_default();
     if urls.is_empty() {
         return vec![];
     }
     vec![IceServer {
         urls,
-        username: None,
-        credential: None,
+        ..Default::default()
     }]
 }
 
-/// A configured relay that can mint credentials.
-pub struct Turn {
-    _private: (),
+/// The per-host-key daily cap on relay credentials.
+pub fn daily_cap(env: &Env) -> u32 {
+    var(env, "RELAY_DAILY_CAP")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_DAILY_CAP)
 }
 
-/// The relay, if this deployment has one (none yet: cast-lxt.3).
-pub fn turn(_env: &Env) -> Option<Turn> {
-    None
+/// A configured relay that can mint credentials.
+pub enum Turn {
+    /// Cloudflare Realtime TURN.
+    Cloudflare {
+        /// The TURN key's id.
+        key_id: String,
+        /// The TURN key's API token.
+        token: String,
+        /// Credential lifetime, seconds.
+        ttl: u64,
+    },
+    /// coturn with a shared secret (the TURN REST scheme).
+    Coturn {
+        /// `turn:` URLs.
+        urls: Vec<String>,
+        /// The secret shared with coturn.
+        secret: String,
+        /// Credential lifetime, seconds.
+        ttl: u64,
+    },
+    /// A relay is configured but cannot mint: the `relay_error` to send.
+    Misconfigured(String),
+}
+
+/// The relay, if this deployment has one (`RELAY`).
+pub fn turn(env: &Env) -> Option<Turn> {
+    let ttl = var(env, "TURN_TTL")
+        .and_then(|v| v.parse().ok())
+        .filter(|t| *t > 0)
+        .unwrap_or(DEFAULT_TTL);
+    let missing = |what: &str| {
+        tracing::error!(missing = what, "relay configured without {what}");
+        Turn::Misconfigured(format!(
+            "{}: the relay is not configured ({what} is missing)",
+            code::RELAY_UNAVAILABLE
+        ))
+    };
+    match var(env, "RELAY").as_deref() {
+        None | Some("none") => None,
+        Some("cloudflare") => Some(
+            match (var(env, "CF_TURN_KEY_ID"), var(env, "CF_TURN_API_TOKEN")) {
+                (Some(key_id), Some(token)) => Turn::Cloudflare { key_id, token, ttl },
+                (None, _) => missing("CF_TURN_KEY_ID"),
+                (_, None) => missing("CF_TURN_API_TOKEN"),
+            },
+        ),
+        Some("coturn") => {
+            let urls = var(env, "TURN_URLS")
+                .map(|v| split_urls(&v))
+                .unwrap_or_default();
+            Some(match var(env, "TURN_SECRET") {
+                _ if urls.is_empty() => missing("TURN_URLS"),
+                None => missing("TURN_SECRET"),
+                Some(secret) => Turn::Coturn { urls, secret, ttl },
+            })
+        }
+        Some(other) => {
+            tracing::error!(relay = other, "unknown RELAY (cloudflare, coturn or none)");
+            Some(Turn::Misconfigured(format!(
+                "{}: unknown relay {other:?}",
+                code::RELAY_UNAVAILABLE
+            )))
+        }
+    }
+}
+
+/// The Realtime API's answer (`201 Created`).
+#[derive(Deserialize)]
+struct Generated {
+    #[serde(rename = "iceServers")]
+    ice_servers: Vec<IceServer>,
 }
 
 impl Turn {
-    /// Short-lived credentials for `host`'s calls. Async: Cloudflare Realtime
-    /// TURN mints them with an API call.
-    pub async fn mint(&self, host: &HostId) -> Result<IceServer, String> {
-        Err(format!(
-            "no relay credentials for {}: not implemented",
-            host.short()
-        ))
+    /// Short-lived credentials for `host`'s calls at `now_unix`. Async:
+    /// Cloudflare Realtime TURN mints them with an API call.
+    pub async fn mint(&self, host: &HostId, now_unix: u64) -> Result<IceServer, String> {
+        match self {
+            Turn::Misconfigured(why) => Err(why.clone()),
+            Turn::Coturn { urls, secret, ttl } => Ok(castcorder_mailbox::turn::coturn_rest(
+                urls, secret, host, now_unix, *ttl,
+            )),
+            Turn::Cloudflare { key_id, token, ttl } => {
+                cloudflare(key_id, token, *ttl, now_unix).await.map_err(|e| {
+                    // `e` never holds the token: it only goes in a header.
+                    tracing::error!(host = %host.short(), error = %e, "Cloudflare TURN credentials not minted");
+                    format!(
+                        "{}: the relay provider did not mint credentials",
+                        code::RELAY_UNAVAILABLE
+                    )
+                })
+            }
+        }
     }
+}
+
+async fn cloudflare(
+    key_id: &str,
+    token: &str,
+    ttl: u64,
+    now_unix: u64,
+) -> Result<IceServer, String> {
+    let headers = Headers::new();
+    headers
+        .set("Authorization", &format!("Bearer {token}"))
+        .map_err(|e| e.to_string())?;
+    headers
+        .set("Content-Type", "application/json")
+        .map_err(|e| e.to_string())?;
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_headers(headers)
+        .with_body(Some(format!(r#"{{"ttl":{ttl}}}"#).into()));
+    let url = format!("{CF_API}/{key_id}/credentials/generate-ice-servers");
+    let req = Request::new_with_init(&url, &init).map_err(|e| e.to_string())?;
+    let mut resp = Fetch::Request(req)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status_code();
+    let body = resp.text().await.map_err(|e| e.to_string())?;
+    if !(200..300).contains(&status) {
+        let snippet: String = body.chars().take(200).collect();
+        return Err(format!("HTTP {status}: {snippet}"));
+    }
+    let generated: Generated = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    castcorder_mailbox::turn::cloudflare_entry(generated.ice_servers, now_unix + ttl)
+        .ok_or_else(|| "no TURN server with credentials in the answer".into())
 }

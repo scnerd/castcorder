@@ -6,12 +6,8 @@
 
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use castcorder_link::HostId;
 use castcorder_link::wire::IceServer;
-use hmac::{Hmac, KeyInit, Mac};
-use sha1::Sha1;
 
 /// Where the TURN server is and how to mint credentials for it.
 #[derive(Clone)]
@@ -36,22 +32,13 @@ impl std::fmt::Debug for TurnConfig {
 }
 
 /// The password for `username` under `secret`.
-pub fn password(secret: &str, username: &str) -> String {
-    let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(secret.as_bytes())
-        .expect("HMAC takes keys of any length");
-    mac.update(username.as_bytes());
-    STANDARD.encode(mac.finalize().into_bytes())
-}
+pub use castcorder_mailbox::turn::password;
 
 /// An ICE server entry with credentials for `host`, valid until `now_unix`
-/// plus the TTL.
+/// plus the TTL (the scheme is shared with the Worker:
+/// [`castcorder_mailbox::turn::coturn_rest`]).
 pub fn mint(cfg: &TurnConfig, host: &HostId, now_unix: u64) -> IceServer {
-    let username = format!("{}:{}", now_unix + cfg.ttl.as_secs(), host.encode());
-    IceServer {
-        urls: cfg.urls.clone(),
-        credential: Some(password(&cfg.secret, &username)),
-        username: Some(username),
-    }
+    castcorder_mailbox::turn::coturn_rest(&cfg.urls, &cfg.secret, host, now_unix, cfg.ttl.as_secs())
 }
 
 #[cfg(test)]

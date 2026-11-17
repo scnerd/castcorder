@@ -27,9 +27,18 @@
       "simple": { "limit": 120, "period": 60 }
     }
   ],
+  // See src/relay.rs for every relay setting. Secrets (never here):
+  // CF_TURN_KEY_ID and CF_TURN_API_TOKEN for RELAY=cloudflare, TURN_SECRET for
+  // RELAY=coturn (`wrangler secret put NAME`).
   "vars": {
     // Space-separated stun: URLs every hello carries.
-    "STUN_URLS": "stun:stun.cloudflare.com:3478"
+    "STUN_URLS": "stun:stun.cloudflare.com:3478",
+    // cloudflare (Realtime TURN), coturn (TURN_URLS + TURN_SECRET) or none.
+    "RELAY": "cloudflare",
+    // Relay credential lifetime in seconds; the host renews at 80%.
+    "TURN_TTL": "86400",
+    // Relay credentials one host key may mint per UTC day.
+    "RELAY_DAILY_CAP": "300"
   },
   "observability": { "enabled": true }
 }

@@ -13,7 +13,10 @@
 //!   `accept()` path as `POST /offer`, sealing the answer back to the guest's
 //!   ephemeral key. It reconnects with backoff.
 //! - The rendezvous's STUN port is handed to the transport, which learns the
-//!   host's server-reflexive address through its own UDP socket.
+//!   host's server-reflexive address through its own UDP socket. A rendezvous
+//!   without one (the Cloudflare Worker, ADR 0004) names STUN servers in its
+//!   hello's `ice_servers` instead (`stun:stun.cloudflare.com:3478`); the
+//!   first `stun:` URL there is used.
 //! - A rendezvous with a TURN server puts relay credentials for this host in
 //!   its `registered` frame (once the key is proven; older versions put them
 //!   in the hello, for the host id the WebSocket URL names); the first UDP
@@ -59,13 +62,25 @@ const RENEW_MIN: Duration = Duration::from_secs(5);
 /// the rendezvous again.
 const QUOTA_RETRY: Duration = Duration::from_secs(15 * 60);
 
-/// How long until fresh relay credentials are due, for a TURN `username` of
-/// the rendezvous's shape (`<expiry unix seconds>:<host id>`) at `now_unix`.
-/// `None` if the username does not start with an expiry.
-fn renew_in(username: &str, now_unix: u64) -> Option<Duration> {
-    let expiry: u64 = username.split(':').next()?.parse().ok()?;
+/// When relay credentials expire (unix seconds): their `expires` field, else
+/// the coturn REST username's prefix (`<expiry unix seconds>:<host id>`, from
+/// rendezvous versions without the field). `None` if neither says.
+fn expiry_of(s: &IceServer) -> Option<u64> {
+    s.expires
+        .or_else(|| s.username.as_deref()?.split(':').next()?.parse().ok())
+}
+
+/// How long until fresh relay credentials expiring at `expiry` are due, at
+/// `now_unix`.
+fn renew_in(expiry: u64, now_unix: u64) -> Duration {
     let left = expiry.saturating_sub(now_unix);
-    Some(Duration::from_secs(left * RENEW_AT_PERCENT / 100).max(RENEW_MIN))
+    Duration::from_secs(left * RENEW_AT_PERCENT / 100).max(RENEW_MIN)
+}
+
+/// Relay credentials the host holds: when they expire, if known.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    expires: Option<u64>,
 }
 
 fn unix_now() -> u64 {
@@ -416,10 +431,10 @@ pub fn spawn(
         .name("rendezvous".into())
         .spawn(move || {
             let mut on_link = Some(on_link);
-            let mut turn_user: Option<String> = None;
+            let mut turn_held: Option<Held> = None;
             let mut backoff = Duration::from_secs(1);
             while !stop.load(Ordering::SeqCst) {
-                match session(&cfg, &tx, &mut on_link, &mut turn_user, &stop) {
+                match session(&cfg, &tx, &mut on_link, &mut turn_held, &stop) {
                     Ok(()) => backoff = Duration::from_secs(1),
                     Err(_) if stop.load(Ordering::SeqCst) => break,
                     Err(e) => {
@@ -441,7 +456,7 @@ fn session(
     cfg: &Config,
     tx: &mpsc::Sender<Command>,
     on_link: &mut Option<impl FnOnce(&str) + Send>,
-    turn_user: &mut Option<String>,
+    turn_held: &mut Option<Held>,
     stop: &AtomicBool,
 ) -> Result<(), String> {
     let t = target(&cfg.base)?;
@@ -453,7 +468,10 @@ fn session(
     let url = castcorder_link::wire::mailbox_url(&t.ws_url, &cfg.key.id());
     let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
     let ServerMsg::Hello {
-        nonce, stun_port, ..
+        nonce,
+        stun_port,
+        ice_servers: hello_servers,
+        ..
     } = read_msg(&mut ws)?
     else {
         return Err("expected hello".into());
@@ -492,18 +510,31 @@ fn session(
             }
             None => warn!(host = %t.host, port, "cannot resolve the rendezvous STUN address"),
         }
+    } else if let Some(url) = hello_servers
+        .iter()
+        .flat_map(|s| &s.urls)
+        .find(|u| u.starts_with("stun:"))
+    {
+        // No STUN port (the Worker): the hello names STUN servers instead.
+        match stun_addr(url) {
+            Some(server) => {
+                info!(url = %url, server = %server, "STUN server from the rendezvous's ice_servers");
+                let _ = tx.send(Command::Stun { server });
+            }
+            None => warn!(url = %url, "cannot resolve the STUN server the rendezvous named"),
+        }
     }
     match turn_server(&ice_servers) {
-        Some(server) => {
-            let renewed = turn_user.is_some();
-            info!(server = %server.addr, expires = %server.username.split(':').next().unwrap_or("?"), renewed, "relay (TURN) server from the rendezvous");
-            *turn_user = Some(server.username.clone());
+        Some((server, expires)) => {
+            let renewed = turn_held.is_some();
+            info!(server = %server.addr, expires = ?expires, renewed, "relay (TURN) server from the rendezvous");
+            *turn_held = Some(Held { expires });
             let _ = tx.send(Command::Turn { server });
         }
         None if relay_error.is_some() => {
-            warn!(reason = %relay_error.as_deref().unwrap_or(""), keeping_old = turn_user.is_some(), "the rendezvous gave no relay (TURN) credentials");
+            warn!(reason = %relay_error.as_deref().unwrap_or(""), keeping_old = turn_held.is_some(), "the rendezvous gave no relay (TURN) credentials");
         }
-        None if turn_user.is_some() => {
+        None if turn_held.is_some() => {
             warn!(
                 "the rendezvous gave no fresh relay (TURN) credentials; keeping the old ones and asking again soon"
             );
@@ -520,9 +551,9 @@ fn session(
         // later rather than reconnecting at the renewal pace.
         Some(Instant::now() + QUOTA_RETRY)
     } else {
-        turn_user
-            .as_deref()
-            .and_then(|u| renew_in(u, unix_now()))
+        turn_held
+            .and_then(|h| h.expires)
+            .map(|e| renew_in(e, unix_now()))
             .map(|d| Instant::now() + d)
     };
     if let Some(at) = renew_at {
@@ -564,8 +595,9 @@ fn session(
     }
 }
 
-/// The first UDP `turn:` server with credentials among `servers`, resolved.
-fn turn_server(servers: &[IceServer]) -> Option<TurnServer> {
+/// The first UDP `turn:` server with credentials among `servers`, resolved,
+/// and when its credentials expire (if known).
+fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     servers.iter().find_map(|s| {
         let (username, password) = (s.username.clone()?, s.credential.clone()?);
         s.urls.iter().find_map(|u| {
@@ -574,11 +606,14 @@ fn turn_server(servers: &[IceServer]) -> Option<TurnServer> {
                 return None;
             }
             let addr = turn_addr(u)?;
-            Some(TurnServer {
-                addr,
-                username: username.clone(),
-                password: password.clone(),
-            })
+            Some((
+                TurnServer {
+                    addr,
+                    username: username.clone(),
+                    password: password.clone(),
+                },
+                expiry_of(s),
+            ))
         })
     })
 }
@@ -601,6 +636,18 @@ fn turn_addr(url: &str) -> Option<SocketAddr> {
     {
         return None;
     }
+    resolve_udp(hostport)
+}
+
+/// `stun:HOST[:PORT]` to a socket address (`stuns:` is not spoken).
+fn stun_addr(url: &str) -> Option<SocketAddr> {
+    let rest = url.strip_prefix("stun:")?;
+    resolve_udp(rest.split_once('?').map_or(rest, |(h, _)| h))
+}
+
+/// `HOST[:PORT]` (port 3478 when absent; IPv6 in brackets) resolved,
+/// preferring IPv4.
+fn resolve_udp(hostport: &str) -> Option<SocketAddr> {
     let (host, port) = match hostport.rsplit_once(':') {
         Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => match p.parse() {
             Ok(p) => (h, p),
@@ -726,13 +773,22 @@ mod tests {
     #[test]
     fn renewal_is_due_at_80_percent_of_the_remaining_life() {
         let now = 1_000_000;
-        let due = |u: &str| renew_in(u, now).map(|d| d.as_secs());
-        assert_eq!(due("1000100:host"), Some(80));
-        assert_eq!(due("1086400:host"), Some(69_120));
+        let due = |e: u64| renew_in(e, now).as_secs();
+        assert_eq!(due(1000100), 80);
+        assert_eq!(due(1086400), 69_120);
         // Nearly out of time, or already past: soon, never a busy loop.
-        assert_eq!(due("1000002:host"), Some(5));
-        assert_eq!(due("999000:host"), Some(5));
-        assert_eq!(due("nonsense"), None);
+        assert_eq!(due(1000002), 5);
+        assert_eq!(due(999000), 5);
+        // The expiry: the field when there is one (Cloudflare's usernames
+        // are opaque), else the coturn REST username's prefix.
+        let s = |u: &str, expires| IceServer {
+            username: Some(u.into()),
+            expires,
+            ..Default::default()
+        };
+        assert_eq!(expiry_of(&s("1086400:host", None)), Some(1086400));
+        assert_eq!(expiry_of(&s("0a1b2c", Some(7))), Some(7));
+        assert_eq!(expiry_of(&s("nonsense", None)), None);
     }
 
     #[test]
@@ -755,11 +811,16 @@ mod tests {
         assert_eq!(a("turn:127.0.0.1:3478?transport=tcp"), None);
         assert_eq!(a("turns:127.0.0.1:5349"), None);
         assert_eq!(a("stun:127.0.0.1:3478"), None);
+        let st = |s: &str| stun_addr(s).map(|a| a.to_string());
+        assert_eq!(st("stun:127.0.0.1:3479").as_deref(), Some("127.0.0.1:3479"));
+        assert_eq!(st("stun:127.0.0.1").as_deref(), Some("127.0.0.1:3478"));
+        assert_eq!(st("stun:[::1]:19302").as_deref(), Some("[::1]:19302"));
+        assert_eq!(st("stuns:127.0.0.1:5349"), None);
+        assert_eq!(st("turn:127.0.0.1:3478"), None);
         let servers = vec![
             IceServer {
                 urls: vec!["stun:127.0.0.1:3479".into()],
-                username: None,
-                credential: None,
+                ..Default::default()
             },
             IceServer {
                 urls: vec![
@@ -768,15 +829,19 @@ mod tests {
                 ],
                 username: Some("1:h".into()),
                 credential: Some("pw".into()),
+                expires: None,
             },
         ];
         assert_eq!(
             turn_server(&servers),
-            Some(TurnServer {
-                addr: "127.0.0.1:3478".parse().unwrap(),
-                username: "1:h".into(),
-                password: "pw".into(),
-            })
+            Some((
+                TurnServer {
+                    addr: "127.0.0.1:3478".parse().unwrap(),
+                    username: "1:h".into(),
+                    password: "pw".into(),
+                },
+                Some(1)
+            ))
         );
     }
 

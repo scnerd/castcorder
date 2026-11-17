@@ -20,6 +20,8 @@
 //! The Worker needs the scope to pick the Durable Object before the first
 //! frame; the rendezvous enforces it the same way so the two agree.
 
+pub mod turn;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 
@@ -1070,6 +1072,7 @@ mod scope_restore_relay_tests {
             urls: vec!["turn:t.example:3478".into()],
             username: Some("u".into()),
             credential: Some("c".into()),
+            ..Default::default()
         };
         fill_registered(&mut out, h, Ok(s.clone()));
         assert!(

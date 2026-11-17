@@ -291,16 +291,30 @@ jobs:
 
       # The same system test against the Cloudflare Worker under `wrangler dev`
       # (ADR 0004): local only, no account. Builds worker-build and wrangler inside
-      # castcorder/worker first.
+      # castcorder/worker first. Also runs the Worker's relay path (RELAY=coturn)
+      # with a relay-only host and a forced-relay guest through coturn.
       - name: System test against the Worker (wrangler dev)
         run: task test:system:worker
+
+      # The Worker's relay credentials and its per-host-key daily cap across a
+      # wrangler restart. Its Cloudflare Realtime TURN part runs only with a TURN
+      # key and is the one part allowed to skip under CASTCORDER_CI: the secrets
+      # arrive with the deploy work (cast-lxt.4).
+      - name: Worker relay credentials and daily cap (wrangler dev)
+        run: task test:worker:relay
+        env:
+          # Empty (so that part skips) until the repository has these secrets.
+          CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
+          CF_TURN_API_TOKEN: ${{ secrets.CF_TURN_API_TOKEN }}
 
       - name: Upload system logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: system-logs
-          path: castcorder/crates/castcorder-client/browser-test/test-results/system-*
+          path: |
+            castcorder/crates/castcorder-client/browser-test/test-results/system-*
+            castcorder/crates/castcorder-client/browser-test/test-results/worker-relay-*
 
       - name: Upload relay logs
         if: failure()

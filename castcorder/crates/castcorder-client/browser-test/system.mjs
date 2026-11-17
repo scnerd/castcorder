@@ -20,11 +20,18 @@
 // Worker (castcorder/worker, ADR 0004) under `wrangler dev` instead of
 // castcorder-rendezvous: the client build is staged as its static assets, the
 // host and guests reach their host key's Durable Object, and there is no STUN
-// port (the host-srflx check is skipped; loopback ICE needs none). Build it
-// first (task worker:build); task test:system:worker does both.
+// port. With Docker it also runs the Worker's relay path against a real
+// coturn (lib/coturn.mjs; RELAY=coturn, the shared-secret REST scheme, and
+// STUN_URLS naming coturn): a second host with --relay-only and a guest D with
+// ?iceTransportPolicy=relay must connect through relayed candidates minted by
+// the Worker, and that host must learn its server-reflexive address from the
+// STUN server the hello names (it has no STUN port). Without Docker that
+// phase is skipped with a message, except under CASTCORDER_CI, where it
+// fails. Build it first (task worker:build); task test:system:worker does both.
 // Everything printed is ASCII. Logs go to browser-test/test-results/system-*.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -32,6 +39,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { callDir } from './lib/helpers.mjs';
+import { COTURN_IMAGE, dockerProblem, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -59,6 +67,10 @@ const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
 writeWav16(INPUT_WAV, makeInput());
 const LIBRARY = join(RESULTS, 'library-system');
 rmSync(LIBRARY, { recursive: true, force: true });
+const LIBRARY_RELAY = join(RESULTS, 'library-system-relay');
+rmSync(LIBRARY_RELAY, { recursive: true, force: true });
+const TURN_SECRET = randomBytes(18).toString('base64url');
+const CONTAINER = 'castcorder-system-coturn-' + process.pid;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn, what, timeout = 30000, interval = 200) {
@@ -93,7 +105,7 @@ function check(ok, what) {
   console.log((ok ? 'ok   ' : 'BAD  ') + what);
 }
 
-const logs = { A: [], B: [], C: [] };
+const logs = { A: [], B: [], C: [], D: [] };
 const browsers = [];
 async function openGuest(name, url, extraArgs = []) {
   const browser = await chromium.launch({
@@ -128,16 +140,27 @@ const freePort = () => new Promise((resolve, reject) => {
 });
 
 // The Worker under `wrangler dev`: the client build staged as its assets at
-// /v/<VERSION>/, local state in a fresh temp dir, no STUN servers in hellos.
-async function startWorker() {
+// /v/<VERSION>/, local state in a fresh temp dir. With `turn` (coturn's
+// address), hellos name coturn for STUN and the Worker mints coturn REST
+// credentials (the secret in an env file, which wrangler does not print);
+// without, no STUN servers and no relay.
+async function startWorker(turn) {
   const assets = join(WORKER_DIR, 'assets', 'v', VERSION);
   rmSync(assets, { recursive: true, force: true });
   cpSync(dist, assets, { recursive: true });
   const [port, inspector] = [await freePort(), await freePort()];
   const state = join(tmpdir(), 'castcorder-wrangler-' + process.pid);
   rmSync(state, { recursive: true, force: true });
+  mkdirSync(state, { recursive: true });
+  let relay = ['--var', 'STUN_URLS:', '--var', 'RELAY:none'];
+  if (turn) {
+    const envFile = join(state, 'relay.env');
+    writeFileSync(envFile, 'TURN_SECRET=' + TURN_SECRET + '\n');
+    relay = ['--var', 'STUN_URLS:stun:' + turn.ip + ':' + turn.port, '--var', 'RELAY:coturn',
+      '--var', 'TURN_URLS:' + turn.url, '--env-file', envFile];
+  }
   const st = start(process.execPath, [WRANGLER, 'dev', '--ip', '127.0.0.1', '--port', String(port),
-    '--inspector-port', String(inspector), '--persist-to', state, '--var', 'STUN_URLS:'],
+    '--inspector-port', String(inspector), '--persist-to', state, ...relay],
   'worker', { cwd: WORKER_DIR, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
   const http = '127.0.0.1:' + port;
   await waitFor(async () => {
@@ -147,15 +170,54 @@ async function startWorker() {
   return [st, http];
 }
 
+// The Worker's relay path through coturn: a host offering only its relayed
+// candidate (bound toward coturn) and a guest that may only use relayed
+// candidates, both with credentials the Worker minted (RELAY=coturn).
+async function relayPhase() {
+  const HOST_IP = await localAddressToward(turn.ip, turn.port);
+  const h = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY_RELAY, '--room', 'relay-test', '--bind', HOST_IP,
+    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + rvHttp, '--relay-only', '--open'],
+  'host-relay');
+  const relayLink = (await line(h, /CALL_LINK (\S+)/, 'relay host CALL_LINK'))[1];
+  const learned = await waitFor(() => h.err.match(/server-reflexive address learned reflexive=(\S+)/),
+    'relay host srflx via the STUN server in the hello', 20000);
+  check(h.err.includes("STUN server from the rendezvous's ice_servers"),
+    'the host took its STUN server from the Worker hello and learned its server-reflexive address: ' + learned[1]);
+  const granted = await waitFor(() => h.err.match(/relay \(TURN\) server from the rendezvous.*expires=Some\((\d+)\)/),
+    'relay host TURN credentials from the Worker', 20000);
+  check(Number(granted[1]) > Date.now() / 1000, 'the Worker minted coturn credentials for the host on registering (expires ' + granted[1] + ')');
+  const RELAYED = (await waitFor(() => h.err.match(/turn allocation created relayed=(\S+)/), 'relay host TURN allocation', 30000))[1];
+  check(true, 'the relay host allocated on coturn with the Worker\'s credentials: ' + RELAYED);
+  const D = await openGuest('D', relayLink.replace('/#', '/?name=D&iceTransportPolicy=relay#'));
+  await D.click('#join');
+  await waitFor(async () => (await text(D, '#participant')).length > 0, 'guest D joined through the relay', 45000);
+  check(logs.D.some((l) => l.includes('ice transport policy forced') && l.includes('relay')), 'guest D forced iceTransportPolicy=relay');
+  const pair = await waitFor(() => h.err.match(/chosen candidate pair candidate_pair=Udp (\S+) -> (\S+)/), 'relay host chosen pair', 20000);
+  check(pair[1] === RELAYED, 'guest D connected through coturn: the host\'s chosen pair is on its relayed address (' + pair[1] + ' -> ' + pair[2] + ')');
+  const counted = (rvLog().match(/relay credentials counted/g) || []).length;
+  check(counted >= 2, 'the Worker counted the relay credentials it minted against the daily cap (' + counted + ')');
+  check(!rvLog().includes(TURN_SECRET) && !h.err.includes(TURN_SECRET), 'no log holds the TURN secret');
+}
+
 let passed = false;
-let rv, host, link = '';
+let rvHttp = '';
+let rv, host, link = '', turn = null, coturnLog = '';
 // The rendezvous log: castcorder-rendezvous logs to stderr, wrangler to stdout.
 const rvLog = () => rv.out + rv.err;
 try {
   let RV_HTTP;
   if (WORKER) {
-    [rv, RV_HTTP] = await startWorker();
-    console.log('worker (wrangler dev) at ' + RV_HTTP);
+    const problem = dockerProblem();
+    if (!problem) {
+      turn = await startCoturn(CONTAINER, TURN_SECRET);
+      console.log('coturn (' + COTURN_IMAGE + ', Docker) at ' + turn.ip + ':' + turn.port + '/udp');
+    } else if (process.env.CASTCORDER_CI) {
+      throw new Error('CASTCORDER_CI is set but the Worker relay phase needs Docker: ' + problem);
+    } else {
+      console.log('SKIP the Worker relay phase (coturn): ' + problem);
+    }
+    [rv, RV_HTTP] = await startWorker(turn);
+    console.log('worker (wrangler dev) at ' + RV_HTTP + (turn ? ', RELAY=coturn' : ', no relay'));
   } else {
     rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist], 'rendezvous');
     let RV_STUN;
@@ -163,6 +225,7 @@ try {
     console.log('rendezvous at ' + RV_HTTP + ', stun ' + RV_STUN);
   }
 
+  rvHttp = RV_HTTP;
   host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--room', 'system-test', '--bind', '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP], 'host');
   const [, HTTP] = await line(host, /HOST_READY http=(\S+)/, 'HOST_READY');
@@ -171,7 +234,7 @@ try {
   check(link.startsWith('http://' + RV_HTTP + '/v/' + VERSION + '/#'), 'the call link points at the rendezvous site, pinned to /v/' + VERSION + '/');
   if (WORKER) {
     await waitFor(() => host.err.includes('registered with the rendezvous'), 'host registered with the Worker', 30000);
-    check(true, 'host registered with its Durable Object (no STUN port on the Worker; srflx check skipped)');
+    check(true, 'host registered with its Durable Object');
     // Leave the host idle long enough for its Durable Object to hibernate
     // (about 10 s without events) and longer than the host allows silence
     // (45 s; its own pings are answered by the
@@ -252,7 +315,8 @@ try {
     check((host.err.match(/registered with the rendezvous/g) || []).length === 1,
       'the host kept its one connection throughout (its pings, answered by the runtime, kept it alive)');
   }
-  for (const n of ['A', 'B']) {
+  if (turn) await relayPhase();
+  for (const n of turn ? ['A', 'B', 'D'] : ['A', 'B']) {
     const bad = logs[n].filter((l) => l.startsWith('[pageerror]'));
     check(bad.length === 0, 'guest ' + n + ': no page errors' + (bad.length ? ': ' + bad.slice(0, 3).join(' | ') : ''));
   }
@@ -262,11 +326,17 @@ try {
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
   for (const [, st] of procs) killTree(st.p);
+  if (turn) coturnLog = stopCoturn(CONTAINER).replaceAll(TURN_SECRET, '<secret>');
 }
+if (coturnLog) writeFileSync(join(RESULTS, 'system-coturn.log'), coturnLog);
 for (const [name, st] of procs) writeFileSync(join(RESULTS, 'system-' + name + '.log'), st.out + '\n--- stderr ---\n' + st.err);
 for (const n of Object.keys(logs)) writeFileSync(join(RESULTS, 'system-guest-' + n + '.log'), logs[n].join('\n'));
 if (!passed) {
-  for (const [name, st] of procs) { console.log(name + ' log tail:'); console.log(st.err.split('\n').slice(-25).join('\n')); }
+  for (const [name, st] of procs) {
+    console.log(name + ' log tail:');
+    console.log((st.err.trim() ? st.err : st.out).split('\n').slice(-25).join('\n'));
+  }
+  if (coturnLog) { console.log('coturn log tail:'); console.log(coturnLog.split('\n').slice(-25).join('\n')); }
   for (const n of Object.keys(logs)) { console.log('guest ' + n + ' console tail:'); console.log(logs[n].slice(-15).join('\n')); }
 }
 console.log('logs: crates/castcorder-client/browser-test/test-results/system-*');
