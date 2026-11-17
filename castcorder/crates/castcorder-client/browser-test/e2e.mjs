@@ -75,6 +75,11 @@
 //    waits, leaving and rejoining keeps the call, a new call gets a new folder:
 //    see roomsChecks() in lib/rooms.mjs.
 //
+// 12. (chromium) Rejoining through a rendezvous of its own: the lobby's "Your
+//    rooms" lists a room with its status, survives a reload and the host going
+//    offline; Rejoin, Rejoin this call, a refused past call, a producer's
+//    Continue, and a kicked device: see rejoinChecks() in lib/rejoin.mjs.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
@@ -98,6 +103,7 @@ import { identityChecks } from './lib/identity.mjs';
 import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
 import { roomsChecks } from './lib/rooms.mjs';
+import { rejoinChecks } from './lib/rejoin.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
@@ -339,6 +345,7 @@ try {
   if (MODE !== 'fallback') await namesChecks();
   if (MODE !== 'fallback') await takeInfoChecks();
   if (MODE !== 'fallback') await roomsChecks();
+  if (FULL) await rejoinChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -352,12 +359,15 @@ try {
   if (ctx.host5) ctx.host5.kill();
   if (ctx.host6) ctx.host6.kill();
   if (ctx.host7) ctx.host7.kill();
+  if (ctx.host8) ctx.host8.kill();
+  if (ctx.rv8) ctx.rv8.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
 if (ctx.host3) writeFileSync(join(RESULTS, 'host-identity-' + MODE + '.log'), ctx.host3Log);
 if (ctx.host4) writeFileSync(join(RESULTS, 'host-cap-' + MODE + '.log'), ctx.host4Log);
 if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.host7Log);
+if (ctx.host8) writeFileSync(join(RESULTS, 'host-rejoin.log'), ctx.host8Log || '');
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 if (!passed) {
   console.log('host log tail:');

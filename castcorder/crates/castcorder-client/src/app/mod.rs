@@ -58,6 +58,7 @@ mod meters;
 mod native;
 mod recordings;
 mod recvideo;
+mod rejoin;
 mod rpc;
 mod view;
 

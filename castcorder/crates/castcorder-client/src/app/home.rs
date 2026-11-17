@@ -177,6 +177,9 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                 <div class="home-head">
                     <h1>"Your rooms"</h1>
                     <span class="small muted">"Each room keeps one call link. Joining it continues the room's call, or starts a new one if nobody has been in it for a while."</span>
+                    // The rooms this app joined on other hosts live in its
+                    // call window's lobby (docs/design.md "Rejoining").
+                    <span class="small muted">"Calls you joined on other hosts: " <a id="joined-rooms" href="castcorder://rooms">"Rooms you joined"</a></span>
                 </div>
                 <div class="row">
                     <label class="sr-only" for="new-room-name">"New room name"</label>

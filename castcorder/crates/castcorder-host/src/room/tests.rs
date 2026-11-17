@@ -684,3 +684,55 @@ fn producers_set_whether_video_is_recorded_and_it_persists() {
     again.set_record_video(false);
     assert!(!again.record_video() && again.take_dirty());
 }
+
+/// A status query (cast-zr8) tells only devices that were in the room, and
+/// what they are there: removed, trusted, producer; an upgraded device is
+/// judged by its old id's record.
+#[test]
+fn a_status_query_tells_members_only() {
+    let mut room = Room::new(true);
+    let h = host_page(&mut room);
+    enter(&mut room, 2, "dev-b", false, None).unwrap();
+    enter(&mut room, 3, "dev-c", false, None).unwrap();
+    enter(&mut room, 4, "dev-p", false, None).unwrap();
+    room.apply(
+        h,
+        &RoomAction::SetProducer {
+            participant: ParticipantId(4),
+            producer: true,
+        },
+        SALT,
+    )
+    .unwrap();
+    room.apply(
+        h,
+        &RoomAction::Kick {
+            participant: ParticipantId(3),
+        },
+        SALT,
+    )
+    .unwrap();
+    let member = |trusted, producer| {
+        Some(Membership {
+            removed: false,
+            trusted,
+            producer,
+        })
+    };
+    assert_eq!(room.membership("dev-new", None), None);
+    assert_eq!(room.membership("dev-b", None), member(true, false));
+    assert_eq!(room.membership("dev-p", None), member(true, true));
+    assert_eq!(
+        room.membership("dev-c", None),
+        Some(Membership {
+            removed: true,
+            trusted: false,
+            producer: false,
+        })
+    );
+    let uuid = "99999999-2222-3333-4444-555555555555";
+    let room = with_old_device(uuid, true);
+    let key = castcorder_link::identity::device_id(&[7; 32]);
+    assert_eq!(room.membership(&key, Some(uuid)), member(true, true));
+    assert_eq!(room.membership(&key, None), None);
+}

@@ -26,7 +26,7 @@ One app install or browser profile, identified by a key it generates for itself.
 _Avoid_: Client, peer, account
 
 **Trusted Device**:
-A device that joined a room while a producer was present. Only trusted devices may enter a locked room or be granted the producer role, and an app guest's trusted device lists the rooms it is trusted in so it can join them without the link.
+A device that joined a room while a producer was present. Only trusted devices may enter a locked room or be granted the producer role, and a trusted device is told a room's current call link, so it can rejoin from its list of rooms after the link is regenerated.
 _Avoid_: Paired device, known device
 
 **App Guest**:

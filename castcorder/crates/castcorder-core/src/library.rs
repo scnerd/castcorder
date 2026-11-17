@@ -244,6 +244,23 @@ struct Member {
     device: String,
 }
 
+/// The devices a call's [`MEMBERS`] file lists (a torn tail ignored): for
+/// a reader that must not open the call's [`Library`] (one writer per
+/// folder), such as the host answering a status query.
+pub fn members_in(text: &[u8]) -> BTreeSet<String> {
+    let mut devices = BTreeSet::new();
+    for line in text.split_inclusive(|b| *b == b'\n') {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let Ok(m) = serde_json::from_slice::<Member>(&line[..line.len() - 1]) else {
+            break;
+        };
+        devices.insert(m.device);
+    }
+    devices
+}
+
 /// A call's [`MEMBERS`] file, loaded.
 struct Members<F: StorageFile> {
     file: F,

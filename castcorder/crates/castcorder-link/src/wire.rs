@@ -174,6 +174,17 @@ pub struct OfferPlain {
     /// call connection).
     #[serde(default, skip_serializing_if = "is_false")]
     pub sync_only: bool,
+    /// A status query, not an offer (docs/design.md "Rejoining"): `sdp` is
+    /// then a fresh random nonce the proof signs, and the host answers
+    /// [`AnswerPlain::Status`] for every room of it this device was in. The
+    /// call secret is not needed for it (a regenerated link still answers).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub status: bool,
+    /// Rejoin this call of the room (its id, `YYYY-MM-DD[-N]`): it joins if
+    /// it is the room's current call; otherwise only a producer that was in
+    /// it continues it (absent: the room's current call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -188,6 +199,60 @@ pub enum AnswerPlain {
     Sdp(String),
     /// Refused (wrong call secret, or the offer failed).
     Rejected(String),
+    /// The answer to a status query ([`OfferPlain::status`]).
+    Status(HostStatus),
+}
+
+/// What a host tells a device about the rooms it was in (a status query).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostStatus {
+    /// Every room of this host the device was in, by name.
+    pub rooms: Vec<RoomStatus>,
+}
+
+/// One room as a device that was in it sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomStatus {
+    /// The room's name.
+    pub room: String,
+    /// A producer removed this device from the room: nothing else is told
+    /// and it cannot rejoin.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub removed: bool,
+    /// The room's call is live (someone is in it or a take records).
+    #[serde(default)]
+    pub live: bool,
+    /// Another room of this host is live: a join waits until it ends.
+    #[serde(default)]
+    pub busy: bool,
+    /// The call a join lands in now: the live call, else the one the room
+    /// would continue (`None`: a new call).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// Who is in the live call, by display name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub in_call: Vec<String>,
+    /// This device holds the producer role in the room.
+    #[serde(default)]
+    pub producer: bool,
+    /// The room's call link, for a trusted device (it can rejoin after the
+    /// link was regenerated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+    /// The calls of the room this device was in, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<CallStatus>,
+}
+
+/// One call of a room a device was in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallStatus {
+    /// Its id (`YYYY-MM-DD[-N]`).
+    pub id: String,
+    /// When it was made, ms since the Unix epoch.
+    pub started_ms: u64,
+    /// How many takes it has.
+    pub takes: u32,
 }
 
 /// Encode a frame.
@@ -268,5 +333,30 @@ mod tests {
         // A call connection's offer does not name sync_only at all.
         let again: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert!(!to_json(&again).contains("sync_only"));
+        assert!(!old.status && old.call.is_none());
+        let j = to_json(&again);
+        assert!(!j.contains("status") && !j.contains("\"call\""));
+        // The status answer's shape.
+        let st = AnswerPlain::Status(HostStatus {
+            rooms: vec![RoomStatus {
+                room: "show".into(),
+                live: true,
+                current: Some("2026-11-16".into()),
+                in_call: vec!["Pat".into()],
+                calls: vec![CallStatus {
+                    id: "2026-11-16".into(),
+                    started_ms: 5,
+                    takes: 2,
+                }],
+                ..Default::default()
+            }],
+        });
+        assert_eq!(
+            to_json(&st),
+            r#"{"status":{"rooms":[{"room":"show","live":true,"busy":false,"current":"2026-11-16","in_call":["Pat"],"producer":false,"calls":[{"id":"2026-11-16","started_ms":5,"takes":2}]}]}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&st)), Some(st));
+        let gone: RoomStatus = from_json(r#"{"room":"x","removed":true}"#).unwrap();
+        assert!(gone.removed && gone.calls.is_empty());
     }
 }

@@ -575,6 +575,26 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         serde_json::from_slice::<OfferPlain>(&plain).map(|o| (cfg.secrets().room_of(&o.secret), o));
     let result = match parsed {
         Err(e) => AnswerPlain::Rejected(format!("bad offer: {e}")),
+        // A status query needs no call secret: the host answers for the
+        // rooms the device's key was in, so a regenerated link still works.
+        Ok((_, o)) if o.status => {
+            let (reply_tx, rx) = mpsc::channel();
+            let sent = tx.send(Command::HostStatus {
+                device: o.device,
+                proof: o.proof,
+                nonce: o.sdp,
+                audience: cfg.key.id().encode(),
+                reply: reply_tx,
+            });
+            match sent
+                .ok()
+                .and_then(|_| rx.recv_timeout(Duration::from_secs(10)).ok())
+            {
+                Some(Ok(st)) => AnswerPlain::Status(st),
+                Some(Err(e)) => AnswerPlain::Rejected(e),
+                None => AnswerPlain::Rejected("host thread not answering".into()),
+            }
+        }
         Ok((None, o)) => {
             warn!(guest_conn = from, "offer rejected: wrong call secret");
             crate::room::decision(&o.device, "guest", "enter", false, "wrong call secret");
@@ -596,6 +616,7 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 audience: cfg.key.id().encode(),
                 at_host: false,
                 sync_only: o.sync_only,
+                call: o.call,
                 reply: reply_tx,
             });
             match sent
@@ -739,6 +760,8 @@ mod tests {
                     "v=0",
                 )),
                 sync_only: false,
+                status: false,
+                call: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -770,9 +793,10 @@ mod tests {
                 audience,
                 at_host,
                 sync_only,
+                call,
                 reply,
             } => {
-                assert!(!sync_only);
+                assert!(!sync_only && call.is_none());
                 assert_eq!((name.as_str(), offer_sdp.as_str()), ("B!", "v=0"));
                 // The secret picked the room.
                 assert_eq!(room.as_deref(), Some("show"));
@@ -835,6 +859,8 @@ mod tests {
             password: None,
             proof: None,
             sync_only: false,
+            status: false,
+            call: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())
@@ -844,6 +870,39 @@ mod tests {
             serde_json::from_slice(&guest.open_reply(&unb64(&a).unwrap()).unwrap()).unwrap();
         assert!(matches!(r, AnswerPlain::Rejected(w) if w.contains("wrong call secret")));
         assert!(rx.try_recv().is_err());
+        // A status query with that old link still reaches the host: it
+        // needs no call secret, only the device key (cast-zr8).
+        let plain = OfferPlain {
+            status: true,
+            sdp: "nonce-1".into(),
+            ..plain
+        };
+        let (sealed, guest) =
+            castcorder_link::GuestSeal::seal(&cfg.key.id(), [5; 32], to_json(&plain).as_bytes())
+                .unwrap();
+        let host = thread::spawn(move || match rx.recv().unwrap() {
+            Command::HostStatus {
+                device,
+                nonce,
+                reply,
+                ..
+            } => {
+                assert_eq!((device.as_str(), nonce.as_str()), ("dev-b", "nonce-1"));
+                let st = castcorder_link::wire::HostStatus {
+                    rooms: vec![castcorder_link::wire::RoomStatus {
+                        room: "show".into(),
+                        ..Default::default()
+                    }],
+                };
+                reply.send(Ok(st)).unwrap();
+            }
+            _ => panic!("expected a status query"),
+        });
+        let a = answer(&cfg, &tx, 8, &b64(&sealed)).unwrap();
+        host.join().unwrap();
+        let r: AnswerPlain =
+            serde_json::from_slice(&guest.open_reply(&unb64(&a).unwrap()).unwrap()).unwrap();
+        assert!(matches!(r, AnswerPlain::Status(st) if st.rooms[0].room == "show"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -202,6 +202,24 @@ pub enum Admission {
 /// The text a waiting guest is shown (code `waiting:`).
 pub const WAITING: &str = "waiting: waiting for the host or a producer to join the call";
 
+/// The text a device rejoining a past call is shown when that call is not
+/// the room's current one and it is not a producer of the room (code
+/// `not_current:`).
+pub const NOT_CURRENT: &str =
+    "not_current: that call is not the room's current call; a producer can continue it";
+
+/// What a device that was in a room may learn about it (a status query,
+/// docs/design.md "Rejoining").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Membership {
+    /// A producer kicked it from the room.
+    pub removed: bool,
+    /// It joined while a producer was present.
+    pub trusted: bool,
+    /// It holds the producer role (granted, trusted, not kicked).
+    pub producer: bool,
+}
+
 /// What the host thread must do after a room action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
@@ -642,6 +660,23 @@ impl Room {
     pub fn banned(&self, device: &str, alias: Option<&str>) -> bool {
         self.record_for(device, alias).is_some_and(|d| d.banned)
             || self.saved.devices.get(device).is_some_and(|d| d.banned)
+    }
+
+    /// Whether verified `device` (or the pre-key id `alias` it would bind)
+    /// was ever in this room, and as what; `None` for a device the room never
+    /// saw, which a status query then treats as unknown.
+    pub fn membership(&self, device: &str, alias: Option<&str>) -> Option<Membership> {
+        let rec = self
+            .record_for(device, alias)
+            .or_else(|| self.saved.devices.get(device));
+        rec.map(|d| {
+            let removed = self.banned(device, alias);
+            Membership {
+                removed,
+                trusted: d.trusted && !removed,
+                producer: d.producer && d.trusted && !removed,
+            }
+        })
     }
 
     /// The transport accepted an admitted offer as `conn`: bind its device.

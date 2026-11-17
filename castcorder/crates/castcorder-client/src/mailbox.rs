@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use castcorder_link::wire::{
-    AnswerPlain, ClientMsg, OfferPlain, ServerMsg, b64, from_json, to_json, unb64,
+    AnswerPlain, ClientMsg, HostStatus, OfferPlain, ServerMsg, b64, from_json, to_json, unb64,
 };
 use castcorder_link::{CallLink, GuestSeal};
 use js_sys::Promise;
@@ -123,7 +123,8 @@ impl Mailbox {
     /// Seal `sdp` (with the call secret, `name`, the device id, its key
     /// `proof` and the password, if any) to the link's host, send
     /// it, and open the host's answer SDP. A refusal (wrong call secret, host
-    /// offline) is an error naming why. `sync_only`: a sync-only connection.
+    /// offline) is an error naming why. `sync_only`: a sync-only connection;
+    /// `call`: rejoin that call of the room.
     #[allow(clippy::too_many_arguments)]
     pub async fn exchange(
         &self,
@@ -134,12 +135,8 @@ impl Mailbox {
         sdp: &str,
         proof: castcorder_link::DeviceProof,
         sync_only: bool,
+        call: Option<&str>,
     ) -> Result<String, JsValue> {
-        let mut ephemeral = [0u8; 32];
-        web_sys::window()
-            .expect("window")
-            .crypto()?
-            .get_random_values_with_u8_array(&mut ephemeral)?;
         let plain = OfferPlain {
             secret: link.secret.encode(),
             name: name.to_string(),
@@ -148,8 +145,54 @@ impl Mailbox {
             password: password.map(str::to_string),
             proof: Some(proof),
             sync_only,
+            status: false,
+            call: call.map(str::to_string),
         };
-        let (sealed, guest) = GuestSeal::seal(&link.host, ephemeral, to_json(&plain).as_bytes())
+        match self.ask(link, &plain).await? {
+            AnswerPlain::Sdp(sdp) => Ok(sdp),
+            AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
+            AnswerPlain::Status(_) => Err(JsValue::from_str("the host answered a status")),
+        }
+    }
+
+    /// A status query (docs/design.md "Rejoining"): the rooms of the link's
+    /// host this device was in. `proof` signs `nonce`. A host offline is an
+    /// error naming `host_offline`; a host too old to answer one is an
+    /// error naming `no_status`.
+    pub async fn status(
+        &self,
+        link: &CallLink,
+        device: &str,
+        nonce: &str,
+        proof: castcorder_link::DeviceProof,
+    ) -> Result<HostStatus, JsValue> {
+        let plain = OfferPlain {
+            secret: link.secret.encode(),
+            name: "status".into(),
+            sdp: nonce.to_string(),
+            device: device.to_string(),
+            password: None,
+            proof: Some(proof),
+            sync_only: false,
+            status: true,
+            call: None,
+        };
+        match self.ask(link, &plain).await? {
+            AnswerPlain::Status(st) => Ok(st),
+            AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
+            // An older host takes it for an offer.
+            AnswerPlain::Sdp(_) => Err(JsValue::from_str("no_status: the host is too old")),
+        }
+    }
+
+    /// Seal `plain` to the link's host, send it, and open its answer.
+    async fn ask(&self, link: &CallLink, plain: &OfferPlain) -> Result<AnswerPlain, JsValue> {
+        let mut ephemeral = [0u8; 32];
+        web_sys::window()
+            .expect("window")
+            .crypto()?
+            .get_random_values_with_u8_array(&mut ephemeral)?;
+        let (sealed, guest) = GuestSeal::seal(&link.host, ephemeral, to_json(plain).as_bytes())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let frame = ClientMsg::Offer {
             to: link.host.encode(),
@@ -163,13 +206,8 @@ impl Mailbox {
                     .ok_or_else(|| {
                         JsValue::from_str("the answer did not open: not from this host")
                     })?;
-                match serde_json::from_slice::<AnswerPlain>(&bytes) {
-                    Ok(AnswerPlain::Sdp(sdp)) => Ok(sdp),
-                    Ok(AnswerPlain::Rejected(why)) => {
-                        Err(JsValue::from_str(&format!("{REJECTED}: {why}")))
-                    }
-                    Err(e) => Err(JsValue::from_str(&format!("bad answer: {e}"))),
-                }
+                serde_json::from_slice::<AnswerPlain>(&bytes)
+                    .map_err(|e| JsValue::from_str(&format!("bad answer: {e}")))
             }
             ServerMsg::Error { code, message } => {
                 Err(JsValue::from_str(&format!("rendezvous: {code}: {message}")))

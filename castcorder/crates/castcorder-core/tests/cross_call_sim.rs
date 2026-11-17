@@ -218,6 +218,12 @@ fn membership_survives_a_restart_and_a_torn_append() {
     let len = f.len().unwrap();
     f.write_at(len, b"{\"device\":\"dev-b").unwrap();
     f.sync().unwrap();
+    // A reader that must not open the library (the host's status query)
+    // sees the same members, the torn tail ignored.
+    let mut buf = vec![0u8; f.len().unwrap() as usize];
+    castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf).unwrap();
+    let listed = castcorder_core::library::members_in(&buf);
+    assert_eq!(listed.into_iter().collect::<Vec<_>>(), [DEVICE.to_string()]);
     drop(lib);
     let mut lib = Library::open(&root, OLD, cfg()).unwrap();
     assert!(lib.was_in(DEVICE).unwrap());

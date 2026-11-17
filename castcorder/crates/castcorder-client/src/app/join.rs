@@ -102,6 +102,16 @@ pub(super) fn connect(ui: Ui, epoch: u32) {
             && CONN_EPOCH.get() == conn
         {
             let why = describe(&err);
+            if why.starts_with(crate::mailbox::REJECTED) {
+                // A kick, or a past call that is not current, changes
+                // "Rooms you joined" and the next Join.
+                let room = ui
+                    .call_ref
+                    .get_untracked()
+                    .map(|c| c.room)
+                    .unwrap_or_else(|| ui.room_name.get_untracked());
+                rejoin::refused(&why, &room);
+            }
             if why.starts_with(crate::mailbox::REJECTED) && why.contains("waiting:") {
                 // A producer-gated call with no producer in it yet.
                 wait_for_producer(ui, epoch);
@@ -131,6 +141,8 @@ pub(super) fn refusal_state(why: &str) -> &'static str {
         "wrong password"
     } else if why.contains("bad_device:") {
         "this device's identity was refused"
+    } else if why.contains("not_current:") {
+        "that call is not the room's current call: a producer can continue it, or Join for the current call"
     } else {
         "rejected by the host"
     }
@@ -423,6 +435,7 @@ async fn signal_offer(
                 &sdp,
                 proof,
                 sync_only,
+                (!sync_only).then(rejoin::target).flatten().as_deref(),
             )
             .await?
         }
@@ -497,6 +510,8 @@ pub(super) async fn direct_offer(
     set(&body, "proof", proof);
     if sync_only {
         set(&body, "sync", true);
+    } else if let Some(c) = rejoin::target() {
+        set(&body, "call", c.as_str());
     }
     if let Some(p) = &ctx.password {
         set(&body, "password", p.as_str());

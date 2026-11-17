@@ -227,7 +227,16 @@ fn setup(app: &AppHandle, args: &AppArgs) {
             WebviewUrl::App(format!("index.html?error={}", query_escape(&e)).into())
         }
     };
+    let nav = app.clone();
     let window = WebviewWindowBuilder::new(app, MAIN, url)
+        // The home's castcorder:// links (Rooms you joined) open here, not in the OS.
+        .on_navigation(move |u| {
+            if u.scheme().eq_ignore_ascii_case(deeplink::SCHEME) {
+                open_link(&nav, u.as_str());
+                return false;
+            }
+            true
+        })
         .title("Castcorder")
         .inner_size(1100.0, 760.0)
         .visible(!args.hidden)
@@ -457,6 +466,18 @@ fn quit(app: &AppHandle) {
 
 /// Open a `castcorder://` link's call in the call window.
 fn open_link(app: &AppHandle, link: &str) {
+    if deeplink::is_rooms_link(link) {
+        // "Rooms you joined": the call window's lobby lists them (its browser
+        // profile holds the list and the device key).
+        if app.get_webview_window(CALL).is_some() {
+            show(app, CALL);
+        } else if let Some(url) = data_dir(app).and_then(|d| remembered::recall(&d)) {
+            call_window(app, &url, true);
+        } else {
+            tracing::info!("no rooms to list yet: this app has not joined a call");
+        }
+        return;
+    }
     let url = match deeplink::call_link(link) {
         Ok(url) => url,
         Err(e) => {

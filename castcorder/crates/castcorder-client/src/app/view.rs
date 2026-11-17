@@ -379,6 +379,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                     <native::NativeMic room=ui.room_name.get_untracked()/>
                 </div>
             </div>
+            <rejoin::MyRooms ui=ui/>
         </div>
     }
 }
