@@ -15,13 +15,15 @@
 //!
 //! Usage: `castcorder-host --dist DIR [--library DIR] [--room NAME] [--idle-gap MINUTES]
 //! [--bind IP] [--port N] [--http-port N] [--udp-port N] [--advertise IP]...
-//! [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]
+//! [--rendezvous URL|off] [--relay-only] [--bandwidth-cap KBPS] [--participate [DEVICE]] [--name NAME] [--open]
 //! [--record-video true|false]`
 //!
 //! Prints the join links, then `HOST_READY http=URL https=URL udp=ADDR` (the
 //! line tests wait for). Everything printed is ASCII.
 //!
-//! With `--rendezvous URL` (none by default) the host also registers with
+//! With `--rendezvous URL` (by default none, or the project's public
+//! rendezvous in builds with the `project-rendezvous` feature, see
+//! `castcorder_host::PROJECT_RENDEZVOUS`; `off` for none) the host also registers with
 //! that rendezvous under its host key and, once registered, prints the call
 //! link for guests anywhere and `CALL_LINK <link>` (see [`rendezvous`]). The
 //! LAN pages and `POST /offer` keep working beside it.
@@ -60,6 +62,7 @@ fn fail(msg: &str) -> ! {
 fn parse_args() -> Config {
     let mut a = Config::new(std::path::PathBuf::new());
     a.log = true;
+    a.rendezvous = castcorder_host::DEFAULT_RENDEZVOUS.map(String::from);
     let rest = a
         .apply_args(std::env::args().skip(1))
         .unwrap_or_else(|e| fail(&e));

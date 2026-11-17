@@ -33,6 +33,9 @@ desktop = [
 # The host participant's microphone through GStreamer (`--participate`, and
 # joining and leaving from the window at runtime).
 native-capture = ["castcorder-host/native-capture"]
+# Register with the project's public rendezvous by default (release builds;
+# see castcorder-host's feature of the same name).
+project-rendezvous = ["castcorder-host/project-rendezvous"]
 
 [dependencies]
 castcorder-host = { path = "../castcorder-host" }

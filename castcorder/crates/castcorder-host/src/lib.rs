@@ -123,6 +123,23 @@ impl Config {
     }
 }
 
+/// The project's public rendezvous (ADR 0004): the Cloudflare Worker on its
+/// `workers.dev` hostname, `https://<worker name>.<account subdomain>.workers.dev`.
+/// The one place to change it (a different account subdomain, or the
+/// project's own domain); see deploy/README.md.
+pub const PROJECT_RENDEZVOUS: &str = "https://castcorder.castcorder.workers.dev";
+
+/// The rendezvous the `castcorder-host` binary and the desktop app register
+/// with when no `--rendezvous` is given: [`PROJECT_RENDEZVOUS`] in builds with
+/// the `project-rendezvous` feature (the release installers), none otherwise,
+/// so local and test builds never reach the public service unasked.
+/// `--rendezvous off` turns it off.
+pub const DEFAULT_RENDEZVOUS: Option<&str> = if cfg!(feature = "project-rendezvous") {
+    Some(PROJECT_RENDEZVOUS)
+} else {
+    None
+};
+
 /// Open `dir` in the host machine's file manager (Explorer, Finder, or
 /// whatever `xdg-open` picks). Returns once the file manager was started.
 pub fn open_folder(dir: &Path) -> Result<(), String> {

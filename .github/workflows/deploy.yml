@@ -1,0 +1,214 @@
+name: Deploy
+
+# The public services (ADR 0004): one Cloudflare Worker serving every released client at
+# /v/<version>/ and the rendezvous at /ws. Every push to main (and a manual run) builds the
+# client and the Worker, stages every published release's client beside this build's
+# (deploy/stage-releases.sh), and runs `wrangler deploy`, then smoke-checks the live Worker
+# (deploy/smoke.mjs). Pull requests only build and run `wrangler deploy --dry-run`.
+#
+# Secrets live in the `production` GitHub environment (deploy/README.md):
+# CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID deploy; CF_TURN_KEY_ID and
+# CF_TURN_API_TOKEN become the Worker's secrets of the same names. Until the first two
+# exist the deploy job skips with a notice, so main stays green.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time, never cancelled half-way.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      versions: ${{ steps.stage.outputs.versions }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: |
+            castcorder
+            castcorder/worker
+          key: deploy
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Released clients first: a released version is immutable, so this build's client
+      # never replaces one (main can still carry a released version number until the
+      # next bump).
+      - name: Stage every published release's client
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: bash deploy/stage-releases.sh castcorder/worker/assets
+
+      - name: Build and stage this build's client
+        id: stage
+        working-directory: castcorder
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "castcorder-client") | .version')
+          if [ -d "worker/assets/v/$version" ]; then
+            echo "::notice::client $version is a published release; deploying the released build, not this one"
+          else
+            task worker:assets CLIENT_VERSION="$version"
+          fi
+          versions=$(find worker/assets/v -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tr '\n' ' ')
+          echo "client versions: $versions"
+          echo "versions=$versions" >> "$GITHUB_OUTPUT"
+
+      - name: Build the Worker
+        run: task worker:build
+
+      # Workers static assets, free plan: 20,000 files per version, 25 MiB per file.
+      - name: Check the static asset limits
+        working-directory: castcorder/worker
+        run: |
+          files=$(find assets -type f | wc -l)
+          echo "static assets: $files files"
+          du -sh assets
+          if [ "$files" -gt 20000 ]; then
+            echo "::error::$files static asset files; the free plan allows 20,000 per version"
+            exit 1
+          fi
+          big=$(find assets -type f -size +25M)
+          if [ -n "$big" ]; then
+            echo "::error::static assets over 25 MiB: $big"
+            exit 1
+          fi
+
+      - name: Wrangler dry run
+        working-directory: castcorder/worker
+        run: node node_modules/wrangler/bin/wrangler.js deploy --dry-run
+
+      - name: Upload the Worker and its assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            castcorder/worker/build
+            castcorder/worker/assets
+
+  deploy:
+    name: deploy
+    needs: build
+    # Never from a pull request; the environment's branch rule also limits it to main.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      # `secrets` cannot appear in `if:`, so a step reads them from the environment.
+      - name: Check for the Cloudflare secrets
+        id: gate
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Not deploying: the production environment has no CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID yet (see deploy/README.md)."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out repository
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Node
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install wrangler (pinned by the lockfile)
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: castcorder/worker
+        run: npm ci --no-audit --no-fund
+
+      - name: Download the Worker and its assets
+        if: steps.gate.outputs.ready == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: worker
+          path: castcorder/worker
+
+      # The TURN secrets go up with the new version (--secrets-file), written to a private
+      # temporary file by jq and never echoed. Without them the Worker deploys with
+      # RELAY=none: calls still connect directly, only the relay is missing.
+      - name: Deploy
+        id: deploy
+        if: steps.gate.outputs.ready == 'true'
+        working-directory: castcorder/worker
+        env:
+          CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
+          CF_TURN_API_TOKEN: ${{ secrets.CF_TURN_API_TOKEN }}
+        run: |
+          args=(deploy --message "${GITHUB_SHA::12} (run $GITHUB_RUN_ID)")
+          if [ -n "$CF_TURN_KEY_ID" ] && [ -n "$CF_TURN_API_TOKEN" ]; then
+            secrets="$RUNNER_TEMP/worker-secrets.json"
+            (umask 077 && jq -n --arg id "$CF_TURN_KEY_ID" --arg token "$CF_TURN_API_TOKEN" \
+              '{CF_TURN_KEY_ID: $id, CF_TURN_API_TOKEN: $token}' > "$secrets")
+            args+=(--secrets-file "$secrets")
+          else
+            echo "::warning::No CF_TURN_KEY_ID/CF_TURN_API_TOKEN in the production environment: deploying with RELAY=none (no relay for calls that need one)."
+            args+=(--var RELAY:none)
+          fi
+          set +e
+          node node_modules/wrangler/bin/wrangler.js "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/deploy.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          rm -f "$RUNNER_TEMP/worker-secrets.json"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          url=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' "$RUNNER_TEMP/deploy.log" | head -n 1)
+          if [ -z "$url" ]; then
+            echo "::error::wrangler printed no workers.dev URL (is the account's workers.dev subdomain registered?)"
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          expected=$(grep -oE 'PROJECT_RENDEZVOUS: &str = "[^"]+"' ../crates/castcorder-host/src/lib.rs | cut -d'"' -f2)
+          if [ "$url" != "$expected" ]; then
+            echo "::warning::Deployed at $url but the apps' default rendezvous is $expected: update PROJECT_RENDEZVOUS in castcorder/crates/castcorder-host/src/lib.rs (deploy/README.md)."
+          fi
+
+      - name: Smoke check the live Worker
+        if: steps.gate.outputs.ready == 'true'
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          VERSIONS: ${{ needs.build.outputs.versions }}
+        run: |
+          read -ra versions <<< "$VERSIONS"
+          node deploy/smoke.mjs "$URL" "${versions[@]}"

@@ -298,12 +298,12 @@ jobs:
 
       # The Worker's relay credentials and its per-host-key daily cap across a
       # wrangler restart. Its Cloudflare Realtime TURN part runs only with a TURN
-      # key and is the one part allowed to skip under CASTCORDER_CI: the secrets
-      # arrive with the deploy work (cast-lxt.4).
+      # key and is the one part allowed to skip under CASTCORDER_CI: it runs when
+      # CF_TURN_* are also repository secrets (deploy/README.md, step 6).
       - name: Worker relay credentials and daily cap (wrangler dev)
         run: task test:worker:relay
         env:
-          # Empty (so that part skips) until the repository has these secrets.
+          # Empty (so that part skips) unless these are repository secrets.
           CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
           CF_TURN_API_TOKEN: ${{ secrets.CF_TURN_API_TOKEN }}
 
