@@ -113,6 +113,8 @@ export async function rejoinChecks() {
   await leave(P);
   await leave(G);
   await waitFor(async () => !(await rooms()).live, 'the room empties again', 20000);
+  await G.reload();
+  await G.waitForSelector('#join');
   await waitFor(async () => (await row(G, first).locator('.continue-call').count()) === 1, 'a producer is offered Continue this call', 30000);
   await row(G, first).locator('.continue-call').click();
   await connected(G, 'G (continue)');

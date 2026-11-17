@@ -353,8 +353,7 @@ fn refresh(seen: RwSignal<Vec<(String, Seen)>>, list: RwSignal<Vec<Room>>) {
                 Err(e)
                     if e.contains("host_offline")
                         || e.contains("Failed to fetch")
-                        || e.contains("NetworkError")
-                        || e.contains("rendezvous") =>
+                        || e.contains("NetworkError") =>
                 {
                     Seen::Offline
                 }
