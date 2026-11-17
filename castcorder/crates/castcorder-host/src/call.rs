@@ -67,6 +67,9 @@ pub enum Command {
         /// The device key proof (castcorder-link `identity`); checked before
         /// any room decision.
         proof: Option<castcorder_link::DeviceProof>,
+        /// The person certificate for the proof's key, if any: one of this
+        /// host's person makes the device the rooms' owner's.
+        cert: Option<castcorder_link::DeviceCert>,
         /// What the proof must be signed for: this host's id (encoded),
         /// through a rendezvous and on the host's own listener alike.
         audience: String,
@@ -89,6 +92,8 @@ pub enum Command {
         device: String,
         /// The device key proof over `nonce`.
         proof: Option<castcorder_link::DeviceProof>,
+        /// The person certificate for the proof's key, if any.
+        cert: Option<castcorder_link::DeviceCert>,
         /// The fresh nonce the proof signs (in place of an SDP).
         nonce: String,
         /// This host's id (encoded): what the proof must be signed for.
@@ -1489,12 +1494,21 @@ impl Call {
                 device,
                 password,
                 proof,
+                cert,
                 audience,
                 at_host,
                 sync_only,
                 call,
                 reply,
             } => {
+                // One of the rooms' owner's devices: its certificate names
+                // this host's person and the key that signed the proof (the
+                // proof itself is verified below, before any decision).
+                let owner = self
+                    .rooms
+                    .persons
+                    .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
+                let seat = crate::room::Seat { at_host, owner };
                 if sync_only {
                     // Beside any live call, in any room: not a participant.
                     let r = self.offer_sync(
@@ -1505,7 +1519,7 @@ impl Call {
                         &device,
                         proof.as_ref(),
                         &audience,
-                        at_host,
+                        seat,
                     );
                     let _ = reply.send(r);
                     return;
@@ -1530,14 +1544,14 @@ impl Call {
                 let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
                 let r = match verified.and_then(|d| {
                     self.room
-                        .admit_offer(&d, alias, at_host, password.as_deref())
+                        .admit_offer_as(&d, alias, seat, password.as_deref())
                 }) {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     // The first one in opens the room's current call (or
                     // the call it rejoins).
                     Ok(Admission::Enter) => self
-                        .enter_named(&device, alias, at_host, call.as_deref())
+                        .enter_named(&device, alias, at_host || owner, call.as_deref())
                         .and_then(|()| {
                             host.accept(&crate::http::stream_name(&name), &offer_sdp)
                                 .map_err(|e| e.to_string())
@@ -1550,7 +1564,7 @@ impl Call {
                     if let Some(old) = alias {
                         self.room.bind_alias(old, &device);
                     }
-                    self.room.accepted(id.0, &device, at_host);
+                    self.room.accepted_as(id.0, &device, seat);
                     self.save_room();
                     if let Some(ch) = host.control(id) {
                         self.rpc.insert(id, RpcServer::new(ch));
@@ -1594,11 +1608,17 @@ impl Call {
             Command::HostStatus {
                 device,
                 proof,
+                cert,
                 nonce,
                 audience,
                 reply,
             } => {
-                let _ = reply.send(self.host_status(&device, proof.as_ref(), &nonce, &audience));
+                let owner = self
+                    .rooms
+                    .persons
+                    .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
+                let _ =
+                    reply.send(self.host_status(&device, proof.as_ref(), &nonce, &audience, owner));
             }
             Command::Live { reply } => {
                 let _ = reply.send(self.live());

@@ -668,7 +668,10 @@ pub(super) fn App() -> impl IntoView {
     // reaches a server). Then signal through this origin's rendezvous.
     let hash = window().location().hash().unwrap_or_default();
     let link = CallLink::parse_fragment(&hash).ok();
-    let bad_link = hash.len() > 1 && link.is_none();
+    // A link code (`#link.<host-id>.<secret>`) opens the page that links
+    // this browser to a person, not a call.
+    let link_page = hash.starts_with("#link.");
+    let bad_link = hash.len() > 1 && link.is_none() && !link_page;
     // A LAN or host machine page joins the room its `?room=` names.
     let room_param = query_param("room").unwrap_or_default();
     let default_signal = if link.is_some() {
@@ -779,7 +782,9 @@ pub(super) fn App() -> impl IntoView {
 
     view! {
         <div class="app">
-            {if home::is_home_page() {
+            {if link_page {
+                view! { <person::LinkPage ui=ui/> }.into_any()
+            } else if home::is_home_page() {
                 view! { <home::Home ui=ui/> }.into_any()
             } else {
                 view! { <Lobby ui=ui placeholder=placeholder/><Call ui=ui/> }.into_any()

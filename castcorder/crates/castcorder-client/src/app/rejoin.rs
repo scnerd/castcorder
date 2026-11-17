@@ -289,6 +289,7 @@ async fn ask(room: &Room) -> Result<HostStatus, String> {
             "sdp": n,
             "device": key.id,
             "proof": proof,
+            "cert": crate::identity::cert(),
         });
         let init = object();
         set(&init, "method", "POST");

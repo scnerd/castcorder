@@ -508,6 +508,14 @@ pub(super) async fn direct_offer(
     set(&body, "sdp", sdp);
     set(&body, "device", ctx.device.as_str());
     set(&body, "proof", proof);
+    // Linked to a person: the host of the same person makes it a producer.
+    if let Some(c) = crate::identity::cert() {
+        set(
+            &body,
+            "cert",
+            js_sys::JSON::parse(&castcorder_link::wire::to_json(&c))?,
+        );
+    }
     if sync_only {
         set(&body, "sync", true);
     } else if let Some(c) = rejoin::target() {

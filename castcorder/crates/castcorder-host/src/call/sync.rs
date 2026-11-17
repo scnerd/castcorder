@@ -81,7 +81,7 @@ impl Call {
         device: &str,
         proof: Option<&DeviceProof>,
         audience: &str,
-        at_host: bool,
+        seat: crate::room::Seat,
     ) -> Result<String, String> {
         let room = self.resolve_room(room);
         if !self.rooms.exists(&room) {
@@ -92,7 +92,7 @@ impl Call {
             .verify(device, proof, audience, sdp, crate::wall_ms())
             .map_err(|r| r.message().to_string())?;
         let alias = proof.and_then(|p| p.alias.as_deref());
-        self.judge(&room, |r| r.admit_sync(&device, alias, at_host))
+        self.judge(&room, |r| r.admit_sync(&device, alias, seat))
             .map_err(|r| r.message().to_string())?;
         let (id, answer) = host
             .accept_sync(&crate::http::stream_name(name), sdp)

@@ -16,7 +16,9 @@
 //! ```
 //!
 //! The sealed bytes ([`crate::seal`]) open to [`OfferPlain`] and
-//! [`AnswerPlain`]; the server never sees them. A guest's connection lives for
+//! [`AnswerPlain`]; the server never sees them. A link request
+//! ([`OfferPlain::link`], [`crate::person`]) travels the same way, to the
+//! host key a link code names, and is answered [`AnswerPlain::Link`]. A guest's connection lives for
 //! one exchange; a host holds its connection while it runs (a newer
 //! registration of the same key replaces an older one).
 
@@ -185,6 +187,52 @@ pub struct OfferPlain {
     /// it continues it (absent: the room's current call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<String>,
+    /// The person key's certificate for this device's key, if the device is
+    /// linked to a person ([`crate::person`]); a host whose own person it
+    /// names treats the device as the room owner's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<crate::person::DeviceCert>,
+    /// A link request, not an offer ([`crate::person`]): `secret` is ignored,
+    /// `sdp` is a fresh random nonce the proof signs, and the host answers
+    /// [`AnswerPlain::Link`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<LinkAsk>,
+}
+
+/// A new device asks to be linked to the person of the device that made a
+/// link code.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkAsk {
+    /// The link code's secret ([`crate::person::LinkCode::secret_text`]).
+    pub code: String,
+    /// The new device's name, shown to the person approving it.
+    pub name: String,
+    /// What kind of device asks (an app install also gets the person key).
+    pub kind: crate::person::DeviceKind,
+}
+
+/// The answer to a link request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkAnswer {
+    /// Nobody has approved it yet: ask again.
+    Pending,
+    /// Approved.
+    Granted(LinkGrant),
+    /// Declined, expired, unknown, or claimed by another device.
+    Refused(String),
+}
+
+/// What an approved device receives (sealed to it alone).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkGrant {
+    /// Its certificate.
+    pub cert: crate::person::DeviceCert,
+    /// The person's display name.
+    pub person_name: String,
+    /// The person key's secret, base64url: for an app install only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_secret: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -201,6 +249,8 @@ pub enum AnswerPlain {
     Rejected(String),
     /// The answer to a status query ([`OfferPlain::status`]).
     Status(HostStatus),
+    /// The answer to a link request ([`OfferPlain::link`]).
+    Link(LinkAnswer),
 }
 
 /// What a host tells a device about the rooms it was in (a status query).
@@ -325,6 +375,42 @@ mod tests {
             r#"{"rejected":"no"}"#
         );
         assert_eq!(unb64(&b64(b"\x00\xff")), Some(vec![0, 255]));
+        assert_eq!(
+            to_json(&AnswerPlain::Link(LinkAnswer::Pending)),
+            r#"{"link":"pending"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Link(LinkAnswer::Refused("no".into()))),
+            r#"{"link":{"refused":"no"}}"#
+        );
+        let ask = LinkAsk {
+            code: "c".into(),
+            name: "Laptop".into(),
+            kind: crate::person::DeviceKind::Browser,
+        };
+        assert_eq!(
+            to_json(&ask),
+            r#"{"code":"c","name":"Laptop","kind":"browser"}"#
+        );
+        let cert = crate::person::DeviceCert {
+            person: "P".into(),
+            device: "D".into(),
+            kind: crate::person::DeviceKind::App,
+            issued_ms: 5,
+            sig: "S".into(),
+        };
+        assert_eq!(
+            to_json(&cert),
+            r#"{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Link(LinkAnswer::Granted(LinkGrant {
+                cert,
+                person_name: "Ann".into(),
+                person_secret: None,
+            }))),
+            r#"{"link":{"granted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"person_name":"Ann"}}}"#
+        );
         // An offer from an older page (no device, no password) still parses.
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));

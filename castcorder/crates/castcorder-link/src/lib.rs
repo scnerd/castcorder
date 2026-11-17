@@ -12,6 +12,8 @@
 //!   sealed plaintexts inside them.
 //! - [`identity`]: a device's Ed25519 key, its device id (a fingerprint of
 //!   the key) and the signature an offer carries to prove it.
+//! - [`person`]: the person key, the certificate it gives each of its
+//!   devices, and the one-time link code that links a new device.
 //! - [`stun`]: just enough RFC 5389 for a Binding request and its
 //!   XOR-MAPPED-ADDRESS answer (the host learns its server-reflexive address
 //!   from the rendezvous).
@@ -21,10 +23,12 @@
 
 pub mod identity;
 pub mod link;
+pub mod person;
 pub mod seal;
 pub mod stun;
 pub mod wire;
 
 pub use identity::{DeviceProof, ProofError};
 pub use link::{CallLink, CallSecret, HostId, LinkError};
+pub use person::{DeviceCert, DeviceKind, LinkCode, PersonKey};
 pub use seal::{GuestSeal, HostKey, ReplySeal, SealError};

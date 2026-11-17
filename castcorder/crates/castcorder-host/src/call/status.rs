@@ -46,6 +46,7 @@ impl Call {
         proof: Option<&DeviceProof>,
         nonce: &str,
         audience: &str,
+        owner: bool,
     ) -> Result<HostStatus, String> {
         let device = self
             .room
@@ -59,7 +60,7 @@ impl Call {
             if !self.rooms.exists(&name) {
                 continue;
             }
-            let m = self.judge(&name, |r| r.membership(&device, alias.as_deref()));
+            let m = self.judge(&name, |r| r.membership_as(&device, alias.as_deref(), owner));
             let (allowed, why) = match m {
                 None => (false, "never in this room"),
                 Some(m) if m.removed => (false, "kicked from this room"),

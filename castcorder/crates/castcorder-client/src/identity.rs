@@ -82,3 +82,35 @@ pub async fn prove(d: &Device, audience: &str, sdp: &str) -> Result<DeviceProof,
         sig: b64(&Uint8Array::new(&sig).to_vec()),
     })
 }
+
+/// localStorage key of the person this profile is linked to: castcorder-link
+/// `wire::LinkGrant` JSON (a certificate for this profile's key and the
+/// person's name; a browser profile never holds the person key).
+pub const PERSON_KEY: &str = "castcorder.person";
+
+fn storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok().flatten()
+}
+
+/// The person this profile is linked to, if any.
+pub fn person() -> Option<castcorder_link::wire::LinkGrant> {
+    let text = storage()?.get_item(PERSON_KEY).ok().flatten()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The certificate every offer carries, if this profile is linked.
+pub fn cert() -> Option<castcorder_link::DeviceCert> {
+    person().map(|p| p.cert)
+}
+
+/// Remember a link (only the certificate and the name: a browser profile is
+/// never sent the person key).
+pub fn remember_person(grant: &castcorder_link::wire::LinkGrant) {
+    let keep = castcorder_link::wire::LinkGrant {
+        person_secret: None,
+        ..grant.clone()
+    };
+    if let (Some(s), Ok(text)) = (storage(), serde_json::to_string(&keep)) {
+        let _ = s.set_item(PERSON_KEY, &text);
+    }
+}

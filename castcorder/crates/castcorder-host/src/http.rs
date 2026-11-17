@@ -10,7 +10,8 @@
 //!   link or null) and `"lan"` (the LAN https links the host prints), so the
 //!   host machine's page can show the call link before anyone joins.
 //! - `POST /offer?name=X` takes `{"type":"offer","sdp":...,"device":ID,
-//!   "password":P?,"proof":PROOF,"sync":B?}` (any content type; PROOF is
+//!   "password":P?,"proof":PROOF,"sync":B?,"cert":CERT?}` (any content
+//!   type; CERT is castcorder-link `person::DeviceCert`; PROOF is
 //!   castcorder-link `identity::DeviceProof` with audience HOST; required) and
 //!   returns the answer in the same
 //!   shape. The room decides first (castcorder-host `room`): an offer on the
@@ -21,6 +22,16 @@
 //!   `"call":ID` rejoins that call; `"status":true` is a status query (the
 //!   proof signs a nonce in `sdp`) answered with castcorder-link
 //!   `HostStatus` JSON (docs/design.md "Rejoining").
+//! - `POST /link` (any listener) takes a sealed link request (castcorder-link
+//!   `person`; base64url text) and answers the sealed answer as text, or 400
+//!   if it does not open with this host's key (castcorder-host `person`).
+//! - The person, for the host machine's own page only (the same guard as
+//!   `/native`): `GET /person` answers [`crate::person::View`] (never the
+//!   key); `POST /person` `{"name":N?,"device_name":D?}` renames;
+//!   `POST /person/code` answers `{"links":[...],"code":FRAGMENT}`, a new
+//!   one-time link; `POST /person/decide` `{"device":ID,"approve":B}`;
+//!   `POST /person/join` `{"code":LINK}` links this install to another
+//!   person in the background. Each answers the view, or 409 with why.
 //! - Producer controls go over the control channel (castcorder-protocol
 //!   `Request::StartTake`, `Request::Room`), authorized per device role. For
 //!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
@@ -74,6 +85,74 @@ pub struct App {
     pub call_links: crate::rendezvous::Links,
     /// The LAN join links (`https://<ip>:<port>/`), as the host prints them.
     pub lan_links: Vec<String>,
+    /// This install's person (`/person...`, `/link`).
+    pub persons: crate::person::Persons,
+}
+
+/// `GET /person`: the person as the home shows it (never the key).
+fn person_json(app: &App) -> String {
+    serde_json::to_string(&app.persons.view(crate::wall_ms())).unwrap_or_default()
+}
+
+/// A link code's links: through the rendezvous once registered, and to each
+/// LAN listener.
+pub fn code_links(
+    app_links: &crate::rendezvous::Links,
+    lan: &[String],
+    code: &castcorder_link::LinkCode,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(b) = app_links.base.as_ref()
+        && app_links
+            .registered
+            .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        out.push(code.url(&b.base, &b.version));
+    }
+    out.extend(
+        lan.iter()
+            .map(|l| format!("{}/#{}", l.trim_end_matches('/'), code.fragment())),
+    );
+    out
+}
+
+fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
+    let now = crate::wall_ms();
+    let done = |res: Result<(), String>| match res {
+        Ok(()) => json(200, person_json(app)),
+        Err(e) => text(409, e),
+    };
+    match path {
+        "/person" => done(
+            app.persons
+                .set_names(r.name.as_deref(), r.device_name.as_deref())
+                .map_err(|e| e.to_string()),
+        ),
+        "/person/code" => match app.persons.new_code(now) {
+            Ok(code) => json(
+                200,
+                serde_json::json!({
+                    "links": code_links(&app.call_links, &app.lan_links, &code),
+                    "code": code.fragment(),
+                })
+                .to_string(),
+            ),
+            Err(e) => text(409, e.to_string()),
+        },
+        "/person/decide" => done(
+            r.device
+                .ok_or_else(|| "no device".to_string())
+                .and_then(|d| app.persons.decide(&d, r.approve)),
+        ),
+        _ => done(
+            r.code
+                .ok_or_else(|| "no link code".to_string())
+                .and_then(|c| {
+                    app.persons
+                        .join(&c, app.call_links.base.as_ref().map(|b| b.base.clone()))
+                }),
+        ),
+    }
 }
 
 /// The header a `/native` request must carry. A page on another origin
@@ -344,6 +423,24 @@ struct Sdp {
     /// Rejoin this call of the room.
     #[serde(default)]
     call: Option<String>,
+    /// The person certificate for the proof's key, if linked.
+    #[serde(default)]
+    cert: Option<castcorder_link::DeviceCert>,
+}
+
+/// The body of the home's person requests (`/person...`).
+#[derive(Default, serde::Deserialize)]
+struct PersonRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    device_name: Option<String>,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    approve: bool,
+    #[serde(default)]
+    code: Option<String>,
 }
 
 /// The HTTP status of an offer refusal: 503 while waiting for a producer,
@@ -367,6 +464,11 @@ fn ask<T>(app: &App, make: impl FnOnce(mpsc::Sender<T>) -> Command) -> Option<T>
 /// A guest's display name as the host keeps it (tiles, `room.json`, logs):
 /// any text, cleaned by [`castcorder_core::names::display_name`]; `guest` if
 /// nothing is left. Not a file name: those use `file_slug`.
+pub fn clean_label(raw: &str) -> String {
+    castcorder_core::names::display_name(raw)
+}
+
+/// [`clean_label`], `guest` if nothing is left.
 pub fn clean_name(raw: &str) -> String {
     let name = castcorder_core::names::display_name(raw);
     if name.is_empty() {
@@ -456,6 +558,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 return match ask(app, |reply| Command::HostStatus {
                     device: offer.device,
                     proof: offer.proof,
+                    cert: offer.cert,
                     nonce: offer.sdp,
                     audience: app.host_id.clone(),
                     reply,
@@ -472,6 +575,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 device: offer.device,
                 password: offer.password,
                 proof: offer.proof,
+                cert: offer.cert,
                 audience: app.host_id.clone(),
                 at_host: producer,
                 sync_only: offer.sync,
@@ -511,11 +615,25 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             Some(s) => json(200, s),
             None => gone(),
         },
-        ("GET", "/native" | "/rooms")
+        // A sealed link request, on any listener (castcorder-host `person`).
+        ("POST", "/link") => {
+            match app
+                .persons
+                .answer_sealed(&String::from_utf8_lossy(&req.body), crate::wall_ms())
+            {
+                Some(sealed) => Response {
+                    status: 200,
+                    content_type: "text/plain",
+                    body: sealed.into_bytes(),
+                },
+                None => text(400, "not a sealed link request for this host"),
+            }
+        }
+        ("GET", "/native" | "/rooms" | "/person")
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
-            | "/rooms/call",
+            | "/rooms/call" | "/person" | "/person/code" | "/person/decide" | "/person/join",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -538,6 +656,14 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 },
                 Err(e) => text(409, e),
             }
+        }
+        ("GET", "/person") => json(200, person_json(app)),
+        ("POST", "/person" | "/person/code" | "/person/decide" | "/person/join") => {
+            let r = match serde_json::from_slice::<PersonRequest>(&req.body) {
+                Ok(r) => r,
+                Err(e) => return text(400, format!("bad json: {e}")),
+            };
+            person_post(app, &req.path, r)
         }
         ("GET", "/rooms") => match ask(app, |reply| Command::Rooms { reply }) {
             Some(rooms) => json(
@@ -667,6 +793,17 @@ fn serve_file(dir: &Path, path: &str) -> Response {
 mod tests {
     use super::*;
 
+    /// A person of its own, in a fresh folder.
+    fn test_persons() -> crate::person::Persons {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("castcorder-http-person-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = castcorder_link::HostKey::from_secret([4; 32]);
+        crate::person::Persons::load_or_create(&dir, &key, 1).unwrap()
+    }
+
     /// Two rooms' links through a rendezvous, registered.
     fn test_links() -> crate::rendezvous::Links {
         use castcorder_link::{CallSecret, HostKey};
@@ -755,6 +892,7 @@ mod tests {
             library: std::env::temp_dir(),
             call_links: test_links(),
             lan_links: Vec::new(),
+            persons: test_persons(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -809,6 +947,7 @@ mod tests {
             library: std::env::temp_dir(),
             call_links: test_links(),
             lan_links: vec!["https://192.168.1.5:27800/".into()],
+            persons: test_persons(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -847,6 +986,7 @@ mod tests {
             library: std::env::temp_dir(),
             call_links: test_links(),
             lan_links: Vec::new(),
+            persons: test_persons(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

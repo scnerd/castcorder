@@ -17,6 +17,7 @@ mod local;
 #[cfg(feature = "native-capture")]
 mod native;
 mod participant;
+pub mod person;
 mod recorders;
 mod rendezvous;
 mod room;
@@ -292,11 +293,52 @@ pub struct Running {
     call_links: rendezvous::Links,
     finisher: Finisher,
     native: Arc<participant::NativeCtl>,
+    persons: person::Persons,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
 
 impl Running {
+    /// This install's person as the home shows it (never the key's secret).
+    pub fn person(&self) -> person::View {
+        self.persons.view(wall_ms())
+    }
+
+    /// Rename the person or this device (`None` keeps it).
+    pub fn set_person_names(&self, name: Option<&str>, device: Option<&str>) -> Result<(), String> {
+        self.persons
+            .set_names(name, device)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Make a one-time code that links a new device to this person: its
+    /// links (through the rendezvous once registered, then each LAN link).
+    pub fn link_code(&self) -> Result<Vec<String>, String> {
+        let code = self
+            .persons
+            .new_code(wall_ms())
+            .map_err(|e| e.to_string())?;
+        Ok(http::code_links(&self.call_links, &self.links, &code))
+    }
+
+    /// Approve or decline a device's link request.
+    pub fn decide_link(&self, device: &str, approve: bool) -> Result<(), String> {
+        self.persons.decide(device, approve)
+    }
+
+    /// Link this install to the person of the device that made `code`, in
+    /// the background ([`Running::person`]'s `joining` follows it).
+    pub fn join_person(&self, code: &str) -> Result<(), String> {
+        self.persons
+            .join(code, self.call_links.base.as_ref().map(|b| b.base.clone()))
+    }
+
+    /// This install's certificate (for its host key): what its offers carry
+    /// to the hosts of the same person.
+    pub fn person_cert(&self) -> castcorder_link::DeviceCert {
+        self.persons.cert()
+    }
+
     /// Join the call as the person at the host with `input`, captured
     /// natively (a build with `native-capture`): the live room's call, else
     /// the default room's current call. A take recording now is recorded
@@ -563,6 +605,8 @@ pub fn start(
     // a rendezvous (LAN pages read it from `GET /role`).
     let host_id = host_key.id().encode();
     let host_device = format!("host-{}", host_key.id());
+    let persons = person::Persons::load_or_create(&args.library, &host_key, wall_ms())
+        .map_err(|e| format!("person: {e}"))?;
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
@@ -651,6 +695,7 @@ pub fn start(
         key: host_key,
         secret: secrets.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        persons: persons.clone(),
     });
     let call_links = rendezvous::Links {
         secrets: secrets.clone(),
@@ -673,6 +718,7 @@ pub fn start(
             gap: args.idle_gap,
             host_device: host_device.clone(),
             keep_wav: args.keep_wav,
+            persons: persons.clone(),
         },
         room,
         room_name.clone(),
@@ -719,6 +765,7 @@ pub fn start(
         library: args.library.clone(),
         call_links: call_links.clone(),
         lan_links: links.clone(),
+        persons: persons.clone(),
     });
     threads.push(http::serve(
         https,
@@ -759,6 +806,7 @@ pub fn start(
         call_links,
         finisher,
         native,
+        persons,
         stop,
         threads,
     })

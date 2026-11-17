@@ -67,6 +67,16 @@ pub struct Rooms {
     pub host_device: String,
     /// Keep the host microphone's WAVs after a verified FLAC.
     pub keep_wav: bool,
+    /// This install's person: whose certificate makes a device the rooms'
+    /// owner's (castcorder-host `person`).
+    pub persons: crate::person::Persons,
+}
+
+/// The Ed25519 key a device proof presents, if well-formed.
+pub(crate) fn proof_key(proof: Option<&castcorder_link::DeviceProof>) -> Option<[u8; 32]> {
+    proof
+        .and_then(|p| castcorder_link::wire::unb64(&p.key))
+        .and_then(|k| k.try_into().ok())
 }
 
 impl Rooms {

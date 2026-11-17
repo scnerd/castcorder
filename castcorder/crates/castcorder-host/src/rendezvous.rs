@@ -69,7 +69,7 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-fn random<const N: usize>() -> io::Result<[u8; N]> {
+pub(crate) fn random<const N: usize>() -> io::Result<[u8; N]> {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).map_err(io::Error::other)?;
     Ok(b)
@@ -213,6 +213,8 @@ pub struct Config {
     pub secret: SharedSecrets,
     /// The client version links pin.
     pub version: String,
+    /// This install's person (link requests are answered here).
+    pub persons: crate::person::Persons,
 }
 
 impl Config {
@@ -347,6 +349,40 @@ fn read_msg_until(
     }
 }
 
+/// One sealed exchange as a guest of the rendezvous at `base`: send `sealed`
+/// to host `to` and return its sealed answer (linking a device,
+/// castcorder-host `person`, from an app install).
+pub fn exchange(
+    base: &str,
+    to: &castcorder_link::HostId,
+    sealed: &[u8],
+) -> Result<Vec<u8>, String> {
+    let t = target(base)?;
+    let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
+    let (mut ws, _) = tungstenite::client(t.ws_url.as_str(), stream).map_err(|e| e.to_string())?;
+    let ServerMsg::Hello { .. } = read_msg(&mut ws)? else {
+        return Err("expected hello".into());
+    };
+    send(
+        &mut ws,
+        &ClientMsg::Offer {
+            to: to.encode(),
+            sealed: b64(sealed),
+        },
+    )?;
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        match read_msg_until(&mut ws, Some(until), None)? {
+            Some(ServerMsg::Answer { sealed }) => {
+                let _ = ws.close(None);
+                return unb64(&sealed).ok_or_else(|| "the answer is not base64url".into());
+            }
+            Some(ServerMsg::Error { code, message }) => return Err(format!("{code}: {message}")),
+            Some(_) => {}
+            None => return Err("the other device did not answer".into()),
+        }
+    }
+}
 fn send(ws: &mut WebSocket<Box<dyn Stream>>, m: &ClientMsg) -> Result<(), String> {
     ws.send(Message::Text(to_json(m).into()))
         .map_err(|e| e.to_string())
@@ -575,6 +611,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         serde_json::from_slice::<OfferPlain>(&plain).map(|o| (cfg.secrets().room_of(&o.secret), o));
     let result = match parsed {
         Err(e) => AnswerPlain::Rejected(format!("bad offer: {e}")),
+        // A link request needs no call secret: the link code is its own.
+        Ok((_, o)) if o.link.is_some() => {
+            AnswerPlain::Link(cfg.persons.answer(&o, crate::wall_ms()))
+        }
         // A status query needs no call secret: the host answers for the
         // rooms the device's key was in, so a regenerated link still works.
         Ok((_, o)) if o.status => {
@@ -582,6 +622,7 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
             let sent = tx.send(Command::HostStatus {
                 device: o.device,
                 proof: o.proof,
+                cert: o.cert,
                 nonce: o.sdp,
                 audience: cfg.key.id().encode(),
                 reply: reply_tx,
@@ -613,6 +654,7 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 device: o.device,
                 password: o.password,
                 proof: o.proof,
+                cert: o.cert,
                 audience: cfg.key.id().encode(),
                 at_host: false,
                 sync_only: o.sync_only,
@@ -635,6 +677,15 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_persons() -> crate::person::Persons {
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("castcorder-rv-person-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::person::Persons::load_or_create(&dir, &HostKey::from_secret([3; 32]), 1).unwrap()
+    }
 
     #[test]
     fn rendezvous_urls_parse() {
@@ -743,6 +794,7 @@ mod tests {
                 default: "show".into(),
             })),
             version: "0.0.0".into(),
+            persons: test_persons(),
         };
         let (tx, rx) = mpsc::channel();
         let seal = |secret: &CallSecret, eph: u8| {
@@ -762,6 +814,8 @@ mod tests {
                 sync_only: false,
                 status: false,
                 call: None,
+                cert: None,
+                link: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -790,6 +844,7 @@ mod tests {
                 device,
                 password,
                 proof,
+                cert: _,
                 audience,
                 at_host,
                 sync_only,
@@ -822,6 +877,55 @@ mod tests {
         assert_eq!(open(&guest, &a), AnswerPlain::Sdp("answer-sdp".into()));
     }
 
+    /// A link request (an empty call secret) is answered by the person, not
+    /// the host thread, through the real sealing: pending until approved.
+    #[test]
+    fn a_link_request_needs_no_call_secret_and_skips_the_host_thread() {
+        let cfg = Config {
+            base: "http://127.0.0.1:1".into(),
+            key: HostKey::from_secret([3; 32]),
+            secret: Arc::new(Mutex::new(Secrets {
+                rooms: [("show".to_string(), CallSecret([7; 16]))].into(),
+                default: "show".into(),
+            })),
+            version: "0.0.0".into(),
+            persons: test_persons(),
+        };
+        let code = cfg.persons.new_code(crate::wall_ms()).unwrap();
+        let me = HostKey::from_secret([8; 32]);
+        let (tx, rx) = mpsc::channel();
+        let mut exchange = |sealed: &[u8]| {
+            answer(&cfg, &tx, 1, &b64(sealed))
+                .and_then(|a| unb64(&a))
+                .ok_or_else(|| "no answer".to_string())
+        };
+        // Refused with an unknown code; never reaches the host thread.
+        let mut bogus = code.clone();
+        bogus.secret = [0; 16];
+        let r = crate::person::request_link(
+            &bogus,
+            &me,
+            "Laptop",
+            castcorder_link::DeviceKind::App,
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("unknown")));
+        assert!(rx.try_recv().is_err());
+        // The real code claims it and waits (the deadline stops the asking).
+        let r = crate::person::request_link(
+            &code,
+            &me,
+            "Laptop",
+            castcorder_link::DeviceKind::App,
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("in time")));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(cfg.persons.view(crate::wall_ms()).requests.len(), 1);
+    }
+
     /// Regenerating the link: the old secret no longer admits, the new one
     /// does, and the file holds the new one (so it survives a restart).
     #[test]
@@ -837,6 +941,7 @@ mod tests {
                 default: "show".into(),
             })),
             version: "0.0.0".into(),
+            persons: test_persons(),
         };
         let old_link = cfg.link();
         let new = regenerate_secret(&dir, "show", &cfg.secret).unwrap();
@@ -861,6 +966,8 @@ mod tests {
             sync_only: false,
             status: false,
             call: None,
+            cert: None,
+            link: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())
