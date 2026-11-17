@@ -7,7 +7,7 @@ Peer-to-peer podcast recording: participants talk over a live call while each ma
 ### People
 
 **Host**:
-The desktop app install that owns a room and its calls: it forwards the live streams, receives the tracks, and carries out producer instructions. A host is a machine, not a person, and need not be a participant in its own call.
+The device that holds a room's library and runs its calls: it forwards the live streams, receives the tracks, and carries out producer instructions. A host is a device, not a person, and need not be a participant in its own call. Until a call starts, a host is an app install like any other.
 _Avoid_: Owner, server, admin
 
 **Participant**:
@@ -22,8 +22,16 @@ A participant holding host controls for a call: starting and stopping takes, sel
 _Avoid_: Co-host, admin, moderator
 
 **Device**:
-One app install or browser profile, identified by a key it generates for itself. Tracks, rejoins, and roles attach to devices, not to people.
+One app install or browser profile, identified by a key it generates for itself. Tracks and rejoins attach to devices. A device may be linked to a person; one that never is stays anonymous.
 _Avoid_: Client, peer, account
+
+**Person**:
+Someone who owns one or more linked devices, identified by a person key that vouches for each of them. A person's devices trust each other, and a room belongs to a person, though only the device holding its library can host its calls.
+_Avoid_: User, account, identity
+
+**Contact**:
+A person you have mutually agreed to know. Contacts can see when each other's devices are online, open a contact link, and send invites. Being a contact grants no access to a room.
+_Avoid_: Friend, buddy, peer
 
 **Trusted Device**:
 A device that joined a room while a producer was present. Only trusted devices may enter a locked room or be granted the producer role, and a trusted device is told a room's current call link, so it can rejoin from its list of rooms after the link is regenerated.
@@ -95,3 +103,11 @@ _Avoid_: Upload queue, pending uploads
 **Sync-only Connection**:
 A device's connection to the host that only delivers its outbox: no media, not a participant, never counted as anyone in a call. A device opens one whenever it is in no call and its outbox holds tracks for that host (a guest that left, the app in the tray, a page reopened later). The host admits it by device key beside any live call, refuses a device kicked from the room, and accepts each track only for a call the device was in.
 _Avoid_: Background connection, upload session
+
+**Contact Link**:
+A connection opened on demand between two online devices of contacts, outside any call: no media, closed when idle. It carries track delivery, invites, and the status of shared rooms.
+_Avoid_: Channel, tunnel, sync session
+
+**Invite**:
+A contact's request that you join a room now. It carries the room's call link and its sender, and the room's normal join rules still apply.
+_Avoid_: Ring, page, notification
