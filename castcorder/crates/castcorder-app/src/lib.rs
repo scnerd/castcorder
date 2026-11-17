@@ -73,6 +73,7 @@ impl AppArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut config = Config::new(default_dist());
         config.log = true;
+        config.rendezvous = castcorder_host::DEFAULT_RENDEZVOUS.map(String::from);
         let rest = config.apply_args(args)?;
         let mut a = AppArgs {
             config,

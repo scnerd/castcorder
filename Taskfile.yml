@@ -110,7 +110,7 @@ tasks:
       (a Cloudflare Realtime TURN key), RELAY=cloudflare for real: the host
       must allocate on turn.cloudflare.com and a guest hello must carry the
       TURN URLs including TLS on 443. Without them that part prints SKIP, the
-      one skip CASTCORDER_CI allows (no Cloudflare secrets in CI until cast-lxt.4).
+      one skip CASTCORDER_CI allows (CI has the TURN key only if it is also a repository secret, deploy/README.md).
       Other build dirs: CARGO_TARGET_DIR=... task test:worker:relay
     dir: castcorder/crates/castcorder-client/browser-test
     cmds:

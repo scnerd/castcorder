@@ -8,7 +8,7 @@ use crate::Config;
 
 /// The host flags, for a usage line.
 pub const USAGE: &str = "--dist DIR [--library DIR] [--room NAME] [--idle-gap MINUTES] [--bind IP] \
-[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL] [--relay-only] [--bandwidth-cap KBPS] \
+[--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL|off] [--relay-only] [--bandwidth-cap KBPS] \
 [--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open] \
 [--record-video true|false]";
 
@@ -55,8 +55,13 @@ impl Config {
                 "--advertise" => a.advertise.push(ip(value()?)?),
                 "--rendezvous" => {
                     let url = value()?;
-                    crate::rendezvous::validate(&url)?;
-                    a.rendezvous = Some(url.trim_end_matches('/').to_string());
+                    // `off`: no rendezvous, not even the default.
+                    if url == "off" {
+                        a.rendezvous = None;
+                    } else {
+                        crate::rendezvous::validate(&url)?;
+                        a.rendezvous = Some(url.trim_end_matches('/').to_string());
+                    }
                 }
                 "--relay-only" => a.relay_only = true,
                 "--bandwidth-cap" => {
@@ -158,5 +163,31 @@ mod tests {
         ] {
             assert!(Config::new("d").apply_args(args(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn rendezvous_takes_a_url_or_off() {
+        let mut c = Config::new("d");
+        c.apply_args(args("--rendezvous https://rv.example.org/"))
+            .unwrap();
+        assert_eq!(c.rendezvous.as_deref(), Some("https://rv.example.org"));
+        c.apply_args(args("--rendezvous off")).unwrap();
+        assert_eq!(c.rendezvous, None);
+        assert!(
+            Config::new("d")
+                .apply_args(args("--rendezvous ftp://x"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn the_project_rendezvous_is_a_valid_rendezvous() {
+        crate::rendezvous::validate(crate::PROJECT_RENDEZVOUS).unwrap();
+        assert!(crate::PROJECT_RENDEZVOUS.starts_with("https://"));
+        assert!(!crate::PROJECT_RENDEZVOUS.ends_with('/'));
+        assert_eq!(
+            crate::DEFAULT_RENDEZVOUS.is_some(),
+            cfg!(feature = "project-rendezvous")
+        );
     }
 }

@@ -1,7 +1,7 @@
 // The Castcorder Worker (ADR 0004): the client bundles as static assets at
 // /v/<version>/ and the rendezvous at /ws, one Durable Object per host key.
 // Built by `task worker:build` (worker-build); run locally with `task worker:dev`.
-// No account id here: deploying is cast-lxt.4.
+// No account id here: wrangler reads CLOUDFLARE_ACCOUNT_ID (.github/workflows/deploy.yml).
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "castcorder",

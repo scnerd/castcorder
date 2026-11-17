@@ -54,3 +54,7 @@ ctrlc = "3"
 
 [features]
 native-capture = ["dep:castcorder-capture-gst"]
+# Register with the project's public rendezvous (PROJECT_RENDEZVOUS in
+# src/lib.rs) unless --rendezvous says otherwise. The release builds use it;
+# local and test builds leave it off.
+project-rendezvous = []

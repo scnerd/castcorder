@@ -1,8 +1,11 @@
 name: Release
 
 # A `v*` tag builds the unsigned desktop installers on Windows, macOS and Linux and attaches
-# them to a draft GitHub Release. workflow_dispatch builds the same installers as workflow
-# artifacts only, for testing. No signing, updater or web-client publishing yet
+# them to a draft GitHub Release, with the web client as castcorder-client-<version>.tar.gz:
+# once the release is published, every deploy (deploy.yml, deploy/stage-releases.sh) serves
+# that client at /v/<version>/ for good (ADR 0002). The installers register with the
+# project's rendezvous by default (the project-rendezvous feature). workflow_dispatch builds
+# the same files as workflow artifacts only, for testing. No signing or updater yet
 # (docs/design.md, "Repository and delivery").
 on:
   push:
@@ -26,17 +29,17 @@ jobs:
           - name: windows
             os: windows-latest
             bundles: nsis,msi
-            features: desktop,native-capture
+            features: desktop,native-capture,project-rendezvous
             extra_config: --config tauri.gst.conf.json
           - name: macos
             os: macos-latest
             bundles: app,dmg
-            features: desktop
+            features: desktop,project-rendezvous
             extra_config: ""
           - name: linux
             os: ubuntu-24.04
             bundles: deb,appimage
-            features: desktop,native-capture
+            features: desktop,native-capture,project-rendezvous
             extra_config: --config tauri.gst-deb.conf.json
     env:
       GST_VERSION: 1.28.8
@@ -186,11 +189,53 @@ jobs:
             castcorder/target/release/bundle/deb/*.deb
             castcorder/target/release/bundle/appimage/*.AppImage
 
+  # The web client as released, for the Worker to serve at /v/<version>/ (the Cargo
+  # workspace version, which the hosts' call links pin) from every later deploy.
+  client:
+    name: web client
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: release-client
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Build the client archive
+        working-directory: castcorder
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked             | jq -r '.packages[] | select(.name == "castcorder-client") | .version')
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::warning::tag $GITHUB_REF_NAME but the workspace version is $version; links will use /v/$version/"
+          fi
+          (cd crates/castcorder-client && trunk build --release --dist dist-release)
+          mkdir -p ../client-archive
+          tar -czf "../client-archive/castcorder-client-$version.tar.gz" -C crates/castcorder-client/dist-release .
+          ls -l ../client-archive
+
+      - name: Upload the client archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: client
+          if-no-files-found: error
+          path: client-archive/*.tar.gz
+
   # Only a version tag publishes: a draft release the maintainer reviews and publishes.
   release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: installers
+    needs: [installers, client]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -201,6 +246,12 @@ jobs:
           pattern: installers-*
           path: installers
           merge-multiple: true
+
+      - name: Download the client archive
+        uses: actions/download-artifact@v4
+        with:
+          name: client
+          path: installers
 
       - name: Create the draft release
         env:
