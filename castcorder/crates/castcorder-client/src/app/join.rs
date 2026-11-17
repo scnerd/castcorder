@@ -184,7 +184,10 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     let mailbox = match &link {
         Some(l) => {
             let sep = if url.contains('?') { '&' } else { '?' };
-            let ws = format!("{url}{sep}host={}", l.host.encode());
+            let ws = castcorder_link::wire::mailbox_url(
+                &format!("{url}{sep}host={}", l.host.encode()),
+                &l.host,
+            );
             Some(crate::mailbox::Mailbox::open(&ws).await?)
         }
         None => None,

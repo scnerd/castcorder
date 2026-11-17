@@ -9,6 +9,12 @@
 //!   which answers back through the same mailbox. Payloads are sealed end to
 //!   end (castcorder-link): the server sees only routing metadata.
 //! - Rate-limited per IP address and per host key ([`mailbox::Limits`]).
+//!   The mailbox logic (routing, limits, relay decisions) lives in the
+//!   I/O-free castcorder-mailbox crate, shared with the Cloudflare Worker
+//!   (`castcorder/worker`, ADR 0004); this crate wraps it in axum.
+//! - A connection may name the host whose mailbox it is for
+//!   (`/ws?mailbox=HOST_ID`); it may then only register as, or offer to, that
+//!   host. The Worker routes on it; here it only narrows the connection.
 //! - A STUN responder on its own UDP port tells hosts (and guests) their
 //!   server-reflexive address.
 //! - It also serves static client builds at `/v/<version>/`, standing in for
@@ -28,7 +34,7 @@
 //! keep working. An operator reads usage per host key on the admin listener
 //! (`GET /usage`) or with `castcorder-rendezvous usage`.
 
-pub mod mailbox;
+pub use castcorder_mailbox as mailbox;
 pub mod server;
 pub mod turn;
 pub mod usage;

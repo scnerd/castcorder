@@ -2,6 +2,7 @@
 //! by `"type"`. Byte strings are base64url without padding.
 //!
 //! ```text
+//! any -> server    GET /ws?mailbox=HOST_ID (WebSocket upgrade)             the host whose mailbox this is
 //! server -> any    {"type":"hello","nonce":B64,"stun_port":N|null,"ice_servers":[{"urls":[...]}]}
 //!                  with a TURN server configured and the URL naming a host
 //!                  (`/ws?host=HOST_ID`), ice_servers also holds
@@ -21,6 +22,13 @@
 //! host key a link code names, and is answered [`AnswerPlain::Link`]. A guest's connection lives for
 //! one exchange; a host holds its connection while it runs (a newer
 //! registration of the same key replaces an older one).
+//!
+//! Every connection names the host whose mailbox it is for
+//! ([`MAILBOX_PARAM`], [`mailbox_url`]): a host its own id, a guest the host
+//! it offers to. The Cloudflare Worker (ADR 0004) routes the connection to
+//! that host's Durable Object on it, before any frame; a scoped connection may
+//! only register as, or offer to, that host. A guest joining a call that names
+//! only `?host=` (asking relay credentials) is routed by that.
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -305,6 +313,20 @@ pub struct CallStatus {
     pub takes: u32,
 }
 
+/// The query parameter naming the host whose mailbox a connection is for.
+pub const MAILBOX_PARAM: &str = "mailbox";
+
+/// The query parameter asking relay (TURN) credentials for a host in the
+/// hello.
+pub const RELAY_PARAM: &str = "host";
+
+/// `ws_url` (the rendezvous `/ws` URL, perhaps with a query already) scoped
+/// to `host`'s mailbox.
+pub fn mailbox_url(ws_url: &str, host: &crate::HostId) -> String {
+    let sep = if ws_url.contains('?') { '&' } else { '?' };
+    format!("{ws_url}{sep}{MAILBOX_PARAM}={}", host.encode())
+}
+
 /// Encode a frame.
 pub fn to_json<T: Serialize>(m: &T) -> String {
     serde_json::to_string(m).expect("wire messages serialize")
@@ -318,6 +340,19 @@ pub fn from_json<'a, T: Deserialize<'a>>(s: &'a str) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mailbox_url_names_the_host() {
+        let id = crate::HostKey::from_secret([3; 32]).id();
+        assert_eq!(
+            mailbox_url("ws://rv.example:80/ws", &id),
+            format!("ws://rv.example:80/ws?mailbox={}", id.encode())
+        );
+        assert_eq!(
+            mailbox_url("wss://rv.example/ws?host=x", &id),
+            format!("wss://rv.example/ws?host=x&mailbox={}", id.encode())
+        );
+    }
 
     #[test]
     fn wire_shapes_are_stable() {

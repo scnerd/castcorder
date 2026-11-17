@@ -273,7 +273,10 @@ async fn ask(code: &LinkCode, plain: &OfferPlain) -> Result<AnswerPlain, String>
     let origin = loc.origin().unwrap_or_default();
     if loc.pathname().unwrap_or_default().contains("/v/") {
         // A page from the rendezvous: its mailbox.
-        let ws = format!("{}/ws", origin.replacen("http", "ws", 1));
+        let ws = castcorder_link::wire::mailbox_url(
+            &format!("{}/ws", origin.replacen("http", "ws", 1)),
+            &code.host,
+        );
         let mb = crate::mailbox::Mailbox::open(&ws)
             .await
             .map_err(|e| describe(&e))?;

@@ -15,10 +15,19 @@
 // Every port is picked by the OS (none collide with a running `task host`).
 // CARGO_TARGET_DIR and CASTCORDER_DIST select other build dirs.
 // Run from the repo root with: task test:system
+//
+// CASTCORDER_RENDEZVOUS=worker runs the same test against the Cloudflare
+// Worker (castcorder/worker, ADR 0004) under `wrangler dev` instead of
+// castcorder-rendezvous: the client build is staged as its static assets, the
+// host and guests reach their host key's Durable Object, and there is no STUN
+// port (the host-srflx check is skipped; loopback ICE needs none). Build it
+// first (task worker:build); task test:system:worker does both.
 // Everything printed is ASCII. Logs go to browser-test/test-results/system-*.
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
@@ -36,7 +45,11 @@ const bin = (n) => join(process.env.CARGO_TARGET_DIR || join(WORKSPACE, 'target'
 const HOST_EXE = bin('castcorder-host');
 const RV_EXE = bin('castcorder-rendezvous');
 const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
-for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
+const WORKER = process.env.CASTCORDER_RENDEZVOUS === 'worker';
+const WORKER_DIR = join(WORKSPACE, 'worker');
+const WRANGLER = join(WORKER_DIR, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+const needed = WORKER ? [join(WORKER_DIR, 'build', 'index.js'), WRANGLER] : [RV_EXE];
+for (const f of [HOST_EXE, ...needed, join(dist, 'index.html')]) {
   if (!existsSync(f)) { console.log('FAIL missing ' + f); process.exit(1); }
 }
 const VERSION = '0.0.0';
@@ -59,8 +72,9 @@ async function waitFor(fn, what, timeout = 30000, interval = 200) {
 }
 
 const procs = [];
-function start(exe, args, name) {
-  const p = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+function start(exe, args, name, opts = {}) {
+  // Detached on POSIX so the whole group (wrangler and its workerd) can be killed.
+  const p = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', ...opts });
   const st = { p, out: '', err: '' };
   p.stdout.on('data', (d) => { st.out += d.toString(); });
   p.stderr.on('data', (d) => { st.err += d.toString(); });
@@ -102,12 +116,52 @@ const json = async (page, sel) => { const t = await text(page, sel); return t ? 
 const audioFrom = (inbound, origin) => (inbound || []).filter((i) => i.kind === 'audio' && i.origin.startsWith(origin + '-'))
   .reduce((a, i) => ({ packets: a.packets + i.packetsReceived, bytes: a.bytes + i.bytesReceived }), { packets: 0, bytes: 0 });
 
+function killTree(p) {
+  if (p.exitCode !== null) return;
+  if (process.platform === 'win32') spawnSync('taskkill', ['/pid', String(p.pid), '/T', '/F'], { stdio: 'ignore' });
+  else { try { process.kill(-p.pid, 'SIGTERM'); } catch { p.kill(); } }
+}
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = createServer();
+  srv.on('error', reject);
+  srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => resolve(port)); });
+});
+
+// The Worker under `wrangler dev`: the client build staged as its assets at
+// /v/<VERSION>/, local state in a fresh temp dir, no STUN servers in hellos.
+async function startWorker() {
+  const assets = join(WORKER_DIR, 'assets', 'v', VERSION);
+  rmSync(assets, { recursive: true, force: true });
+  cpSync(dist, assets, { recursive: true });
+  const [port, inspector] = [await freePort(), await freePort()];
+  const state = join(tmpdir(), 'castcorder-wrangler-' + process.pid);
+  rmSync(state, { recursive: true, force: true });
+  const st = start(process.execPath, [WRANGLER, 'dev', '--ip', '127.0.0.1', '--port', String(port),
+    '--inspector-port', String(inspector), '--persist-to', state, '--var', 'STUN_URLS:'],
+  'worker', { cwd: WORKER_DIR, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
+  const http = '127.0.0.1:' + port;
+  await waitFor(async () => {
+    if (st.exited !== undefined) throw new Error('wrangler dev exited with ' + st.exited);
+    try { return (await fetch('http://' + http + '/healthz')).ok; } catch { return false; }
+  }, 'wrangler dev ready', 120000, 500);
+  return [st, http];
+}
+
 let passed = false;
 let rv, host, link = '';
+// The rendezvous log: castcorder-rendezvous logs to stderr, wrangler to stdout.
+const rvLog = () => rv.out + rv.err;
 try {
-  rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist], 'rendezvous');
-  const [, RV_HTTP, RV_STUN] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
-  console.log('rendezvous at ' + RV_HTTP + ', stun ' + RV_STUN);
+  let RV_HTTP;
+  if (WORKER) {
+    [rv, RV_HTTP] = await startWorker();
+    console.log('worker (wrangler dev) at ' + RV_HTTP);
+  } else {
+    rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist], 'rendezvous');
+    let RV_STUN;
+    [, RV_HTTP, RV_STUN] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
+    console.log('rendezvous at ' + RV_HTTP + ', stun ' + RV_STUN);
+  }
 
   host = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY, '--room', 'system-test', '--bind', '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV_HTTP], 'host');
@@ -115,8 +169,21 @@ try {
   link = (await line(host, /CALL_LINK (\S+)/, 'CALL_LINK'))[1];
   console.log('host up at ' + HTTP + '; call link ' + link.replace(/#.*/, '#<host-id>.<secret>'));
   check(link.startsWith('http://' + RV_HTTP + '/v/' + VERSION + '/#'), 'the call link points at the rendezvous site, pinned to /v/' + VERSION + '/');
-  const learned = await waitFor(() => host.err.match(/server-reflexive address learned reflexive=(\S+)/), 'host srflx via STUN', 15000);
-  check(true, 'host learned its server-reflexive address over STUN through its own UDP socket: ' + learned[1]);
+  if (WORKER) {
+    await waitFor(() => host.err.includes('registered with the rendezvous'), 'host registered with the Worker', 30000);
+    check(true, 'host registered with its Durable Object (no STUN port on the Worker; srflx check skipped)');
+    // Leave the host idle long enough for its Durable Object to hibernate
+    // (about 10 s without events) and longer than the host allows silence
+    // (45 s; its own pings are answered by the
+    // runtime without waking it). Guests then wake it, and it must restore
+    // the host's connection from its WebSocket attachment.
+    const idle = Number(process.env.CASTCORDER_WORKER_IDLE_MS || 50000);
+    console.log('host idle for ' + idle + ' ms so its Durable Object can hibernate');
+    await sleep(idle);
+  } else {
+    const learned = await waitFor(() => host.err.match(/server-reflexive address learned reflexive=(\S+)/), 'host srflx via STUN', 15000);
+    check(true, 'host learned its server-reflexive address over STUN through its own UDP socket: ' + learned[1]);
+  }
 
   const A = await openGuest('A', HTTP + '/?name=A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV]);
   const B = await openGuest('B', link.replace('/#', '/?name=B#'));
@@ -134,7 +201,7 @@ try {
   check(cErr.includes('wrong call secret') && (await text(C, '#participant')) === '' && !(await C.isEnabled('#leave')),
     'a wrong call secret is rejected and the guest stops retrying: ' + cErr);
   await sleep(3000);
-  check((rv.err.match(/offer relayed/g) || []).length === 1, 'the rejected guest sent exactly one offer');
+  check((rvLog().match(/offer relayed/g) || []).length === 1, 'the rejected guest sent exactly one offer');
 
   for (const [n, p] of [['A', A], ['B', B]]) {
     await p.click('#join');
@@ -176,9 +243,15 @@ try {
 
   // The server saw only routing metadata.
   const secret = frag.split('.')[1];
-  check(rv.err.includes('offer relayed') && rv.err.includes('answer relayed'), 'the rendezvous relayed the offer and the answer');
-  check(!rv.err.includes(secret) && !rv.err.includes('v=0') && !rv.err.includes('a=candidate'),
+  check(rvLog().includes('offer relayed') && rvLog().includes('answer relayed'), 'the rendezvous relayed the offer and the answer');
+  check(!rvLog().includes(secret) && !rvLog().includes('v=0') && !rvLog().includes('a=candidate'),
     'the rendezvous log holds no call secret and no SDP');
+  if (WORKER) {
+    check(rvLog().includes('mailbox woke from hibernation'),
+      "the host's Durable Object hibernated while the host was idle and restored its connection on waking");
+    check((host.err.match(/registered with the rendezvous/g) || []).length === 1,
+      'the host kept its one connection throughout (its pings, answered by the runtime, kept it alive)');
+  }
   for (const n of ['A', 'B']) {
     const bad = logs[n].filter((l) => l.startsWith('[pageerror]'));
     check(bad.length === 0, 'guest ' + n + ': no page errors' + (bad.length ? ': ' + bad.slice(0, 3).join(' | ') : ''));
@@ -188,7 +261,7 @@ try {
   console.log('FAIL test did not complete: ' + String(e && e.stack || e));
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
-  for (const [, st] of procs) st.p.kill();
+  for (const [, st] of procs) killTree(st.p);
 }
 for (const [name, st] of procs) writeFileSync(join(RESULTS, 'system-' + name + '.log'), st.out + '\n--- stderr ---\n' + st.err);
 for (const n of Object.keys(logs)) writeFileSync(join(RESULTS, 'system-guest-' + n + '.log'), logs[n].join('\n'));

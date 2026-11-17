@@ -15,19 +15,22 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use castcorder_link::wire::{IceServer, ServerMsg, b64, code, to_json};
+use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
 use castcorder_link::{HostId, stun};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::mailbox::{ConnId, Limits, Mailbox, Out, Rate};
+use crate::mailbox::{
+    ConnId, Limits, MAILBOX_PARAM, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered,
+    query_param, relay_host,
+};
 use crate::turn::{TurnConfig, mint};
 use crate::usage::{LEDGER_FILE, Ledger, parse_metrics, save};
 
 /// Largest WebSocket frame accepted (a sealed SDP is a few KiB).
-pub const MAX_FRAME: usize = 64 * 1024;
+pub const MAX_FRAME: usize = crate::mailbox::MAX_FRAME;
 /// How often the server pings each connection.
 const PING: Duration = Duration::from_secs(20);
 
@@ -89,6 +92,15 @@ struct Hub {
     trust_forwarded_for: bool,
     turn: Option<TurnConfig>,
     meter: Option<Arc<Meter>>,
+    /// The mailbox's clock origin.
+    start: Instant,
+}
+
+impl Hub {
+    /// Milliseconds since the mailbox started, for [`Mailbox`].
+    fn now(&self) -> Millis {
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
 }
 
 /// The bound ports, and the future that serves them.
@@ -157,6 +169,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         trust_forwarded_for: cfg.trust_forwarded_for,
         turn: cfg.turn,
         meter: meter.clone(),
+        start: Instant::now(),
     });
     let app = Router::new()
         .route("/", get(index))
@@ -413,20 +426,13 @@ async fn ws(
 ) -> Response {
     let ip = client_ip(&hub, peer, &headers);
     let ice = ice_servers(&hub, &headers);
-    let host = relay_host(&uri);
+    let query = uri.query().unwrap_or_default();
+    let host = relay_host(query);
+    let scope = query_param(query, MAILBOX_PARAM).and_then(|h| HostId::parse(h).ok());
     upgrade
         .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice, host))
-}
-
-/// The host a connection asks relay credentials for: `/ws?host=<host id>`,
-/// sent by a host for itself and by a guest for the host it calls.
-fn relay_host(uri: &Uri) -> Option<HostId> {
-    uri.query()?
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("host="))
-        .and_then(|h| HostId::parse(h).ok())
+        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice, host, scope))
 }
 
 fn unix_now() -> u64 {
@@ -455,36 +461,23 @@ fn dispatch(senders: &HashMap<ConnId, mpsc::UnboundedSender<Message>>, outs: Vec
 
 /// A host that just proved its key (`registered` to `conn` among `outs`)
 /// gets relay credentials for itself in that frame.
-fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: Instant) {
+fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: Millis) {
     let Some(turn) = &hub.turn else {
         return;
     };
-    for o in outs {
-        if let Out::Send(
-            c,
-            ServerMsg::Registered {
-                ice_servers,
-                relay_error,
-                ..
-            },
-        ) = o
-            && *c == conn
-            && let Some(host) = mb.host_of(conn)
-        {
-            if let Some(why) = quota_refusal(hub, &host) {
-                info!(conn, host = %host.short(), registered = true, "relay credentials refused: over the relay budget");
-                *relay_error = Some(why);
-            } else if mb.mint_allowed(host, now) {
-                info!(conn, host = %host.short(), ttl_s = turn.ttl.as_secs(), registered = true, "relay credentials minted");
-                ice_servers.push(mint(turn, &host, unix_now()));
-            } else {
-                *relay_error = Some(format!(
-                    "{}: too many relay credentials for this host",
-                    code::RATE_LIMITED
-                ));
-            }
-        }
-    }
+    let Some(host) = mb.just_registered(conn, outs) else {
+        return;
+    };
+    let grant = mb
+        .relay(
+            conn,
+            host,
+            RelayAsk::Registered,
+            quota_refusal(hub, &host),
+            now,
+        )
+        .map(|()| mint(turn, &host, unix_now()));
+    fill_registered(outs, conn, grant);
 }
 
 async fn connection(
@@ -494,6 +487,7 @@ async fn connection(
     peer: SocketAddr,
     mut ice: Vec<IceServer>,
     host: Option<HostId>,
+    scope: Option<HostId>,
 ) {
     let mut nonce = [0u8; 32];
     if getrandom::fill(&mut nonce).is_err() {
@@ -504,31 +498,18 @@ async fn connection(
     let mut relay_error = None;
     let opened = {
         let mut g = hub.mailbox.lock().expect("mailbox lock");
-        let now = Instant::now();
-        let r = g.0.open(ip, peer, nonce, now);
+        let now = hub.now();
+        let r = g.0.open(ip, peer, nonce, scope, now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
             if let (Some(turn), Some(host)) = (&hub.turn, host) {
                 // Only for a host that is connected now: a link to a host
                 // that is gone (or never was) mints nothing. A host gets its
                 // own credentials once registered (see `registered`).
-                if !g.0.is_online(host) {
-                    info!(conn = id, host = %host.short(), "relay credentials refused: that host is not online");
-                    relay_error = Some(format!(
-                        "{}: that host is not online; no relay credentials",
-                        code::HOST_OFFLINE
-                    ));
-                } else if let Some(why) = quota_refusal(&hub, &host) {
-                    info!(conn = id, host = %host.short(), "relay credentials refused: over the relay budget");
-                    relay_error = Some(why);
-                } else if g.0.mint_allowed(host, now) {
-                    info!(conn = id, host = %host.short(), ttl_s = turn.ttl.as_secs(), "relay credentials minted");
-                    ice.push(mint(turn, &host, unix_now()));
-                } else {
-                    relay_error = Some(format!(
-                        "{}: too many relay credentials for this host",
-                        code::RATE_LIMITED
-                    ));
+                let over = quota_refusal(&hub, &host);
+                match g.0.relay(id, host, RelayAsk::Hello, over, now) {
+                    Ok(()) => ice.push(mint(turn, &host, unix_now())),
+                    Err(why) => relay_error = Some(why),
                 }
             }
         }
@@ -564,7 +545,7 @@ async fn connection(
                 match msg {
                     Some(Ok(Message::Text(t))) => {
                         let mut g = hub.mailbox.lock().expect("mailbox lock");
-                        let now = Instant::now();
+                        let now = hub.now();
                         let mut outs = g.0.receive(id, t.as_str(), now);
                         registered(&hub, &mut g.0, id, &mut outs, now);
                         dispatch(&g.1, outs);

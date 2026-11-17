@@ -11,6 +11,7 @@ default-members = [
   "crates/castcorder-core",
   "crates/castcorder-host",
   "crates/castcorder-link",
+  "crates/castcorder-mailbox",
   "crates/castcorder-port-capture",
   "crates/castcorder-port-clock",
   "crates/castcorder-port-disk",
@@ -22,7 +23,9 @@ default-members = [
   "crates/castcorder-transport",
 ]
 # Spikes are throwaway experiments with their own manifests; keep them out of the workspace.
-exclude = ["spikes"]
+# The Cloudflare Worker (worker/) is its own workspace: wasm32 only, its own
+# wasm-bindgen. `task worker:*` builds and lints it.
+exclude = ["spikes", "worker"]
 
 [workspace.package]
 version = "0.0.0"
@@ -63,6 +66,7 @@ serde = { version = "1", default-features = false, features = [
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 castcorder-transport = { path = "crates/castcorder-transport" }
 castcorder-link = { path = "crates/castcorder-link" }
+castcorder-mailbox = { path = "crates/castcorder-mailbox" }
 # Pinned as in the SFU spike (spikes/sfu/FINDINGS.md): str0m is pre-1.0. Keep it
 # behind castcorder-transport. Never enable its openssl backend.
 str0m = { version = "=0.25.0", default-features = false }

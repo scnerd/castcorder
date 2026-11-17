@@ -895,6 +895,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "castcorder-mailbox"
+version = "0.0.0"
+dependencies = [
+ "castcorder-link",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "castcorder-port-capture"
 version = "0.0.0"
 
@@ -942,6 +952,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "castcorder-link",
+ "castcorder-mailbox",
  "getrandom 0.3.4",
  "hmac",
  "serde",

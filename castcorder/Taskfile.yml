@@ -9,18 +9,22 @@ tasks:
     desc: Format all Rust code
     cmds:
       - cargo fmt --all
+      - cargo fmt --manifest-path worker/Cargo.toml
 
   fmt:check:
     desc: Check Rust formatting without rewriting files
     cmds:
       - cargo fmt --all --check
+      - cargo fmt --manifest-path worker/Cargo.toml --check
 
   clippy:
     desc: Clippy on native (with tests) and wasm32 for the browser-facing crates, warnings denied
     cmds:
       - cargo clippy --workspace --exclude castcorder-capture-gst --all-targets --locked -- -D warnings
       # The Tauri shell (castcorder-app --features desktop) needs the system webview: `task app:check`.
-      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer -p castcorder-link --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      - cargo clippy -p castcorder-protocol -p castcorder-core -p castcorder-transfer -p castcorder-link -p castcorder-mailbox --lib --target wasm32-unknown-unknown --locked -- -D warnings
+      # The Cloudflare Worker: its own workspace, wasm32 only.
+      - task: worker:clippy
       # The Browser Guest: its UI and worker binaries only exist on wasm32.
       - cargo clippy -p castcorder-client --lib --bins --target wasm32-unknown-unknown --locked -- -D warnings
 
@@ -34,6 +38,54 @@ tasks:
     desc: Tiers 1-2 - unit, simulation, and doc tests (no Docker)
     cmds:
       - cargo test --workspace --exclude castcorder-capture-gst --locked
+
+  worker:clippy:
+    desc: Clippy on the Cloudflare Worker (castcorder/worker, its own workspace) for wasm32, warnings denied
+    cmds:
+      - cargo clippy --manifest-path worker/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
+
+  worker:tools:
+    desc: Install the Worker's build tools inside the tree (worker-build in worker/.tools, wrangler in worker/node_modules)
+    dir: worker
+    cmds:
+      - cargo install worker-build --version {{.WORKER_BUILD_VERSION}} --locked --root .tools
+      - npm install --no-audit --no-fund
+    vars:
+      WORKER_BUILD_VERSION: 0.9.0
+    status:
+      - test -f .tools/bin/worker-build{{exeExt}}
+      - test -f node_modules/wrangler/bin/wrangler.js
+
+  worker:build:
+    desc: Build the Cloudflare Worker (worker-build --release into worker/build)
+    dir: worker
+    deps: [worker:tools]
+    cmds:
+      - ./.tools/bin/worker-build{{exeExt}} --release
+
+  worker:assets:
+    desc: Build the client (trunk) and stage it as the Worker's static assets at worker/assets/v/<version>/
+    summary: |
+      Other build dirs: task worker:assets CLIENT_DIST=dist-agent
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+      CLIENT_VERSION: '{{.CLIENT_VERSION | default "0.0.0"}}'
+    cmds:
+      - cd crates/castcorder-client && trunk build --release --dist {{.CLIENT_DIST}}
+      - node worker/stage-assets.mjs crates/castcorder-client/{{.CLIENT_DIST}} {{.CLIENT_VERSION}}
+
+  worker:dev:
+    desc: Run the Worker locally under wrangler dev (client at /v/0.0.0/, rendezvous at /ws; no Cloudflare account needed)
+    summary: |
+      Builds the client and the Worker, then `wrangler dev` on 127.0.0.1:8787
+      (extra wrangler arguments after --). Point a host at it with
+      `castcorder-host --rendezvous http://127.0.0.1:8787`.
+      Other build dirs: task worker:dev CLIENT_DIST=dist-agent
+    cmds:
+      - task: worker:assets
+        vars: { CLIENT_DIST: "{{.CLIENT_DIST}}" }
+      - task: worker:build
+      - cd worker && node node_modules/wrangler/bin/wrangler.js dev --ip 127.0.0.1 {{.CLI_ARGS}}
 
   check:
     desc: Formatting, clippy, and tiers 1-2 tests; no Docker needed
