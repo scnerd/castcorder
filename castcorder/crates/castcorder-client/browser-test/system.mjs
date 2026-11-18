@@ -228,7 +228,7 @@ async function relayPhase() {
   check(exp0 > 0 && exp0 - Date.now() / 1000 <= RELAY_TTL + 5, 'D got relay credentials from the Worker lasting about ' + RELAY_TTL + ' s (expires ' + exp0 + ')');
   const before = counted();
   const RENEWED = 'relay credentials renewed; asked the host to restart ICE';
-  await waitFor(() => logs.D.some((l) => l.includes(RENEWED)), 'D renewing its relay credentials', RELAY_TTL * 1000, 250);
+  await waitFor(() => logs.D.some((l) => l.includes(RENEWED)), 'D renewing its relay credentials', (RELAY_TTL + 10) * 1000, 250);
   const at = logs.D.findIndex((l) => l.includes(RENEWED));
   check(Date.now() / 1000 < exp0, 'D renewed its relay credentials before they expired');
   await waitFor(() => h.err.includes('guest renewed its relay credentials; restarting ICE'), 'the host restarting ICE for D', 10000);

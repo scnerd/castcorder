@@ -268,7 +268,7 @@ async fn renew_relay(
     mut expires: u64,
     current: impl Fn() -> bool + 'static,
 ) {
-    use crate::signal::{MIN_RENEW_MS, renew_after_ms};
+    use crate::signal::{RENEW_RETRY_MS, renew_after_ms};
     let mut wait = renew_after_ms(expires, js_sys::Date::now());
     info!(
         expires,
@@ -295,7 +295,7 @@ async fn renew_relay(
             Ok((e, servers)) => {
                 if let Err(err) = call(&pc, "setConfiguration", &[&rtc_config(&servers, false)]) {
                     warn!(error = %describe(&err), "relay credentials not applied; trying again");
-                    wait = MIN_RENEW_MS;
+                    wait = RENEW_RETRY_MS;
                     continue;
                 }
                 expires = e;
@@ -308,9 +308,11 @@ async fn renew_relay(
                 );
             }
             Err(why) => {
-                // Keep the old ones; they may still have life left.
+                // Keep the old ones; they may still have life left. The host
+                // renews its own at the same point of the same TTL by
+                // reconnecting, so "host offline" here is usually brief.
                 warn!(reason = %why, expires, "relay credentials not renewed; trying again");
-                wait = MIN_RENEW_MS;
+                wait = RENEW_RETRY_MS;
             }
         }
     }

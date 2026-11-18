@@ -78,8 +78,13 @@ pub fn renew_after_ms(expires: u64, now_ms: f64) -> f64 {
     (left * 0.8).max(MIN_RENEW_MS)
 }
 
-/// The shortest wait before renewing relay credentials, and between tries.
+/// The shortest wait before renewing relay credentials.
 pub const MIN_RENEW_MS: f64 = 10_000.0;
+
+/// How soon to try again after a failed renewal. The host renews its own
+/// credentials at the same point of the same lifetime, by reconnecting to
+/// the rendezvous, so a guest renewing then may briefly find it offline.
+pub const RENEW_RETRY_MS: f64 = 3_000.0;
 
 #[cfg(test)]
 mod tests {
