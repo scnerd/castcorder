@@ -22,27 +22,45 @@ pub(super) fn first_audio(s: &MediaStream) -> Option<MediaStreamTrack> {
 }
 
 /// Open the camera for the live stream (its own request, so a refused or
-/// missing camera never costs the microphone).
+/// missing camera never costs the microphone): the picked camera
+/// ([`devices`]), else the default one; a picked camera that is gone falls
+/// back to the default.
 pub(super) async fn open_camera() -> Result<MediaStream, JsValue> {
     let md = window().navigator().media_devices()?;
-    let c = MediaStreamConstraints::new();
-    c.set_audio(&JsValue::FALSE);
-    let video = object();
-    set(&video, "width", 640);
-    set(&video, "height", 360);
-    set(&video, "frameRate", 30);
-    c.set_video(&video);
-    Ok(JsFuture::from(md.get_user_media_with_constraints(&c)?)
-        .await?
-        .unchecked_into())
+    let open = |device: Option<&str>| -> Result<Promise, JsValue> {
+        let c = MediaStreamConstraints::new();
+        c.set_audio(&JsValue::FALSE);
+        let video = object();
+        set(&video, "width", 640);
+        set(&video, "height", 360);
+        set(&video, "frameRate", 30);
+        if let Some(id) = device {
+            set(&video, "deviceId", devices::exact(id));
+        }
+        c.set_video(&video);
+        md.get_user_media_with_constraints(&c)
+    };
+    let picked = devices::picked(devices::Kind::Camera);
+    if let Some(id) = picked.as_deref() {
+        match JsFuture::from(open(Some(id))?).await {
+            Ok(s) => return Ok(s.unchecked_into()),
+            Err(e) if devices::device_gone(&e) => {
+                warn!(error = %describe(&e), "the picked camera is gone; opening the default camera");
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(JsFuture::from(open(None)?).await?.unchecked_into())
 }
 
 pub(super) fn first_video(s: &MediaStream) -> Option<MediaStreamTrack> {
     s.get_video_tracks().get(0).dyn_into().ok()
 }
 
-/// Open the raw and the processed microphone.
-pub(super) async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> {
+/// The raw microphone's constraints: no echo cancellation, noise suppression
+/// or gain, stereo if offered; on `device` if given (with none, exactly what
+/// it always was: the browser's default microphone).
+pub(super) fn raw_constraints(device: Option<&str>) -> JsValue {
     let raw_c = object();
     set(&raw_c, "echoCancellation", false);
     set(&raw_c, "noiseSuppression", false);
@@ -50,7 +68,28 @@ pub(super) async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> 
     let ideal2 = object();
     set(&ideal2, "ideal", 2);
     set(&raw_c, "channelCount", ideal2);
-    let raw = get_user_media(&raw_c, None).await?;
+    if let Some(id) = device {
+        set(&raw_c, "deviceId", devices::exact(id));
+    }
+    raw_c
+}
+
+/// Open the raw and the processed microphone: the picked microphone
+/// ([`devices`]), else the default one; a picked microphone that is gone
+/// falls back to the default.
+pub(super) async fn open_media() -> Result<(MediaStream, MediaStream), JsValue> {
+    let picked = devices::picked(devices::Kind::Mic);
+    let raw = match picked.as_deref() {
+        Some(id) => match get_user_media(&raw_constraints(Some(id)), None).await {
+            Ok(s) => s,
+            Err(e) if devices::device_gone(&e) => {
+                warn!(error = %describe(&e), "the picked microphone is gone; opening the default microphone");
+                get_user_media(&raw_constraints(None), None).await?
+            }
+            Err(e) => return Err(e),
+        },
+        None => get_user_media(&raw_constraints(None), None).await?,
+    };
     let raw_track = first_audio(&raw).ok_or("raw stream has no audio track")?;
     let device_id = get(&raw_track.get_settings(), "deviceId");
 
@@ -265,18 +304,4 @@ pub(super) fn send_encodings() -> Option<Array> {
     set(&l, "maxBitrate", 150_000);
     set(&l, "scaleResolutionDownBy", 2);
     Some(Array::of2(&h, &l))
-}
-
-/// A JS clone() of `track`: a second track on the same source, stopped
-/// independently. Kept in the engine so leave stops it.
-pub(super) fn clone_track(
-    track: &MediaStreamTrack,
-    epoch: u32,
-) -> Result<MediaStreamTrack, JsValue> {
-    if stale(epoch) {
-        return Err("left the call".into());
-    }
-    let clone: MediaStreamTrack = call(track, "clone", &[])?.unchecked_into();
-    with_engine(|e| e.sources.push(handle(&clone)));
-    Ok(clone)
 }

@@ -50,6 +50,7 @@
 mod background;
 mod capture;
 mod data;
+mod devices;
 mod home;
 mod join;
 mod lifecycle;
@@ -160,6 +161,9 @@ struct Engine {
     camera: Option<MediaStream>,
     /// The video transceiver's RTCRtpSender on the current connection.
     video_sender: Option<JsValue>,
+    /// The audio transceiver's RTCRtpSender on the current connection (a
+    /// microphone switch swaps its track, see [`devices`]).
+    audio_sender: Option<JsValue>,
     /// The camera is being opened or closed.
     camera_busy: bool,
     last_camera_restart: f64,
@@ -257,8 +261,9 @@ thread_local! {
     static DOCK_FLOOR: RefCell<crate::levels::NoiseFloor> = RefCell::new(Default::default());
     /// What the worker said at `ready`: is MediaStreamTrackProcessor exposed there?
     static MSTP_IN_WORKER: Cell<Option<bool>> = const { Cell::new(None) };
-    /// The capture attempt waiting for the worker's `source-ok`/`source-failed`.
-    static SOURCE_ACK: RefCell<Option<(f64, js_sys::Function)>> = const { RefCell::new(None) };
+    /// The capture attempts waiting for their worker's `source-ok` or
+    /// `source-failed`, by attempt id (the storage worker and backup workers).
+    static SOURCE_ACK: RefCell<Vec<(f64, js_sys::Function)>> = const { RefCell::new(Vec::new()) };
     static SOURCE_ATTEMPT: Cell<f64> = const { Cell::new(0.0) };
     /// Bumped by every join and leave: async work of an older join stops.
     static JOIN_EPOCH: Cell<u32> = const { Cell::new(0) };
@@ -424,6 +429,8 @@ struct Ui {
     /// The last `WAVE_LEN` microphone levels above the noise floor (0 to 1),
     /// oldest first: the dock waveform.
     levels: RwSignal<VecDeque<f64>>,
+    /// The devices this browser lists, and which are picked (see [`devices`]).
+    devices: devices::DeviceUi,
 }
 
 /// How many level readings the dock waveform shows.
@@ -507,20 +514,7 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 post_worker(&worker_cmd("list"), None);
                 background::worker_ready(ui);
             }
-            "source-ok" | "source-failed" => {
-                let id = num(&d, "id");
-                let pending = SOURCE_ACK.with(|a| {
-                    let mut a = a.borrow_mut();
-                    if a.as_ref().is_some_and(|(i, _)| *i == id) {
-                        a.take()
-                    } else {
-                        None
-                    }
-                });
-                if let Some((_, resolve)) = pending {
-                    let _ = resolve.call1(&JsValue::NULL, &d);
-                }
-            }
+            "source-ok" | "source-failed" => resolve_source(&d),
             "level" => {
                 let peak = num(&d, "peak");
                 ui.level.set(peak);

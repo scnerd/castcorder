@@ -5,9 +5,79 @@ use super::*;
 /// How long a capture attempt may take to deliver its first audio.
 pub(super) const SOURCE_TIMEOUT_MS: i32 = 4000;
 
-/// Post a source command to the worker and wait for its `source-ok` (Ok) or
-/// `source-failed`/timeout (Err).
+/// Where a capture attempt delivers its audio: the storage worker (the main
+/// microphone, source `mic`) or a backup microphone's own worker (its source
+/// id, see [`super::devices`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum To {
+    Main,
+    Backup(String),
+}
+
+impl To {
+    fn worker(&self) -> Option<Worker> {
+        match self {
+            To::Main => with_engine(|e| e.worker.clone()),
+            To::Backup(source) => super::devices::backup_worker(source),
+        }
+    }
+
+    fn post(&self, msg: &JsValue) {
+        if let Some(w) = self.worker()
+            && let Err(err) = w.post_message(msg)
+        {
+            warn!(error = %describe(&err), "post to worker failed");
+        }
+    }
+
+    /// A JS clone() of `track` (see [`clone_track`]), kept for this target so
+    /// leave (or removing the backup) stops it.
+    fn clone_track(
+        &self,
+        track: &MediaStreamTrack,
+        epoch: u32,
+    ) -> Result<MediaStreamTrack, String> {
+        if stale(epoch) {
+            return Err("left the call".into());
+        }
+        let clone: MediaStreamTrack = call(track, "clone", &[])
+            .map_err(|e| describe(&e))?
+            .unchecked_into();
+        match self {
+            To::Main => with_engine(|e| e.sources.push(handle(&clone))),
+            To::Backup(source) => super::devices::keep_clone(source, &clone),
+        }
+        Ok(clone)
+    }
+}
+
+/// A worker answered a capture attempt (`source-ok` or `source-failed`).
+pub(super) fn resolve_source(d: &JsValue) {
+    let id = num(d, "id");
+    let pending = SOURCE_ACK.with(|a| {
+        let mut a = a.borrow_mut();
+        let i = a.iter().position(|(i, _)| *i == id)?;
+        Some(a.remove(i))
+    });
+    if let Some((_, resolve)) = pending {
+        let _ = resolve.call1(&JsValue::NULL, d);
+    }
+}
+
+/// Every capture attempt still waiting gives up (leave).
+pub(super) fn fail_pending_sources(why: &str) {
+    for (_, resolve) in SOURCE_ACK.with(|a| std::mem::take(&mut *a.borrow_mut())) {
+        let o = object();
+        set(&o, "type", "source-failed");
+        set(&o, "message", why);
+        let _ = resolve.call1(&JsValue::NULL, &o);
+    }
+}
+
+/// Post a source command to the target's worker and wait for its `source-ok`
+/// (Ok) or `source-failed`/timeout (Err).
 pub(super) async fn try_source(
+    to: &To,
     msg: JsValue,
     transfer: Option<&Array>,
     timeout_ms: i32,
@@ -16,45 +86,36 @@ pub(super) async fn try_source(
     SOURCE_ATTEMPT.set(id);
     set(&msg, "id", id);
     let wait = Promise::new(&mut |resolve, _| {
-        SOURCE_ACK.with(|a| *a.borrow_mut() = Some((id, resolve.clone())));
+        SOURCE_ACK.with(|a| a.borrow_mut().push((id, resolve.clone())));
         let timeout = Closure::once_into_js(move || {
-            let pending = SOURCE_ACK.with(|a| {
-                let mut a = a.borrow_mut();
-                if a.as_ref().is_some_and(|(i, _)| *i == id) {
-                    a.take()
-                } else {
-                    None
-                }
-            });
-            if let Some((_, resolve)) = pending {
-                let o = object();
-                set(&o, "type", "source-failed");
-                set(&o, "message", "no audio within the timeout");
-                let _ = resolve.call1(&JsValue::NULL, &o);
-            }
+            let o = object();
+            set(&o, "type", "source-failed");
+            set(&o, "id", id);
+            set(&o, "message", "no audio within the timeout");
+            resolve_source(&o);
         });
         let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(
             timeout.unchecked_ref(),
             timeout_ms,
         );
     });
-    let posted = with_engine(|e| {
-        let w = e.worker.as_ref().ok_or("no storage worker")?;
-        match transfer {
+    let posted = match to.worker() {
+        Some(w) => match transfer {
             Some(t) => w.post_message_with_transfer(&msg, t),
             None => w.post_message(&msg),
         }
-        .map_err(|err| describe(&err))
-    });
+        .map_err(|err| describe(&err)),
+        None => Err("no worker".to_string()),
+    };
     if let Err(err) = posted {
-        SOURCE_ACK.with(|a| a.borrow_mut().take());
-        return Err(err.to_string());
+        SOURCE_ACK.with(|a| a.borrow_mut().retain(|(i, _)| *i != id));
+        return Err(err);
     }
     let r = JsFuture::from(wait).await.unwrap_or(JsValue::UNDEFINED);
     if string(&r, "type") == "source-ok" {
         Ok(())
     } else {
-        post_worker(&worker_cmd("close-source"), None);
+        to.post(&worker_cmd("close-source"));
         Err(string(&r, "message"))
     }
 }
@@ -62,23 +123,25 @@ pub(super) async fn try_source(
 /// Path (a): MediaStreamTrackProcessor on the page; its readable goes to the
 /// worker (Chromium cannot transfer the track itself).
 pub(super) async fn capture_mstp_window(
+    to: &To,
     track: &MediaStreamTrack,
     epoch: u32,
 ) -> Result<(), String> {
     let ctor: js_sys::Function = get(&window(), "MediaStreamTrackProcessor")
         .dyn_into()
         .map_err(|_| "MediaStreamTrackProcessor is not exposed on the page".to_string())?;
-    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
+    let clone = to.clone_track(track, epoch)?;
     let init = crate::worker::mstp_init(&clone);
     let processor = Reflect::construct(&ctor, &Array::of1(&init)).map_err(|e| describe(&e))?;
     let readable = get(&processor, "readable");
     let msg = worker_cmd("source");
     set(&msg, "readable", &readable);
-    try_source(msg, Some(&Array::of1(&readable)), SOURCE_TIMEOUT_MS).await
+    try_source(to, msg, Some(&Array::of1(&readable)), SOURCE_TIMEOUT_MS).await
 }
 
 /// Path (b): MediaStreamTrackProcessor in the worker, the track transferred.
 pub(super) async fn capture_mstp_worker(
+    to: &To,
     track: &MediaStreamTrack,
     epoch: u32,
 ) -> Result<(), String> {
@@ -89,11 +152,11 @@ pub(super) async fn capture_mstp_worker(
         }
         None => return Err("the storage worker has not reported its features".into()),
     }
-    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
+    let clone = to.clone_track(track, epoch)?;
     let msg = worker_cmd("source-track");
     set(&msg, "track", &clone);
     // Throws DataCloneError where MediaStreamTrack is not transferable.
-    try_source(msg, Some(&Array::of1(&clone)), SOURCE_TIMEOUT_MS).await
+    try_source(to, msg, Some(&Array::of1(&clone)), SOURCE_TIMEOUT_MS).await
 }
 
 /// The capture worklet module (copied into dist/ by trunk).
@@ -105,6 +168,7 @@ pub(super) const WORKLET_URL: &str = "./capture-worklet.js";
 /// non-silent (-80 dBFS DC): Chrome renders a silent output slower than real
 /// time (spike FINDINGS.md).
 pub(super) async fn capture_worklet(
+    to: &To,
     track: &MediaStreamTrack,
     ui: Ui,
     epoch: u32,
@@ -112,7 +176,7 @@ pub(super) async fn capture_worklet(
     let settings = track.get_settings();
     let track_rate = num(&settings, "sampleRate");
     let channels = (num(&settings, "channelCount") as u32).clamp(1, 2);
-    let clone = clone_track(track, epoch).map_err(|e| describe(&e))?;
+    let clone = to.clone_track(track, epoch)?;
     let stream = MediaStream::new_with_tracks(&Array::of1(&clone)).map_err(|e| describe(&e))?;
     let new_ctx = |rate: Option<f64>| -> Result<AudioContext, JsValue> {
         let opts = AudioContextOptions::new();
@@ -138,8 +202,12 @@ pub(super) async fn capture_worklet(
             }
         }
     };
-    // A fresh context per join (and per microphone restart); leave closes it.
-    with_engine(|e| e.audio = Some(ctx.clone()));
+    // A fresh context per join (and per microphone restart or backup);
+    // leave closes it.
+    match to {
+        To::Main => with_engine(|e| e.audio = Some(ctx.clone())),
+        To::Backup(source) => super::devices::keep_audio(source, &ctx, None),
+    }
     let build = async {
         // Not awaited: a context that autoplay keeps suspended would hang here.
         quiet(ctx.resume(), "AudioContext resume");
@@ -177,9 +245,12 @@ pub(super) async fn capture_worklet(
         return Err("left the call".into());
     }
     let (node, port) = built.map_err(|e| describe(&e))?;
-    with_engine(|e| e.worklet = Some(node));
+    match to {
+        To::Main => with_engine(|e| e.worklet = Some(node)),
+        To::Backup(source) => super::devices::keep_audio(source, &ctx, Some(node)),
+    }
     let ctx_rate = f64::from(ctx.sample_rate());
-    info!(track_rate, context_rate = ctx_rate, channels, state = ?ctx.state(), "capture worklet built");
+    info!(track_rate, context_rate = ctx_rate, channels, state = ?ctx.state(), target = ?to, "capture worklet built");
     let suspended = ctx.state() == AudioContextState::Suspended;
     if suspended {
         // Autoplay policy: the next click on the page resumes it (the one
@@ -197,7 +268,40 @@ pub(super) async fn capture_worklet(
     } else {
         SOURCE_TIMEOUT_MS
     };
-    try_source(msg, Some(&Array::of1(&port)), timeout).await
+    try_source(to, msg, Some(&Array::of1(&port)), timeout).await
+}
+
+/// Try each capture path in turn for `track`, delivering to `to`: the path
+/// that delivers audio, or why none did.
+pub(super) async fn capture_paths(
+    ui: Ui,
+    to: &To,
+    track: &MediaStreamTrack,
+    epoch: u32,
+) -> Result<&'static str, String> {
+    let ctx = with_engine(|e| e.ctx.clone());
+    let mut failures = Vec::new();
+    for path in ["mstp-window", "mstp-worker", "worklet"] {
+        if stale(epoch) {
+            return Err("left the call".into());
+        }
+        let r = match path {
+            "mstp-window" => capture_mstp_window(to, track, epoch).await,
+            "mstp-worker" => capture_mstp_worker(to, track, epoch).await,
+            _ => capture_worklet(to, track, ui, epoch).await,
+        };
+        if stale(epoch) {
+            return Err("left the call".into());
+        }
+        match r {
+            Ok(()) => return Ok(path),
+            Err(e) => {
+                info!(call = %ctx.call, device = %ctx.device, capture_path = path, target = ?to, reason = %e, "capture path unavailable");
+                failures.push(format!("{path}: {e}"));
+            }
+        }
+    }
+    Err(failures.join("; "))
 }
 
 /// Choose and start the recording capture path, logging the choice with the
@@ -214,28 +318,10 @@ pub(super) async fn start_capture(ui: Ui, raw: MediaStream, epoch: u32) {
     let mut failures = Vec::new();
     let mut chosen = "none";
     if let Some(track) = track.as_ref() {
-        for path in ["mstp-window", "mstp-worker", "worklet"] {
-            if stale(epoch) {
-                return;
-            }
-            let r = match path {
-                "mstp-window" => capture_mstp_window(track, epoch).await,
-                "mstp-worker" => capture_mstp_worker(track, epoch).await,
-                _ => capture_worklet(track, ui, epoch).await,
-            };
-            if stale(epoch) {
-                return;
-            }
-            match r {
-                Ok(()) => {
-                    chosen = path;
-                    break;
-                }
-                Err(e) => {
-                    info!(call = %ctx.call, device = %ctx.device, capture_path = path, reason = %e, "capture path unavailable");
-                    failures.push(format!("{path}: {e}"));
-                }
-            }
+        match capture_paths(ui, &To::Main, track, epoch).await {
+            Ok(path) => chosen = path,
+            Err(_) if stale(epoch) => return,
+            Err(e) => failures.push(e),
         }
     } else {
         failures.push("the raw stream has no audio track".into());

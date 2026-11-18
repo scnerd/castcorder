@@ -197,6 +197,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                         t2_us,
                         t3_us: e.rx_us as i64,
                     });
+                    super::devices::clock_sample(&o);
                     samples.push(o);
                 }
                 Some(other) => warn!(response = ?other, "clock ping refused"),
@@ -367,39 +368,37 @@ pub(super) fn apply_status(ui: Ui, s: TakeStatus) -> Option<TakeId> {
 }
 
 pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
-    let (ctx, participant, raw, capture) = with_engine(|e| {
-        e.recording = Some(take);
+    with_engine(|e| {
         e.video_take = video.then_some(take);
         e.acks.retain(|a| a.take == take);
-        (
-            e.ctx.clone(),
-            e.participant,
-            e.raw.clone(),
-            e.capture.clone(),
-        )
     });
     if video {
         start_video(ui, take);
     } else {
         ui.video_rec.set(String::new());
     }
-    if capture.as_deref() == Some("none") {
-        warn!(call = %ctx.call, device = %ctx.device, take = take.0, "RECORDING UNAVAILABLE: take started but this guest cannot record a local track");
-        ui.recording
-            .set(format!("not recording take {} (unsupported here)", take.0));
-        ack_source(take, "mic", SourceKind::Audio, SourceState::Unavailable);
-        return;
-    }
-    let name = track_name(take, js_sys::Date::now() as u64);
-    info!(call = %ctx.call, device = %ctx.device, take = take.0, track = %name, "take started: recording raw mic");
+    start_mic_track(ui, take);
+    super::devices::start_backups(ui, take);
+}
+
+/// What a track's sidecar says about where it came from: the take, this
+/// device and participant, the source and the device it was recorded from
+/// (`sourceLabel`, so each segment of a source names its microphone).
+pub(super) fn track_meta(
+    ui: Ui,
+    take: TakeId,
+    source: &str,
+    track: Option<&MediaStreamTrack>,
+) -> JsValue {
+    let (ctx, participant) = with_engine(|e| (e.ctx.clone(), e.participant));
     let meta = object();
     set(&meta, "take", take.0);
     set(&meta, "participant", participant.map(|p| p.0 as f64));
     set(&meta, "device", ctx.device.as_str());
     set(&meta, "displayName", ctx.name.as_str());
     set(&meta, "call", ctx.call.as_str());
-    set(&meta, "source", "mic");
-    if let Some(t) = raw.as_ref().and_then(first_audio) {
+    set(&meta, "source", source);
+    if let Some(t) = track {
         set(&meta, "sourceLabel", t.label());
         set(&meta, "rawTrackSettings", t.get_settings());
     }
@@ -414,13 +413,41 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
     if let Some(us) = ui.take_started_us.get_untracked() {
         set(&meta, "takeStartedHostUs", us as f64);
     }
+    meta
+}
+
+/// The worker's `start` for one track: its name, sidecar and call.
+pub(super) fn start_msg(name: &str, meta: JsValue) -> JsValue {
+    let ctx = with_engine(|e| e.ctx.clone());
     let msg = worker_cmd("start");
-    set(&msg, "name", name.as_str());
+    set(&msg, "name", name);
     set(&msg, "meta", meta);
     // As on `outbox`: the worker may not know the call yet (cast-83e).
     set(&msg, "call", ctx.call.as_str());
     set(&msg, "legacy", ctx.host_scope.as_str());
-    post_worker(&msg, None);
+    msg
+}
+
+/// Start the main microphone's track for `take` (a new segment when the take
+/// already records: after a reopen or a microphone switch).
+pub(super) fn start_mic_track(ui: Ui, take: TakeId) {
+    let (ctx, raw, capture) = with_engine(|e| {
+        e.recording = Some(take);
+        (e.ctx.clone(), e.raw.clone(), e.capture.clone())
+    });
+    if capture.as_deref() == Some("none") {
+        warn!(call = %ctx.call, device = %ctx.device, take = take.0, "RECORDING UNAVAILABLE: take started but this guest cannot record a local track");
+        ui.recording
+            .set(format!("not recording take {} (unsupported here)", take.0));
+        ack_source(take, "mic", SourceKind::Audio, SourceState::Unavailable);
+        return;
+    }
+    let name = track_name(take, js_sys::Date::now() as u64);
+    let track = raw.as_ref().and_then(first_audio);
+    info!(call = %ctx.call, device = %ctx.device, take = take.0, track = %name,
+        microphone = %track.as_ref().map(|t| t.label()).unwrap_or_default(), "take started: recording raw mic");
+    let meta = track_meta(ui, take, "mic", track.as_ref());
+    post_worker(&start_msg(&name, meta), None);
     ui.recording.set(format!("starting {name}"));
 }
 
@@ -432,6 +459,7 @@ pub(super) fn stop_track(take: TakeId) {
     });
     info!(call = %ctx.call, device = %ctx.device, take = take.0, "take stopped: closing track");
     end_video_take();
+    super::devices::stop_backups();
     if with_engine(|e| e.capture.as_deref() == Some("none")) {
         // No track to close: close the log file instead, so the host gets
         // this guest's log (and why it recorded nothing) now.
@@ -580,6 +608,10 @@ pub(super) fn on_track(ev: RtcTrackEvent) {
     };
     let el: web_sys::HtmlMediaElement = el.unchecked_into();
     el.set_autoplay(true);
+    if !video {
+        // Through the picked speakers, where the browser can route it.
+        super::devices::apply_sink(&el);
+    }
     if video {
         // Its sound plays through the participant's <audio>.
         el.set_muted(true);

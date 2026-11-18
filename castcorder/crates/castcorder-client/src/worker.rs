@@ -42,6 +42,13 @@
 //! `source-ok {id, path}`, `source-failed {id, path, message}`, `level {peak}`,
 //! `recording {name}`, `stats {name, frames, seconds}`, `stopped {name, frames}`,
 //! `list {tracks}`, `error {message}`.
+//!
+//! A worker named `backup` (`WorkerOptions.name`) records one backup
+//! microphone (cast-94c) beside the storage worker: it reads its source and
+//! writes its tracks only. It writes no log files (its lines go to the page as
+//! `log-text {text}`, which hands them to the storage worker), never lists or
+//! scans the store and never prepares the outbox: the storage worker offers
+//! its finished tracks like any other.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -489,6 +496,8 @@ thread_local! {
     static HELD: RefCell<Option<(Vec<Held>, u64)>> = const { RefCell::new(None) };
     /// The clock estimate against the host (pings from the page).
     static CLOCK: RefCell<ClockState> = RefCell::new(ClockState::default());
+    /// This is a backup microphone's worker (see the module docs).
+    static BACKUP: Cell<bool> = const { Cell::new(false) };
 }
 
 /// When audio reached this worker: device time (us, as in timing metadata)
@@ -1104,6 +1113,10 @@ async fn stop() -> Result<(), JsValue> {
     set(&o, "name", a.name.as_str());
     set(&o, "frames", a.frames as f64);
     post(&o);
+    if BACKUP.get() {
+        // The storage worker lists and offers it (the page asks it to).
+        return Ok(());
+    }
     list().await?;
     // Close the log file: closed files may be offered, and this take is over.
     crate::logfiles::flush(true).await?;
@@ -1439,8 +1452,21 @@ fn relist_if_busy(any_busy: bool) {
 /// Entry point of the worker binary.
 pub fn main() {
     console_error_panic_hook::set_once();
-    crate::logging::init("worker");
-    let every = Closure::<dyn FnMut()>::new(|| {
+    // Read before anything writes a log file (see the module docs).
+    let backup = get(&js_sys::global(), "name").as_string().as_deref() == Some("backup");
+    BACKUP.set(backup);
+    crate::logging::init(if backup { "worker-backup" } else { "worker" });
+    let every = Closure::<dyn FnMut()>::new(move || {
+        if backup {
+            let text = crate::logging::take_text();
+            if !text.is_empty() {
+                let o = object();
+                set(&o, "type", "log-text");
+                set(&o, "text", text);
+                post(&o);
+            }
+            return;
+        }
         spawn_local(async {
             if let Err(e) = crate::logfiles::flush(false).await {
                 warn!(error = %describe(&e), "log files not written");
@@ -1458,6 +1484,12 @@ pub fn main() {
         let cmd = string(&msg, "cmd");
         spawn_local(async move {
             let r = match cmd.as_str() {
+                "list" | "log" | "log-context" | "log-rotate" | "outbox" | "xfer-in"
+                | "xfer-pull" | "xfer-reset" | "vstart" | "vstarted" | "vchunk" | "vstop"
+                    if BACKUP.get() =>
+                {
+                    Err(JsValue::from_str(&format!("{cmd}: not in a backup worker")))
+                }
                 "source" => {
                     let readable = get(&msg, "readable");
                     run_reader(Ok(readable), None, num(&msg, "id"), "mstp-window").await;
