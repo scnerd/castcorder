@@ -56,6 +56,8 @@ pub struct TestGuest<S, C> {
     /// The layer (rid) of each of those requests, in order.
     pub keyframe_layers: Vec<Option<Rid>>,
     pub offers_received: usize,
+    /// The SDP of the latest renegotiation offer from the host.
+    pub last_offer: Option<String>,
     pub host_heartbeats: usize,
     pub control_in: Vec<Vec<u8>>,
     pub data_in: Vec<Vec<u8>>,
@@ -141,6 +143,7 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
             keyframe_requests: 0,
             keyframe_layers: vec![],
             offers_received: 0,
+            last_offer: None,
             host_heartbeats: 0,
             control_in: vec![],
             data_in: vec![],
@@ -252,6 +255,7 @@ impl<S: DatagramSocket, C: Clock> TestGuest<S, C> {
                     Some(Signal::Hb) => self.host_heartbeats += 1,
                     Some(Signal::Offer { sdp }) => {
                         self.offers_received += 1;
+                        self.last_offer = Some(sdp.clone());
                         let offer = SdpOffer::from_sdp_string(&sdp).unwrap();
                         let answer = self.rtc.sdp_api().accept_offer(offer).unwrap();
                         let json = Signal::Answer {

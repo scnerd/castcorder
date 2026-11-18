@@ -11,6 +11,10 @@
 // STUN; B loads the page from the rendezvous and joins through it; C is
 // rejected; B hears A; a take records and B's track syncs into the host's
 // library; the rendezvous log never contains the call secret or any SDP.
+// Then B leaves mid-take and its page delivers the take over a sync-only
+// connection, signalled through the mailbox (background sync), and a browser
+// profile and a second host install link to the host's person with link
+// requests through the mailbox (lib/personlink.mjs).
 //
 // Every port is picked by the OS (none collide with a running `task host`).
 // CARGO_TARGET_DIR and CASTCORDER_DIST select other build dirs.
@@ -25,7 +29,12 @@
 // STUN_URLS naming coturn): a second host with --relay-only and a guest D with
 // ?iceTransportPolicy=relay must connect through relayed candidates minted by
 // the Worker, and that host must learn its server-reflexive address from the
-// STUN server the hello names (it has no STUN port). Without Docker that
+// STUN server the hello names (it has no STUN port). That phase runs its own
+// Worker minting credentials that last RELAY_TTL (30 s) seconds: D must renew
+// its own before they expire (cast-lxt.11) without dropping the call, and
+// gather a relay candidate after they would have expired. The Worker mode
+// also runs the rejoin checks (status queries, lib/rejoin.mjs) through the
+// Worker (cast-lxt.8). Without Docker the relay
 // phase is skipped with a message, except under CASTCORDER_CI, where it
 // fails. Build it first (task worker:build); task test:system:worker does both.
 // Everything printed is ASCII. Logs go to browser-test/test-results/system-*.
@@ -38,7 +47,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
-import { callDir } from './lib/helpers.mjs';
+import { callDir, check, checks } from './lib/helpers.mjs';
+import { ctx } from './lib/ctx.mjs';
+import { rejoinChecks } from './lib/rejoin.mjs';
+import { personLinkChecks } from './lib/personlink.mjs';
 import { COTURN_IMAGE, dockerProblem, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -68,6 +80,8 @@ writeWav16(INPUT_WAV, makeInput());
 const LIBRARY = join(RESULTS, 'library-system');
 rmSync(LIBRARY, { recursive: true, force: true });
 const LIBRARY_RELAY = join(RESULTS, 'library-system-relay');
+// TURN_TTL of the relay phase's Worker (s): D renews within the test.
+const RELAY_TTL = Number(process.env.CASTCORDER_RELAY_TTL || 30);
 rmSync(LIBRARY_RELAY, { recursive: true, force: true });
 const TURN_SECRET = randomBytes(18).toString('base64url');
 const CONTAINER = 'castcorder-system-coturn-' + process.pid;
@@ -99,21 +113,15 @@ const line = (st, re, what, timeout = 20000) => waitFor(() => {
   return st.out.match(re);
 }, what, timeout);
 
-const checks = [];
-function check(ok, what) {
-  checks.push({ ok, what });
-  console.log((ok ? 'ok   ' : 'BAD  ') + what);
-}
-
 const logs = { A: [], B: [], C: [], D: [] };
 const browsers = [];
+const BASE_ARGS = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+  '--allow-loopback-in-peer-connection', '--autoplay-policy=no-user-gesture-required',
+  '--disable-background-timer-throttling', '--mute-audio'];
+// What the shared lib/ modules (guest.mjs, rejoin.mjs, personlink.mjs) read.
+Object.assign(ctx, { MODE: 'chromium', exe: HOST_EXE, dist, RESULTS, logs, browsers, BASE_ARGS, chromium });
 async function openGuest(name, url, extraArgs = []) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-      '--allow-loopback-in-peer-connection', '--autoplay-policy=no-user-gesture-required',
-      '--disable-background-timer-throttling', '--mute-audio', ...extraArgs],
-  });
+  const browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
   browsers.push(browser);
   const ctx = await browser.newContext({ permissions: ['microphone', 'camera'] });
   const page = await ctx.newPage();
@@ -143,13 +151,18 @@ const freePort = () => new Promise((resolve, reject) => {
 // /v/<VERSION>/, local state in a fresh temp dir. With `turn` (coturn's
 // address), hellos name coturn for STUN and the Worker mints coturn REST
 // credentials (the secret in an env file, which wrangler does not print);
-// without, no STUN servers and no relay.
-async function startWorker(turn) {
+// without, no STUN servers and no relay. `ttl`: TURN_TTL, for a second
+// instance (`name`) beside the first, with its own state.
+let staged = false;
+async function startWorker(turn, { name = 'worker', ttl } = {}) {
   const assets = join(WORKER_DIR, 'assets', 'v', VERSION);
-  rmSync(assets, { recursive: true, force: true });
-  cpSync(dist, assets, { recursive: true });
+  if (!staged) {
+    rmSync(assets, { recursive: true, force: true });
+    cpSync(dist, assets, { recursive: true });
+    staged = true;
+  }
   const [port, inspector] = [await freePort(), await freePort()];
-  const state = join(tmpdir(), 'castcorder-wrangler-' + process.pid);
+  const state = join(tmpdir(), 'castcorder-wrangler-' + process.pid + '-' + name);
   rmSync(state, { recursive: true, force: true });
   mkdirSync(state, { recursive: true });
   let relay = ['--var', 'STUN_URLS:', '--var', 'RELAY:none'];
@@ -158,10 +171,11 @@ async function startWorker(turn) {
     writeFileSync(envFile, 'TURN_SECRET=' + TURN_SECRET + '\n');
     relay = ['--var', 'STUN_URLS:stun:' + turn.ip + ':' + turn.port, '--var', 'RELAY:coturn',
       '--var', 'TURN_URLS:' + turn.url, '--env-file', envFile];
+    if (ttl) relay.push('--var', 'TURN_TTL:' + ttl);
   }
   const st = start(process.execPath, [WRANGLER, 'dev', '--ip', '127.0.0.1', '--port', String(port),
     '--inspector-port', String(inspector), '--persist-to', state, ...relay],
-  'worker', { cwd: WORKER_DIR, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
+  name, { cwd: WORKER_DIR, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
   const http = '127.0.0.1:' + port;
   await waitFor(async () => {
     if (st.exited !== undefined) throw new Error('wrangler dev exited with ' + st.exited);
@@ -174,9 +188,12 @@ async function startWorker(turn) {
 // candidate (bound toward coturn) and a guest that may only use relayed
 // candidates, both with credentials the Worker minted (RELAY=coturn).
 async function relayPhase() {
+  const [wr, wrHttp] = await startWorker(turn, { name: 'worker-relay', ttl: RELAY_TTL });
+  const wrLog = () => wr.out + wr.err;
+  console.log('relay worker (wrangler dev, TURN_TTL=' + RELAY_TTL + ') at ' + wrHttp);
   const HOST_IP = await localAddressToward(turn.ip, turn.port);
   const h = start(HOST_EXE, ['--dist', dist, '--library', LIBRARY_RELAY, '--room', 'relay-test', '--bind', HOST_IP,
-    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + rvHttp, '--relay-only', '--open'],
+    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + wrHttp, '--relay-only', '--open'],
   'host-relay');
   const relayLink = (await line(h, /CALL_LINK (\S+)/, 'relay host CALL_LINK'))[1];
   const learned = await waitFor(() => h.err.match(/server-reflexive address learned reflexive=(\S+)/),
@@ -194,9 +211,48 @@ async function relayPhase() {
   check(logs.D.some((l) => l.includes('ice transport policy forced') && l.includes('relay')), 'guest D forced iceTransportPolicy=relay');
   const pair = await waitFor(() => h.err.match(/chosen candidate pair candidate_pair=Udp (\S+) -> (\S+)/), 'relay host chosen pair', 20000);
   check(pair[1] === RELAYED, 'guest D connected through coturn: the host\'s chosen pair is on its relayed address (' + pair[1] + ' -> ' + pair[2] + ')');
-  const counted = (rvLog().match(/relay credentials counted/g) || []).length;
-  check(counted >= 2, 'the Worker counted the relay credentials it minted against the daily cap (' + counted + ')');
-  check(!rvLog().includes(TURN_SECRET) && !h.err.includes(TURN_SECRET), 'no log holds the TURN secret');
+  const counted = () => (wrLog().match(/relay credentials counted/g) || []).length;
+  check(counted() >= 2, 'the Worker counted the relay credentials it minted against the daily cap (' + counted() + ')');
+
+  // Renewal (cast-lxt.11): D's credentials last RELAY_TTL seconds. At 80% of
+  // that, D asks the Worker for fresh ones (a new hello naming the host,
+  // counted against its cap), applies them with setConfiguration and asks
+  // the host to restart ICE; its answer must carry a relay candidate. Once
+  // the first credentials have expired, a later ICE restart (the host's own
+  // renewal, or D's next) must still gather a relay candidate, which coturn
+  // grants only with unexpired credentials, and D must stay in the call
+  // throughout: same participant, no reconnect.
+  const participant = await text(D, '#participant');
+  const planned = await waitFor(() => logs.D.find((l) => l.includes('relay credentials will be renewed')), 'D plans a renewal', 10000);
+  const exp0 = Number((planned.match(/expires = (\d+)/) || [])[1]);
+  check(exp0 > 0 && exp0 - Date.now() / 1000 <= RELAY_TTL + 5, 'D got relay credentials from the Worker lasting about ' + RELAY_TTL + ' s (expires ' + exp0 + ')');
+  const before = counted();
+  const RENEWED = 'relay credentials renewed; asked the host to restart ICE';
+  await waitFor(() => logs.D.some((l) => l.includes(RENEWED)), 'D renewing its relay credentials', RELAY_TTL * 1000, 250);
+  const at = logs.D.findIndex((l) => l.includes(RENEWED));
+  check(Date.now() / 1000 < exp0, 'D renewed its relay credentials before they expired');
+  await waitFor(() => h.err.includes('guest renewed its relay credentials; restarting ICE'), 'the host restarting ICE for D', 10000);
+  check(true, 'D asked the host for an ICE restart and the host restarted ICE');
+  check(counted() > before, 'the Worker minted (and counted) D\'s renewed credentials: ' + before + ' -> ' + counted());
+  const relayAnswer = (from) => logs.D.slice(from).find((l) => l.includes('answered host renegotiation')
+    && Number((l.match(/relay_candidates = (\d+)/) || [])[1] || 0) >= 1);
+  const ans = await waitFor(() => relayAnswer(at), 'D answering the restart with a relay candidate', 15000).catch(() => null);
+  check(!!ans, 'D answered the ICE restart with a relay candidate from its renewed credentials');
+  // Past the first credentials' expiry: a later restart still gathers a relay
+  // candidate, so D gathers with the renewed ones.
+  await waitFor(() => Date.now() / 1000 > exp0 + 2, 'D\'s first credentials expiring', RELAY_TTL * 1000, 500);
+  const expiredAt = logs.D.length;
+  const pairsBefore = (h.err.match(/chosen candidate pair/g) || []).length;
+  const late = await waitFor(() => relayAnswer(expiredAt), 'an ICE restart after the first credentials expired', (RELAY_TTL + 10) * 1000, 250).catch(() => null);
+  check(!!late, 'after D\'s first credentials expired, an ICE restart still gathered a relay candidate (renewed credentials)');
+  const repaired = await waitFor(() => (h.err.match(/chosen candidate pair/g) || []).length > pairsBefore, 'the host choosing a pair after that restart', 15000).catch(() => null);
+  check(!!repaired, 'the host chose a candidate pair with D after that restart');
+  await sleep(5000);
+  const stateD = await text(D, '#state');
+  check((await text(D, '#participant')) === participant && stateD === 'connected'
+    && !logs.D.some((l) => l.includes('connection to the host lost')),
+  'D stayed in the call across its renewals: same participant, no reconnect (' + stateD + ')');
+  check(!wrLog().includes(TURN_SECRET) && !h.err.includes(TURN_SECRET), 'no log holds the TURN secret');
 }
 
 let passed = false;
@@ -304,6 +360,35 @@ try {
   const bWav = files.find((f) => /^take01_B.*\.wav$/.test(f));
   check(!!bWav && statSync(join(TAKE_DIR, bWav)).size > 100000, 'guest B\'s take synced into the host library (' + bWav + ')');
 
+  // Background sync (cast-xsh, cast-lxt.8): B leaves mid-take with its sync
+  // held, then its page delivers the take over a sync-only connection,
+  // signalled through the mailbox like its call connection.
+  await A.click('#take-start');
+  await waitFor(async () => (await text(B, '#recording')).includes('recording take'), 'B recording take 2', 10000);
+  await sleep(3000);
+  await B.evaluate(() => { window.__castcorderHoldSync = true; });
+  await B.click('#leave');
+  await sleep(500);
+  await A.click('#take-stop');
+  await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 2 stopped', 10000);
+  await waitFor(async () => /file\(s\) left/.test(await text(B, '#sync-state')), 'B shows its take waiting to sync', 30000);
+  const TAKE2 = join(callDir(LIBRARY, 'system-test'), 'take02');
+  const synced2 = () => existsSync(TAKE2) && readdirSync(TAKE2).filter((f) => f.endsWith('_mic.wav')).length >= 2
+    && !readdirSync(TAKE2).some((f) => f.endsWith('.journal') || f.endsWith('.obao'));
+  check(!synced2(), 'B\'s take 2 is not on the host while its sync is held');
+  const sealed = () => logs.B.filter((l) => l.includes('offer sealed to the host through the rendezvous')).length;
+  const sealedBefore = sealed();
+  await B.evaluate(() => { window.__castcorderHoldSync = false; });
+  await waitFor(synced2, 'B\'s take 2 delivered over a sync-only connection', 60000, 250);
+  check(host.err.includes('sync-only connection accepted'), 'the host accepted B\'s sync-only connection');
+  check(sealed() > sealedBefore && logs.B.some((l) => l.includes('answer applied') && l.includes('sync_only = true')),
+    'B\'s sync-only connection was signalled through the rendezvous mailbox');
+  await waitFor(async () => !/file\(s\) left/.test(await text(B, '#sync-state')), 'B says its take was delivered', 30000);
+  check(true, 'B\'s take 2 synced after it left, over a sync-only connection through the rendezvous');
+
+  // Link requests through the mailbox (lib/personlink.mjs).
+  await personLinkChecks({ HTTP, rendezvous: RV_HTTP });
+
   // The server saw only routing metadata.
   const secret = frag.split('.')[1];
   check(rvLog().includes('offer relayed') && rvLog().includes('answer relayed'), 'the rendezvous relayed the offer and the answer');
@@ -315,6 +400,10 @@ try {
     check((host.err.match(/registered with the rendezvous/g) || []).length === 1,
       'the host kept its one connection throughout (its pings, answered by the runtime, kept it alive)');
   }
+  // Status queries and rejoining (cast-zr8) through the Worker: the shared
+  // scenario, against this Worker (the browser tier runs it against
+  // castcorder-rendezvous).
+  if (WORKER) await rejoinChecks({ rendezvous: RV_HTTP });
   if (turn) await relayPhase();
   for (const n of turn ? ['A', 'B', 'D'] : ['A', 'B']) {
     const bad = logs[n].filter((l) => l.startsWith('[pageerror]'));
@@ -326,11 +415,14 @@ try {
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
   for (const [, st] of procs) killTree(st.p);
+  for (const p of [ctx.host8, ctx.host9]) if (p) p.kill();
   if (turn) coturnLog = stopCoturn(CONTAINER).replaceAll(TURN_SECRET, '<secret>');
 }
 if (coturnLog) writeFileSync(join(RESULTS, 'system-coturn.log'), coturnLog);
 for (const [name, st] of procs) writeFileSync(join(RESULTS, 'system-' + name + '.log'), st.out + '\n--- stderr ---\n' + st.err);
 for (const n of Object.keys(logs)) writeFileSync(join(RESULTS, 'system-guest-' + n + '.log'), logs[n].join('\n'));
+if (ctx.host8) writeFileSync(join(RESULTS, 'system-host-rejoin.log'), ctx.host8Log || '');
+if (ctx.host9) writeFileSync(join(RESULTS, 'system-host-person-2.log'), ctx.host9Log || '');
 if (!passed) {
   for (const [name, st] of procs) {
     console.log(name + ' log tail:');

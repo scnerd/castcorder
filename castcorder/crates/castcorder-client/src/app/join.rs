@@ -182,30 +182,14 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     // Naming the host asks the rendezvous for relay (TURN) credentials too.
     let link = LINK.with(|l| l.borrow().clone());
     let mailbox = match &link {
-        Some(l) => {
-            let sep = if url.contains('?') { '&' } else { '?' };
-            let ws = castcorder_link::wire::mailbox_url(
-                &format!("{url}{sep}host={}", l.host.encode()),
-                &l.host,
-            );
-            Some(crate::mailbox::Mailbox::open(&ws).await?)
-        }
+        Some(l) => Some(crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, l)).await?),
         None => None,
     };
     if !current() {
         return Ok(());
     }
     let pc = match &mailbox {
-        Some(mb) => {
-            let cfg: RtcConfiguration = object().unchecked_into();
-            set(&cfg, "iceServers", mb.ice_servers.clone());
-            // Debug: `?iceTransportPolicy=relay` forces the TURN relay.
-            if let Some(policy) = query_param("iceTransportPolicy") {
-                info!(policy = %policy, "ice transport policy forced");
-                set(&cfg, "iceTransportPolicy", policy.as_str());
-            }
-            RtcPeerConnection::new_with_configuration(&cfg)?
-        }
+        Some(mb) => RtcPeerConnection::new_with_configuration(&rtc_config(&mb.ice_servers, true))?,
         None => RtcPeerConnection::new()?,
     };
     // Stored before the next await so a drop or leave always closes it.
@@ -222,6 +206,7 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     data.set_buffered_amount_low_threshold(DATA_LOW);
     connect_channels(ui, &pc, &control, &data, epoch, current);
     let answer_sdp = signal_offer(&pc, &ctx, mailbox.as_ref(), link.as_ref(), current).await?;
+    let relay_expires = mailbox.as_ref().and_then(|m| m.relay_expires);
     drop(mailbox);
     let Some(answer_sdp) = answer_sdp else {
         return Ok(());
@@ -233,7 +218,102 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     remote.set_sdp(&answer_sdp);
     JsFuture::from(pc.set_remote_description(&remote)).await?;
     info!(call = %ctx.call, device = %ctx.device, sync_only, "answer applied");
+    if let (Some(expires), Some(l)) = (relay_expires, link) {
+        spawn_local(renew_relay(pc, url, l, expires, current));
+    }
     Ok(())
+}
+
+/// The mailbox URL for a call connection through the rendezvous: naming the
+/// host asks the rendezvous for relay (TURN) credentials too.
+fn relay_mailbox_url(url: &str, link: &castcorder_link::CallLink) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    castcorder_link::wire::mailbox_url(
+        &format!("{url}{sep}host={}", link.host.encode()),
+        &link.host,
+    )
+}
+
+/// The call connection's RTCConfiguration: the hello's ICE servers, and the
+/// page's forced ICE transport policy, if any (debug:
+/// `?iceTransportPolicy=relay` forces the TURN relay). Built whole each time:
+/// `setConfiguration` replaces every field, so a renewal must carry the
+/// policy too.
+fn rtc_config(ice_servers: &JsValue, log: bool) -> RtcConfiguration {
+    let cfg: RtcConfiguration = object().unchecked_into();
+    set(&cfg, "iceServers", ice_servers.clone());
+    if let Some(policy) = query_param("iceTransportPolicy") {
+        if log {
+            info!(policy = %policy, "ice transport policy forced");
+        }
+        set(&cfg, "iceTransportPolicy", policy.as_str());
+    }
+    cfg
+}
+
+/// Renew this connection's relay (TURN) credentials before they expire
+/// (cast-lxt.11), for as long as the connection is current: at 80% of their
+/// remaining life, a fresh hello from the rendezvous (naming the host, so
+/// counted against its key's daily relay cap), `setConfiguration` with its
+/// ICE servers, and a `restart` signal, so the host offers an ICE restart and
+/// the answer ([`super::rpc::answer_one`]) gathers a relay candidate with the
+/// new credentials. The call (or sync-only connection) carries on over the
+/// new allocation without a reconnect. A failed renewal (rendezvous
+/// unreachable, the daily cap reached) keeps the old configuration and
+/// tries again, until the connection ends.
+async fn renew_relay(
+    pc: RtcPeerConnection,
+    url: String,
+    link: castcorder_link::CallLink,
+    mut expires: u64,
+    current: impl Fn() -> bool + 'static,
+) {
+    use crate::signal::{MIN_RENEW_MS, renew_after_ms};
+    let mut wait = renew_after_ms(expires, js_sys::Date::now());
+    info!(
+        expires,
+        renew_in_s = (wait / 1000.0).round(),
+        "relay credentials will be renewed"
+    );
+    loop {
+        crate::mailbox::sleep_ms(wait.min(i32::MAX as f64) as i32).await;
+        let closed = pc.connection_state() == web_sys::RtcPeerConnectionState::Closed;
+        if !current() || closed {
+            return;
+        }
+        let fresh = match crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, &link)).await {
+            Ok(mb) => match mb.relay_expires {
+                Some(e) => Ok((e, mb.ice_servers.clone())),
+                None => Err("the rendezvous gave no relay credentials".to_string()),
+            },
+            Err(e) => Err(describe(&e)),
+        };
+        if !current() {
+            return;
+        }
+        match fresh {
+            Ok((e, servers)) => {
+                if let Err(err) = call(&pc, "setConfiguration", &[&rtc_config(&servers, false)]) {
+                    warn!(error = %describe(&err), "relay credentials not applied; trying again");
+                    wait = MIN_RENEW_MS;
+                    continue;
+                }
+                expires = e;
+                send_signal(&Signal::Restart);
+                wait = renew_after_ms(expires, js_sys::Date::now());
+                info!(
+                    expires,
+                    renew_in_s = (wait / 1000.0).round(),
+                    "relay credentials renewed; asked the host to restart ICE"
+                );
+            }
+            Err(why) => {
+                // Keep the old ones; they may still have life left.
+                warn!(reason = %why, expires, "relay credentials not renewed; trying again");
+                wait = MIN_RENEW_MS;
+            }
+        }
+    }
 }
 
 /// The call connection's send-only audio and video transceivers.

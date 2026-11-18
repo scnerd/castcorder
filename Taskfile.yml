@@ -76,12 +76,17 @@ tasks:
       runs `wrangler dev` on OS-picked loopback ports, and the host and guests
       reach the host key's Durable Object. The host stays idle for 50 s first,
       so its Durable Object hibernates and must restore the host's connection,
-      and the host's own pings must keep it alive. With Docker it also starts
+      and the host's own pings must keep it alive. Then, through the Worker:
+      background sync over a sync-only connection, link requests (a browser
+      profile and a second host install), and the rejoin scenario's status
+      queries (lib/rejoin.mjs). With Docker it also starts
       coturn (as test:relay) and runs the Worker with RELAY=coturn and coturn
       as its STUN server: a --relay-only host and a guest with
       ?iceTransportPolicy=relay must connect through credentials the Worker
       minted, and that host must learn its server-reflexive address from the
-      hello's ice_servers. Without Docker that phase is skipped (it fails under
+      hello's ice_servers. That phase's Worker mints 30 s credentials
+      (TURN_TTL): the guest must renew its own before they expire and keep
+      its call. Without Docker that phase is skipped (it fails under
       CASTCORDER_CI).
       Other build dirs: CARGO_TARGET_DIR=... task test:system:worker CLIENT_DIST=dist-agent
     dir: castcorder/crates/castcorder-client/browser-test
