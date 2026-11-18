@@ -72,7 +72,14 @@ pub fn on_take_status(current: Option<TakeId>, status: TakeStatus) -> Vec<Record
 /// The OPFS base name of a track (no extension). Take ids restart at 1 in every
 /// call, so the start time (ms since the Unix epoch) keeps names unique.
 pub fn track_name(take: TakeId, started_ms: u64) -> String {
-    format!("take{:04}-{started_ms}-mic", take.0)
+    source_track_name(take, started_ms, "mic")
+}
+
+/// The OPFS base name of a recorded source's track (no extension), as
+/// [`track_name`] but ending in the source id (a backup microphone's
+/// `mic-2`, ...).
+pub fn source_track_name(take: TakeId, started_ms: u64, source: &str) -> String {
+    format!("take{:04}-{started_ms}-{source}", take.0)
 }
 
 /// The OPFS base name of a webcam track (no extension; `.webm`): one per
@@ -500,6 +507,16 @@ mod tests {
     fn reconnect_backs_off_to_ten_seconds() {
         let d: Vec<u32> = (1..=7).map(reconnect_delay_ms).collect();
         assert_eq!(d, vec![1000, 2000, 4000, 8000, 10_000, 10_000, 10_000]);
+    }
+
+    #[test]
+    fn backup_track_names_end_in_their_source() {
+        assert_eq!(track_name(TakeId(3), 7), "take0003-7-mic");
+        assert_eq!(source_track_name(TakeId(3), 7, "mic-2"), "take0003-7-mic-2");
+        assert_ne!(
+            source_track_name(TakeId(3), 7, "mic-2"),
+            track_name(TakeId(3), 7)
+        );
     }
 
     #[test]

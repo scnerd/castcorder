@@ -105,6 +105,7 @@ import { namesChecks } from './lib/names.mjs';
 import { roomsChecks } from './lib/rooms.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
+import { devicesChecks } from './lib/devices.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
 
@@ -182,6 +183,8 @@ Object.assign(ctx, { MODE, FULL, exe, dist, RESULTS, LIBRARY, HTTP, HTTPS, host,
 
 let passed = false;
 try {
+  // CASTCORDER_E2E_ONLY=devices runs only the device checks (for iterating).
+  if (process.env.CASTCORDER_E2E_ONLY !== 'devices') {
   const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV], HTTP);
   const B = await openGuest('B', [], HTTPS);
   console.log((MODE === 'firefox' ? 'firefox ' : 'chromium ') + browsers[0].version());
@@ -346,6 +349,9 @@ try {
   if (MODE !== 'fallback') await takeInfoChecks();
   if (MODE !== 'fallback') await roomsChecks();
   if (FULL) await rejoinChecks();
+  }
+  // Every mode: in fallback the backups take the AudioWorklet path too.
+  await devicesChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -361,6 +367,7 @@ try {
   if (ctx.host7) ctx.host7.kill();
   if (ctx.host8) ctx.host8.kill();
   if (ctx.rv8) ctx.rv8.kill();
+  if (ctx.host9) ctx.host9.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
@@ -368,6 +375,8 @@ if (ctx.host3) writeFileSync(join(RESULTS, 'host-identity-' + MODE + '.log'), ct
 if (ctx.host4) writeFileSync(join(RESULTS, 'host-cap-' + MODE + '.log'), ctx.host4Log);
 if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.host7Log);
 if (ctx.host8) writeFileSync(join(RESULTS, 'host-rejoin.log'), ctx.host8Log || '');
+if (ctx.host9) writeFileSync(join(RESULTS, 'host-devices-' + MODE + '.log'), ctx.host9Log || '');
+for (const n of ['X', 'Y']) if (logs[n]) writeFileSync(join(RESULTS, 'guest-devices-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 if (!passed) {
   console.log('host log tail:');

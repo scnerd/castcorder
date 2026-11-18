@@ -224,6 +224,7 @@ pub(super) fn disconnect() {
         e.mid_origin.clear();
         e.last_rx = 0.0;
         e.video_sender = None;
+        e.audio_sender = None;
         e.ack_requests.clear();
         e.recorders.clear();
         e.pc.take()
@@ -434,13 +435,10 @@ pub(super) fn leave(ui: Ui) {
     if let Some(s) = engine.wake {
         quiet(call(&s, "release", &[]), "wake lock release");
     }
-    // A capture attempt still waiting for the worker gives up now.
-    if let Some((_, resolve)) = SOURCE_ACK.with(|a| a.borrow_mut().take()) {
-        let o = object();
-        set(&o, "type", "source-failed");
-        set(&o, "message", "left the call");
-        let _ = resolve.call1(&JsValue::NULL, &o);
-    }
+    // Backup microphones stop too (their last segment is closed first).
+    super::devices::leave_backups(ui);
+    // A capture attempt still waiting for a worker gives up now.
+    fail_pending_sources("left the call");
     ui.warning.set(String::new());
     ui.joined.set(false);
     ui.connection.set("left".into());

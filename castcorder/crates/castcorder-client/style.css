@@ -284,6 +284,20 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .tip strong { font-size: 14px; }
 .tip p { margin: 0; font-size: 13px; line-height: 1.45; }
 .tip .btn { align-self: flex-end; background: var(--bg); color: var(--text); }
+/* The Devices dialog (cast-94c), above the dock's Devices button. */
+.dialog { position: absolute; bottom: 76px; left: 50%; transform: translateX(-50%); width: 360px;
+  max-width: calc(100vw - 24px); max-height: 70vh; overflow-y: auto; z-index: 5; background: var(--surface);
+  color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px;
+  display: flex; flex-direction: column; gap: 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); text-align: left; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dialog-head h2 { margin: 0; font-size: 16px; }
+.dialog select { width: 100%; }
+.dialog .row select { flex: 1; min-width: 0; }
+.dev-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 8px 10px;
+  border-radius: 10px; background: var(--surface2); }
+.dev-row .dev-name { flex: 1 1 100%; font-weight: 600; overflow-wrap: anywhere; }
+.dev-row .small { flex: 1; }
+.dev-row.warn { border: 1px solid var(--warn-line); background: var(--warn-bg); }
 
 @media (max-width: 760px) {
   .stage { grid-template-columns: minmax(0, 1fr); }
