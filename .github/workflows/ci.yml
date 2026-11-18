@@ -29,8 +29,24 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.3
 
+      # For the tofu-fmt hook and the deploy/tofu validation below.
+      - name: Install OpenTofu
+        uses: opentofu/setup-opentofu@v2.0.2
+        with:
+          tofu_version: 1.13.9
+          tofu_wrapper: false
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Run pre-commit hooks on every file
         run: uvx --with pre-commit-uv pre-commit run --all-files --show-diff-on-failure
+
+      # No secrets and no Cloudflare or GitHub calls: fmt, provider download, validate.
+      - name: Validate deploy/tofu
+        run: task deploy:infra:validate
 
   check:
     name: check

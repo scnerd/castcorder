@@ -1,0 +1,6 @@
+# Providers (re-downloaded by `tofu init`; versions pinned in .terraform.lock.hcl).
+.terraform/
+# Plans and backups stay local. terraform.tfstate is committed (it is encrypted).
+*.tfplan
+*.tfstate.backup
+.terraform.tfstate.lock.info

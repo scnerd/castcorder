@@ -127,7 +127,7 @@ impl Config {
 /// `workers.dev` hostname, `https://<worker name>.<account subdomain>.workers.dev`.
 /// The one place to change it (a different account subdomain, or the
 /// project's own domain); see deploy/README.md.
-pub const PROJECT_RENDEZVOUS: &str = "https://castcorder.castcorder.workers.dev";
+pub const PROJECT_RENDEZVOUS: &str = "https://castcorder.jexmax.workers.dev";
 
 /// The rendezvous the `castcorder-host` binary and the desktop app register
 /// with when no `--rendezvous` is given: [`PROJECT_RENDEZVOUS`] in builds with
