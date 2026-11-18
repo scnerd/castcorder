@@ -14,7 +14,7 @@ workspace = true
 # Pure Rust and no randomness of its own (callers pass random bytes in), so it
 # builds unchanged for the browser (wasm32), the host and the rendezvous.
 [dependencies]
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 chacha20poly1305 = { version = "0.11", default-features = false, features = [
   "alloc",
 ] }

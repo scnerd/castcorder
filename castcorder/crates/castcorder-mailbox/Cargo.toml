@@ -16,7 +16,7 @@ workspace = true
 # for wasm32-unknown-unknown as well as natively.
 [dependencies]
 # Coturn REST credentials (HMAC-SHA1, base64); pure Rust, wasm-friendly.
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 castcorder-link.workspace = true
 hmac = "0.13"
 sha1 = { version = "0.11", default-features = false }
