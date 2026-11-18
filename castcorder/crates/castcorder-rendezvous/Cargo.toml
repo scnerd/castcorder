@@ -36,6 +36,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 # The minting test talks to the real server over a real WebSocket, as a host does.
-tungstenite = { version = "0.29", default-features = false, features = [
+tungstenite = { version = "0.30", default-features = false, features = [
   "handshake",
 ] }
