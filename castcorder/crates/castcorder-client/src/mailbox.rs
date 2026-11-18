@@ -43,6 +43,10 @@ pub struct Mailbox {
     closed: Rc<RefCell<bool>>,
     /// The ICE servers from the hello, as a JS array for RTCConfiguration.
     pub ice_servers: JsValue,
+    /// When the hello's relay (TURN) credentials expire (unix seconds, the
+    /// earliest of them), if it carried any that do: the call connection
+    /// renews them before then (cast-lxt.11).
+    pub relay_expires: Option<u64>,
 }
 
 impl Drop for Mailbox {
@@ -81,6 +85,7 @@ impl Mailbox {
             inbox,
             closed,
             ice_servers: js_sys::Array::new().into(),
+            relay_expires: None,
         };
         match mb.next(HELLO_MS).await? {
             ServerMsg::Hello {
@@ -92,6 +97,7 @@ impl Mailbox {
                     tracing::warn!(reason = %why, "the rendezvous gave no relay (TURN) credentials");
                 }
                 mb.ice_servers = js_sys::JSON::parse(&to_json(&ice_servers))?;
+                mb.relay_expires = crate::signal::relay_expires(&ice_servers);
                 Ok(mb)
             }
             ServerMsg::Error { code, message } => Err(JsValue::from_str(&format!(

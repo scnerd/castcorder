@@ -771,3 +771,35 @@ fn a_receiver_near_a_threshold_does_not_flap() {
         assert!(changes <= 5, "{id:?}: {changes} layer changes in a minute");
     }
 }
+
+/// A guest that renewed its relay credentials asks for an ICE restart
+/// (cast-lxt.11): the host offers new ICE credentials, the guest answers,
+/// and the connection carries on (no reconnect, data still flows).
+#[test]
+fn a_guest_asking_for_an_ice_restart_gets_one_and_stays_connected() {
+    let mut w = World::new(HostConfig::default());
+    let (i, answer) = w.join("A");
+    let a = w.id(i);
+    w.run_until(Duration::from_secs(5), |w| w.g(0).channels_open());
+    let ufrag = |sdp: &str| {
+        sdp.lines()
+            .find_map(|l| l.strip_prefix("a=ice-ufrag:"))
+            .map(str::to_string)
+    };
+    let first = ufrag(&answer).expect("the answer names its ICE ufrag");
+    let offers = w.g(0).offers_received;
+    let renegotiations = w.host.stats(a).unwrap().renegotiations;
+    assert!(w.g(0).send_text(&Signal::Restart.to_json()));
+    w.run_until(Duration::from_secs(2), |w| w.g(0).offers_received > offers);
+    let offer = w.g(0).last_offer.clone().unwrap();
+    let restarted = ufrag(&offer).expect("the offer names its ICE ufrag");
+    assert_ne!(restarted, first, "the offer restarts ICE");
+    assert_eq!(w.host.stats(a).unwrap().renegotiations, renegotiations + 1);
+    // Still the same connection, and it still carries data both ways.
+    w.run_for(Duration::from_secs(2));
+    assert!(w.gone(a).is_none(), "the restart did not drop the guest");
+    let before = w.g(0).data_in.len();
+    let mut data = w.host.data(a).unwrap();
+    data.send(b"after the restart".to_vec()).unwrap();
+    w.run_until(Duration::from_secs(2), |w| w.g(0).data_in.len() > before);
+}

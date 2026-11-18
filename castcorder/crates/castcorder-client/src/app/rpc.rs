@@ -535,7 +535,7 @@ pub(super) fn on_control_message(ui: Ui, ev: MessageEvent) {
                 // reconnects (the host may be restarting).
                 connection_lost(ui, join_epoch(), "the host said bye");
             }
-            Some(Signal::Hb | Signal::Answer { .. }) => {}
+            Some(Signal::Hb | Signal::Answer { .. } | Signal::Restart) => {}
             None => warn!(frame = %text, "unknown text frame on control"),
         }
         return;
