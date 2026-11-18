@@ -134,8 +134,9 @@ struct Ctx {
     /// the host says which call this is (`Event::Call`), then
     /// `<host>/<room>/<call>`.
     call: String,
-    /// The host's scope (`link-<host>` or the signaling URL): tracks from
-    /// before rooms carry it and are offered in any call of that host.
+    /// The host's scope (`link-<host>` or the signaling URL without its
+    /// query, [`crate::scope`]): tracks from before rooms carry it and are
+    /// offered in any call of that host.
     host_scope: String,
     /// Where offers go: the host's `/offer` URL, or the rendezvous `/ws` URL
     /// for a page opened from a call link.

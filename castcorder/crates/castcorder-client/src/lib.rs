@@ -25,7 +25,7 @@
 //!   for the host id its `GET /role` names.
 //! - `identity`: this profile's device key (WebCrypto Ed25519, non-extractable,
 //!   in IndexedDB); the device id is its fingerprint and every offer is signed.
-//! - [`wav`], [`signal`], [`session`], [`levels`]: the pure parts, unit-tested
+//! - [`wav`], [`signal`], [`session`], [`levels`], [`scope`]: the pure parts, unit-tested
 //!   natively.
 //!
 //! Natively only the pure modules compile; the browser modules are wasm32-only.
@@ -34,6 +34,7 @@
 pub mod delivery;
 pub mod levels;
 pub mod recorders;
+pub mod scope;
 pub mod session;
 pub mod signal;
 pub mod wav;

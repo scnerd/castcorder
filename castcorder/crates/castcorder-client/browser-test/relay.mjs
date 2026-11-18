@@ -59,9 +59,10 @@ for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
 }
 const VERSION = '0.0.0';
 // Lifetime of minted TURN credentials (s). The host renews at 80% of it, so
-// the first renewal lands mid-test; everything after it must finish before
-// the second (at 160%), when the guests' own credentials (minted once, at
-// join; browser guests do not renew them) have expired.
+// the first renewal lands mid-test. The guests renew theirs at 80% too
+// (cast-lxt.11, an ICE restart they ask the host for), so their restarts
+// land beside the host's; system.mjs checks a guest's renewal on its own,
+// against the Worker.
 const TTL = Number(process.env.CASTCORDER_RELAY_TTL || 60);
 
 mkdirSync(RESULTS, { recursive: true });

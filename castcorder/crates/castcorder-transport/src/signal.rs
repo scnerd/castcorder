@@ -9,6 +9,7 @@
 //! {"type":"offer","sdp":"..."}   host -> guest renegotiation offer
 //! {"type":"answer","sdp":"..."}  guest -> host answer to that offer
 //! {"type":"bye"}                 graceful leave, either direction
+//! {"type":"restart"}             guest -> host: restart ICE (relay credentials renewed)
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,11 @@ pub enum Signal {
     },
     /// Graceful leave.
     Bye,
+    /// The guest asks for an ICE restart: it renewed its relay (TURN)
+    /// credentials and must gather a relay candidate with them (cast-lxt.11).
+    /// Only the host offers, so it answers with an ICE-restart offer. A host
+    /// that predates this ignores it as an unknown frame.
+    Restart,
 }
 
 impl Signal {
@@ -53,6 +59,7 @@ mod tests {
     fn wire_shapes_are_stable() {
         assert_eq!(Signal::Hb.to_json(), r#"{"type":"hb"}"#);
         assert_eq!(Signal::Bye.to_json(), r#"{"type":"bye"}"#);
+        assert_eq!(Signal::Restart.to_json(), r#"{"type":"restart"}"#);
         assert_eq!(
             Signal::Offer { sdp: "v=0".into() }.to_json(),
             r#"{"type":"offer","sdp":"v=0"}"#

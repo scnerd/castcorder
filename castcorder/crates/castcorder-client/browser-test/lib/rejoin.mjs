@@ -18,11 +18,13 @@ import { openGuest } from './guest.mjs';
 //   continues the past call;
 // - a kicked device's room says Removed and offers no rejoin;
 // - with the host stopped, a reloaded page still lists the room, as offline.
-export async function rejoinChecks() {
+// `rendezvous` (host:port): use that one (system.mjs passes the Worker under
+// wrangler dev, cast-lxt.8) instead of starting a castcorder-rendezvous.
+export async function rejoinChecks({ rendezvous } = {}) {
   const { exe, dist, RESULTS } = ctx;
   const RV_EXE = join(exe, '..', process.platform === 'win32' ? 'castcorder-rendezvous.exe' : 'castcorder-rendezvous');
-  if (!existsSync(RV_EXE)) { check(false, 'rejoin: missing ' + RV_EXE); return; }
-  const LIB = join(RESULTS, 'library-rejoin');
+  if (!rendezvous && !existsSync(RV_EXE)) { check(false, 'rejoin: missing ' + RV_EXE); return; }
+  const LIB = join(RESULTS, 'library-rejoin' + (rendezvous ? '-rv' : ''));
   rmSync(LIB, { recursive: true, force: true });
   const out = (p, name) => {
     const st = { out: '', err: '' };
@@ -30,9 +32,12 @@ export async function rejoinChecks() {
     p.stderr.on('data', (d) => { st.err += d.toString(); ctx[name + 'Log'] = st.err; });
     return st;
   };
-  ctx.rv8 = spawn(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', '0.0.0=' + dist], { stdio: ['ignore', 'pipe', 'pipe'] });
-  const rv = out(ctx.rv8, 'rv8');
-  const RV = (await waitFor(() => rv.out.match(/RENDEZVOUS_READY http=(\S+)/), 'RENDEZVOUS_READY', 20000))[1];
+  let RV = rendezvous;
+  if (!RV) {
+    ctx.rv8 = spawn(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', '0.0.0=' + dist], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const rv = out(ctx.rv8, 'rv8');
+    RV = (await waitFor(() => rv.out.match(/RENDEZVOUS_READY http=(\S+)/), 'RENDEZVOUS_READY', 20000))[1];
+  }
   ctx.host8 = spawn(exe, ['--dist', dist, '--library', LIB, '--room', 'rejoin-show', '--bind', '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV], { stdio: ['ignore', 'pipe', 'pipe'] });
   const h = out(ctx.host8, 'host8');
@@ -141,5 +146,5 @@ export async function rejoinChecks() {
   await K.waitForSelector('#join');
   await waitFor(async () => (await card(K).count()) === 1 && (await chip(K)) === 'Host offline', 'K lists the room with the host offline', 30000);
   check((await card(K).locator('.call-row').count()) >= 1, 'the list shows the calls with the host offline');
-  ctx.rv8.kill();
+  if (ctx.rv8) ctx.rv8.kill();
 }

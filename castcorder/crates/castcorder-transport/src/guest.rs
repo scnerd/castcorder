@@ -671,6 +671,10 @@ impl Guest {
                 info!("guest said bye");
                 self.mark_gone(GoneReason::Bye);
             }
+            Some(Signal::Restart) => {
+                info!("guest renewed its relay credentials; restarting ICE");
+                self.restart_ice();
+            }
             Some(Signal::Offer { .. }) => {
                 // Sharp edge: after the first exchange only the host offers, so
                 // there is never glare. A guest offer is a protocol violation.
