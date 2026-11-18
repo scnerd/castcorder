@@ -204,14 +204,14 @@ tasks:
         [ -n "{{.ACCOUNT}}" ] || { echo "No cloudflare_account_id in deploy/tofu/terraform.tfvars." >&2; exit 1; }
         response=$(printf 'Authorization: Bearer %s' "$cloudflare_bootstrap_token" | curl -sS -H @- -H "Content-Type: application/json" --data '{"name":"castcorder-production"}' "https://api.cloudflare.com/client/v4/accounts/{{.ACCOUNT}}/calls/turn_keys")
         turn_id=$(printf '%s' "$response" | jq -r '.result.uid // empty')
-        turn_token=$(printf '%s' "$response" | jq -r '.result.key // empty')
+        turn_token=$(printf '%s' "$response" | jq -r '.result.secret // .result.key // empty')
         if [ -z "$turn_id" ] || [ -z "$turn_token" ]; then
           echo "Creating the TURN key failed:" >&2
-          printf '%s' "$response" | jq -c 'del(.result.key?) | {success, errors, result}' >&2
+          printf '%s' "$response" | jq -c '{success, errors, result: (.result | if type == "object" then del(.secret, .key) else . end)}' >&2
           exit 1
         fi
         printf '%s' "$response" | jq '.result.uid' | sops set --value-stdin {{.SECRETS}} '["cf_turn_key_id"]'
-        printf '%s' "$response" | jq '.result.key' | sops set --value-stdin {{.SECRETS}} '["cf_turn_api_token"]'
+        printf '%s' "$response" | jq '.result.secret // .result.key' | sops set --value-stdin {{.SECRETS}} '["cf_turn_api_token"]'
         echo "Created TURN key $turn_id and stored it in {{.SECRETS}}. Next: task deploy:infra"
 
   deploy:infra:plan:
