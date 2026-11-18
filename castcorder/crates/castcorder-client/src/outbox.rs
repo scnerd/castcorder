@@ -142,25 +142,35 @@ fn release(file: &str) {
 /// `outbox {call, legacy}`: hash and hold every finished track of any call of
 /// this host, then post every offer the host has not confirmed.
 pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
-    let call = string(&msg, "call");
-    let legacy = crate::scope::normalize(&string(&msg, "legacy"));
-    if !call.is_empty() {
-        CALL.with(|c| *c.borrow_mut() = call);
-        let changed = LEGACY.with(|l| l.replace(legacy.clone()) != legacy);
-        if changed && !is_busy() {
-            // Another host: only its tracks are offered from now on. What
-            // the outbox held for the last one stays in OPFS, offered again
-            // when that host is reached.
-            OUTBOX.with(|o| *o.borrow_mut() = None);
-            ITEM_CALL.with(|m| m.borrow_mut().clear());
-            HANDLES.with(|m| {
-                for (_, h) in std::mem::take(&mut *m.borrow_mut()).into_values() {
-                    h.close();
-                }
-            });
-        }
-    }
+    set_scope(&msg);
     prepare_current().await
+}
+
+/// Learn the call this device is in and its host (`{call, legacy}`, as on
+/// `outbox`; `call` empty: nothing to learn). `start` carries them too: a
+/// page can join mid-take before it ever asked for the outbox (its first
+/// take status is a recording one), and the track must still be offered
+/// once it stops (cast-83e).
+pub fn set_scope(msg: &JsValue) {
+    let call = string(msg, "call");
+    let legacy = crate::scope::normalize(&string(msg, "legacy"));
+    if call.is_empty() {
+        return;
+    }
+    CALL.with(|c| *c.borrow_mut() = call);
+    let changed = LEGACY.with(|l| l.replace(legacy.clone()) != legacy);
+    if changed && !is_busy() {
+        // Another host: only its tracks are offered from now on. What
+        // the outbox held for the last one stays in OPFS, offered again
+        // when that host is reached.
+        OUTBOX.with(|o| *o.borrow_mut() = None);
+        ITEM_CALL.with(|m| m.borrow_mut().clear());
+        HANDLES.with(|m| {
+            for (_, h) in std::mem::take(&mut *m.borrow_mut()).into_values() {
+                h.close();
+            }
+        });
+    }
 }
 
 /// Whether a track's sidecar `call` belongs to this host: any of its calls
@@ -195,7 +205,12 @@ fn tag(names: &[&str], scope: &str) {
 /// only while no track records: hashing blocks the worker.
 pub async fn prepare_current() -> Result<(), JsValue> {
     let call = CALL.with(|c| c.borrow().clone());
-    if call.is_empty() || is_busy() {
+    if call.is_empty() {
+        // Logged: a finished track would wait here, never offered.
+        info!("outbox not prepared: no call known yet");
+        return Ok(());
+    }
+    if is_busy() {
         return Ok(());
     }
     if PREPARING.replace(true) {

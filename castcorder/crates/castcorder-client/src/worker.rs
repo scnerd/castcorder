@@ -34,7 +34,7 @@
 //! AudioData timestamps are checked, and a jump is recorded the same way.
 //!
 //! Messages in (`cmd`): `source {id, readable}`, `source-track {id, track}`,
-//! `source-port {id, port, channels, sampleRate}`, `start {name, meta}`, `stop`,
+//! `source-port {id, port, channels, sampleRate}`, `start {name, meta, call, legacy}`, `stop`,
 //! `close-source`, `list`, `clock-sample {t0, t1, t2, t3, timeline}` (one clock
 //! exchange, see castcorder-core clocksync), `log {text}` (the page's log lines), `log-context {call,
 //! device}`, `log-rotate` (close the current log file and offer it, see
@@ -935,6 +935,8 @@ async fn start(msg: JsValue) -> Result<(), JsValue> {
     if ACTIVE.with(|a| a.borrow().is_some()) || STARTING.get() {
         return Err("a track is already recording".into());
     }
+    // The call and host this track belongs to: its stop offers it.
+    crate::outbox::set_scope(&msg);
     STARTING.set(true);
     STOP_PENDING.set(false);
     let meta = get(&msg, "meta");

@@ -417,6 +417,9 @@ pub(super) fn start_track(ui: Ui, take: TakeId, video: bool) {
     let msg = worker_cmd("start");
     set(&msg, "name", name.as_str());
     set(&msg, "meta", meta);
+    // As on `outbox`: the worker may not know the call yet (cast-83e).
+    set(&msg, "call", ctx.call.as_str());
+    set(&msg, "legacy", ctx.host_scope.as_str());
     post_worker(&msg, None);
     ui.recording.set(format!("starting {name}"));
 }
