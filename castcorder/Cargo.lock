@@ -884,7 +884,7 @@ dependencies = [
 name = "castcorder-link"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chacha20poly1305",
  "curve25519-dalek",
  "ed25519-dalek",
@@ -898,7 +898,7 @@ dependencies = [
 name = "castcorder-mailbox"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "castcorder-link",
  "hmac",
  "serde",
