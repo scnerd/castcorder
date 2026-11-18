@@ -460,6 +460,44 @@ fn wrong_credentials_fail_and_are_retried() {
     let stats = host.relay_stats();
     assert!(stats.failures >= 2, "failed and retried: {stats:?}");
     assert_eq!(stats.allocations, 0);
+    // The server's refusal is kept with its code (the allocation times out
+    // on it: an unauthenticated 401 cannot end it), so it is never silent.
+    let why = stats.last_error.unwrap_or_default();
+    assert!(
+        why.contains("allocate 401 Unauthorized"),
+        "last error: {why}"
+    );
+}
+
+#[test]
+fn a_server_that_never_answers_times_out_and_is_retried() {
+    init_log();
+    let time = SimTime::new();
+    let net = SimNetwork::new(time.clone(), SEED);
+    // Bound and never read: requests to it vanish.
+    let silent = net.bind(ip(TURN_IP));
+    let mut host = Host::new(
+        net.bind(ip(1)),
+        time.clock(SimClockConfig::default()),
+        HostConfig::default(),
+    );
+    host.set_turn_server(Some(TurnServer {
+        addr: silent.local_addr(),
+        username: USER.into(),
+        password: PASS.into(),
+    }));
+    // Two attempts time out; the third has not started.
+    let end = time.now() + castcorder_transport::ALLOCATE_TIMEOUT * 2 + Duration::from_secs(7);
+    while time.now() < end {
+        host.poll();
+        time.advance(Duration::from_millis(10));
+    }
+    let stats = host.relay_stats();
+    assert!(host.relayed().is_none());
+    assert!(stats.timeouts >= 2, "timed out and retried: {stats:?}");
+    assert_eq!(stats.failures, stats.timeouts, "{stats:?}");
+    let why = stats.last_error.unwrap_or_default();
+    assert!(why.contains("no answer"), "last error: {why}");
 }
 
 #[allow(dead_code)]

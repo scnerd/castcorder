@@ -29,6 +29,13 @@ use turn_client_proto::udp::TurnClientUdp;
 /// Wait this long after a failed or closed allocation before allocating again.
 pub const RETRY: Duration = Duration::from_secs(5);
 
+/// Give up on an allocation the server has not granted within this long, and
+/// retry after [`RETRY`]. A healthy allocation (one 401 for the realm and
+/// nonce, then the authenticated request) takes a few round trips; the client
+/// library's own retransmissions only give up after about 40 s, long enough to
+/// look like silence.
+pub const ALLOCATE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// A TURN server and the long-term credentials to use on it (for coturn's
 /// `use-auth-secret`: username `expiry:id`, password the base64 HMAC-SHA1 of
 /// the username under the shared secret, as the rendezvous mints them).
@@ -55,6 +62,12 @@ pub struct RelayStats {
     pub sent: u64,
     /// Datagrams received from peers through the relay.
     pub received: u64,
+    /// Allocations abandoned after [`ALLOCATE_TIMEOUT`] without a grant.
+    pub timeouts: u64,
+    /// Why the last allocation went wrong, if one did: a TURN error response
+    /// (`allocate 401 Unauthorized`), a timeout, or a datagram the host could
+    /// not send.
+    pub last_error: Option<String>,
 }
 
 /// What a datagram from the TURN server's address turned out to be.
@@ -74,6 +87,10 @@ pub(crate) struct Relay {
     local: Option<SocketAddr>,
     relayed: Option<SocketAddr>,
     retry_at: Duration,
+    /// When the pending allocation must be granted by.
+    deadline: Option<Duration>,
+    /// A send to the server failed during this allocation (warned once).
+    send_failed: bool,
     requested: Vec<IpAddr>,
     pub(crate) stats: RelayStats,
 }
@@ -85,6 +102,52 @@ const REFRESH_SUCCESS: u16 = 0x0104;
 const REFRESH_ERROR: u16 = 0x0114;
 const CREATE_PERMISSION_REQUEST: u16 = 0x0008;
 const CREATE_PERMISSION_ERROR: u16 = 0x0118;
+const ERROR_CODE: u16 = 0x0009;
+
+/// The ERROR-CODE of a STUN error response (`(401, "Unauthorized")`), its
+/// reason cut to printable ASCII, or None if `b` is not an error response.
+fn error_response(b: &[u8]) -> Option<(u16, String)> {
+    let t = stun_type(b)?;
+    if t & 0x0110 != 0x0110 {
+        return None;
+    }
+    let len = usize::from(u16::from_be_bytes([b[2], b[3]]));
+    let attrs = b.get(20..20 + len)?;
+    let mut i = 0;
+    while i + 4 <= attrs.len() {
+        let at = u16::from_be_bytes([attrs[i], attrs[i + 1]]);
+        let al = usize::from(u16::from_be_bytes([attrs[i + 2], attrs[i + 3]]));
+        let v = attrs.get(i + 4..i + 4 + al)?;
+        if at == ERROR_CODE && v.len() >= 4 {
+            let code = u16::from(v[2] & 0x07) * 100 + u16::from(v[3]);
+            let reason: String = String::from_utf8_lossy(&v[4..])
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_graphic() || c == ' ' {
+                        c
+                    } else {
+                        '?'
+                    }
+                })
+                .take(100)
+                .collect();
+            return Some((code, reason));
+        }
+        i += 4 + al.div_ceil(4) * 4;
+    }
+    Some((0, "no ERROR-CODE".into()))
+}
+
+/// The STUN method of message type `t`, by name, for logs.
+fn method(t: u16) -> &'static str {
+    match t & !0x0110 {
+        0x0003 => "allocate",
+        0x0004 => "refresh",
+        0x0008 => "create-permission",
+        0x0009 => "channel-bind",
+        _ => "other",
+    }
+}
 
 /// The STUN message type of `b`, if it looks like a STUN message.
 fn stun_type(b: &[u8]) -> Option<u16> {
@@ -179,12 +242,27 @@ impl Relay {
             }
             let local = self.local.unwrap_or_else(|| socket.local_addr());
             let creds = TurnCredentials::new(&server.username, &server.password);
-            info!(server = %server.addr, "turn allocation requested");
+            info!(server = %server.addr, local = %local, "turn allocation requested");
             self.client = Some(TurnClientUdp::allocate(
                 local,
                 server.addr,
                 TurnConfig::new(creds),
             ));
+            self.deadline = Some(now + ALLOCATE_TIMEOUT);
+            self.send_failed = false;
+            self.stats.last_error = None;
+        }
+        if let Some(d) = self.deadline
+            && now >= d
+        {
+            self.stats.timeouts += 1;
+            let why = match self.stats.last_error.take() {
+                Some(e) => format!("timed out (last: {e})"),
+                None => "timed out: no answer from the server".to_string(),
+            };
+            self.stats.last_error = Some(why.clone());
+            self.fail(now, &format!("turn allocation {why}; retrying later"));
+            return self.retry_at;
         }
         let c = self.client.as_mut().expect("just set");
         let next = match c.poll(instant(now)) {
@@ -197,12 +275,16 @@ impl Relay {
             _ => now + Duration::from_millis(50),
         };
         self.flush(socket, now);
-        next
+        match self.deadline {
+            Some(d) if self.client.is_some() => next.min(d),
+            _ => next,
+        }
     }
 
     fn fail(&mut self, now: Duration, why: &str) {
-        warn!(server = ?self.server(), relayed = ?self.relayed.map(|r| r.to_string()), retry_s = RETRY.as_secs(), "{why}");
+        warn!(server = ?self.server(), relayed = ?self.relayed.map(|r| r.to_string()), last_error = ?self.stats.last_error, retry_s = RETRY.as_secs(), "{why}");
         self.client = None;
+        self.deadline = None;
         self.relayed = None;
         self.requested.clear();
         self.stats.failures += 1;
@@ -224,7 +306,16 @@ impl Relay {
                 }
             }
             if let Err(e) = socket.send_to(data, t.to) {
-                debug!(error = %e, to = %t.to, "turn datagram not sent");
+                // Warn once per allocation: a host that cannot send to the
+                // server at all (bound to loopback, no route) otherwise looks
+                // just like a server that never answers.
+                if self.relayed.is_none() && !self.send_failed {
+                    self.send_failed = true;
+                    warn!(error = %e, to = %t.to, from = %c.local_addr(), "turn datagram not sent to the server");
+                    self.stats.last_error = Some(format!("cannot send to the server: {e}"));
+                } else {
+                    debug!(error = %e, to = %t.to, "turn datagram not sent");
+                }
             }
         }
         let mut failed = false;
@@ -233,6 +324,8 @@ impl Relay {
                 TurnEvent::AllocationCreated(_, relayed) => {
                     info!(relayed = %relayed, server = %c.remote_addr(), "turn allocation created");
                     self.relayed = Some(relayed);
+                    self.deadline = None;
+                    self.stats.last_error = None;
                     self.stats.allocations += 1;
                 }
                 TurnEvent::AllocationCreateFailed(family) => {
@@ -267,6 +360,14 @@ impl Relay {
             return FromServer::NotTurn(payload);
         };
         let local = c.local_addr();
+        // A 401 to the first Allocate (it brings the realm and nonce) and a
+        // 438 (stale nonce) are routine, so error responses are logged at
+        // info and kept; the warning when an allocation fails names the last.
+        if let Some((code, reason)) = error_response(&payload) {
+            let m = method(stun_type(&payload).unwrap_or(0));
+            info!(server = %source, method = m, code, reason = %reason, "turn error response");
+            self.stats.last_error = Some(format!("{m} {code} {reason}"));
+        }
         match stun_type(&payload) {
             Some(REFRESH_SUCCESS) => info!(server = %source, "turn allocation refreshed"),
             Some(REFRESH_ERROR) => warn!(server = %source, "turn allocation refresh refused"),
