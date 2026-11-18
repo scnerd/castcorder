@@ -177,6 +177,13 @@ tasks:
     cmds:
       - sops edit deploy/secrets.sops.yaml
 
+  deploy:turn-key:
+    desc: Create the Realtime TURN key and store cf_turn_key_id and cf_turn_api_token in deploy/secrets.sops.yaml (once; FORCE=1 to replace)
+    cmds:
+      - sops exec-env {{.SECRETS}} "bash deploy/turn-key.sh {{.SECRETS}}"
+    vars:
+      SECRETS: '{{.SECRETS | default "deploy/secrets.sops.yaml"}}'
+
   deploy:infra:plan:
     desc: Show what `task deploy:infra` would change (Cloudflare token and TURN key, GitHub environment and secrets)
     interactive: true
@@ -207,6 +214,8 @@ tasks:
       - TF_VAR_state_passphrase="$tofu_state_passphrase" tofu -chdir=deploy/tofu init -input=false
       - >-
         TF_VAR_state_passphrase="$tofu_state_passphrase"
+        TF_VAR_cf_turn_key_id="${cf_turn_key_id:-}"
+        TF_VAR_cf_turn_api_token="${cf_turn_api_token:-}"
         CLOUDFLARE_API_TOKEN="$cloudflare_bootstrap_token"
         GITHUB_TOKEN="$(gh auth token)"
         tofu -chdir=deploy/tofu {{.CLI_ARGS}}
