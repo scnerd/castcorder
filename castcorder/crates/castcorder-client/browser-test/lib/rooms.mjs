@@ -12,7 +12,8 @@ import { openGuest } from './guest.mjs';
 // - a guest opening that room's link before anyone opened it waits in the
 //   lobby; the producer joins the room from the home and the guest gets in;
 // - everyone leaves and rejoins: the same call (same folder, take numbers
-//   continue);
+//   continue); the guest reloads and joins mid-take, its first take status
+//   a recording one, and its track still syncs (cast-83e);
 // - a producer starts a new call from the call: a new folder, takes from 01,
 //   and the guest's next take lands there; the home lists both calls;
 // - a guest leaves mid-take and joins a later call: its take syncs into the
@@ -85,28 +86,41 @@ export async function roomsChecks() {
   await waitFor(async () => (await text(G, '#state')) === 'connected', 'G gets in once the producer opened the room', 40000);
   await waitFor(async () => (await text(P, '#current-call')).length > 0, 'the producer sees which call this is', 15000);
   const first = await text(P, '#current-call');
-  const take = async (n) => {
+  const startTake = async (n) => {
     await waitFor(async () => P.isEnabled('#take-start'), 'P can start a take', 15000);
     await P.click('#take-start');
     await waitFor(async () => (await text(P, '#take-result')).includes('"take":' + n), 'take ' + n + ' started', 10000);
+  };
+  const stopTake = async (n) => {
     await sleep(2500);
     await P.click('#take-stop');
     await waitFor(async () => (await text(P, '#take-result')).includes('"take":' + n) && (await text(P, '#take-status')).startsWith('idle'), 'take ' + n + ' stopped', 10000);
+  };
+  const take = async (n) => {
+    await startTake(n);
+    await stopTake(n);
   };
   await take(1);
   let dirs = callDirs(LIB, ROOM);
   check(dirs.length === 1 && dirs[0].endsWith(first), 'the call has one folder: ' + dirs.join(' '));
   await waitFor(async () => synced(dirs[0], 'take01', 2), 'take 1 synced into the call folder', 40000);
-
   // Everyone leaves and rejoins: the same call, take numbers continue.
   for (const p of [P, G]) await p.click('#leave');
   await waitFor(async () => !(await live()), 'the room empties', 20000);
+  // P is back first and starts take 2. G reloads (a fresh page and storage
+  // worker) and joins at once, mid-take: the first take status it sees is
+  // Recording, never Idle. Its track must still be offered once the take
+  // stops (cast-83e).
   await P.click('#join');
-  await G.click('#join');
-  await waitFor(async () => (await text(G, '#state')) === 'connected' && (await text(P, '#state')) === 'connected', 'both rejoin', 40000);
+  await waitFor(async () => (await text(P, '#state')) === 'connected', 'P rejoins', 40000);
   await waitFor(async () => (await text(P, '#current-call')) === first, 'the rejoin lands in the same call', 15000);
-  check(true, 'everyone left and rejoined: the same call ' + first);
-  await take(2);
+  await startTake(2);
+  await G.reload();
+  await G.click('#join');
+  await waitFor(async () => (await text(G, '#state')) === 'connected', 'G rejoins mid-take', 40000);
+  await waitFor(async () => (await text(G, '#recording')).includes('recording take'), 'G records the take it joined', 15000);
+  check(true, 'everyone left and rejoined: the same call ' + first + '; G joined mid-take and records it');
+  await stopTake(2);
   dirs = callDirs(LIB, ROOM);
   await waitFor(async () => synced(dirs[0], 'take02', 2), 'take 2 synced into the same folder', 40000);
   check(dirs.length === 1, 'still one call folder, take numbering continued');
