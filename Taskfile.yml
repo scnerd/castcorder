@@ -178,11 +178,41 @@ tasks:
       - sops edit deploy/secrets.sops.yaml
 
   deploy:turn-key:
-    desc: Create the Realtime TURN key and store cf_turn_key_id and cf_turn_api_token in deploy/secrets.sops.yaml (once; FORCE=1 to replace)
+    desc: Create the Realtime TURN key and store cf_turn_key_id and cf_turn_api_token in deploy/secrets.sops.yaml (once; `task deploy:turn-key FORCE=1` replaces it)
     cmds:
-      - sops exec-env {{.SECRETS}} "bash deploy/turn-key.sh {{.SECRETS}}"
+      - sops exec-env {{.SECRETS}} "task deploy:turn-key:run SECRETS={{.SECRETS}} FORCE={{.FORCE}}"
     vars:
       SECRETS: '{{.SECRETS | default "deploy/secrets.sops.yaml"}}'
+      FORCE: '{{.FORCE | default "0"}}'
+
+  # Runs inside `sops exec-env` (no desc: not listed), in Task's own shell so it never
+  # depends on which bash is on PATH. Cloudflare shows the key's API token only on
+  # creation and the OpenTofu provider does not keep it, so it lives in SOPS. Secrets
+  # travel on stdin, never in arguments or the log.
+  deploy:turn-key:run:
+    preconditions:
+      - sh: '[ -n "$cloudflare_bootstrap_token" ]'
+        msg: "Run through `task deploy:turn-key` (sops exec-env sets cloudflare_bootstrap_token)."
+      - sh: '[ -z "${cf_turn_key_id:-}" ] || [ "{{.FORCE}}" = "1" ]'
+        msg: "{{.SECRETS}} already holds cf_turn_key_id. `task deploy:turn-key FORCE=1` makes a new key (then delete the old one under Realtime > TURN Server)."
+    vars:
+      ACCOUNT:
+        sh: jq -rRn '[inputs | capture("^[ ]*cloudflare_account_id[ ]*=[ ]*\"(?<id>[0-9a-f]{32})\"")? | .id] | first // empty' deploy/tofu/terraform.tfvars
+    cmds:
+      - |
+        set -eu
+        [ -n "{{.ACCOUNT}}" ] || { echo "No cloudflare_account_id in deploy/tofu/terraform.tfvars." >&2; exit 1; }
+        response=$(printf 'Authorization: Bearer %s' "$cloudflare_bootstrap_token" | curl -sS -H @- -H "Content-Type: application/json" --data '{"name":"castcorder-production"}' "https://api.cloudflare.com/client/v4/accounts/{{.ACCOUNT}}/calls/turn_keys")
+        turn_id=$(printf '%s' "$response" | jq -r '.result.uid // empty')
+        turn_token=$(printf '%s' "$response" | jq -r '.result.key // empty')
+        if [ -z "$turn_id" ] || [ -z "$turn_token" ]; then
+          echo "Creating the TURN key failed:" >&2
+          printf '%s' "$response" | jq -c 'del(.result.key?) | {success, errors, result}' >&2
+          exit 1
+        fi
+        printf '%s' "$response" | jq '.result.uid' | sops set --value-stdin {{.SECRETS}} '["cf_turn_key_id"]'
+        printf '%s' "$response" | jq '.result.key' | sops set --value-stdin {{.SECRETS}} '["cf_turn_api_token"]'
+        echo "Created TURN key $turn_id and stored it in {{.SECRETS}}. Next: task deploy:infra"
 
   deploy:infra:plan:
     desc: Show what `task deploy:infra` would change (Cloudflare token and TURN key, GitHub environment and secrets)
@@ -231,8 +261,8 @@ tasks:
     desc: Smoke-check the live Worker at PROJECT_RENDEZVOUS (deploy/smoke.mjs; versions after --, default the workspace version)
     vars:
       URL:
-        sh: grep -E 'const PROJECT_RENDEZVOUS' castcorder/crates/castcorder-host/src/lib.rs | grep -oE 'https?://[A-Za-z0-9.:-]+'
+        sh: jq -rRn '[inputs | capture("const PROJECT_RENDEZVOUS.*\"(?<u>https?://[A-Za-z0-9.:-]+)\"")? | .u] | first // empty' castcorder/crates/castcorder-host/src/lib.rs
       VERSION:
-        sh: grep -m1 -E '^version = ' castcorder/Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+        sh: jq -rRn '[inputs | capture("^version = \"(?<v>[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.]+)?)\"")? | .v] | first // empty' castcorder/Cargo.toml
     cmds:
       - node deploy/smoke.mjs {{.URL}} {{.CLI_ARGS | default .VERSION}}
