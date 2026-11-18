@@ -25,6 +25,9 @@ import { openGuest } from './guest.mjs';
 // first ends, each with timing on the host timeline), Y's backup track
 // (source mic-2), and X's track. After Leave nothing is left open.
 //
+// fallback (MediaStreamTrackProcessor deleted from window): the same, with
+// the main and backup microphones on the AudioWorklet path.
+//
 // Firefox (one fake microphone): the pickers and the dialog work, there is
 // no other microphone to add as a backup, and a take still lands.
 export async function devicesChecks() {
@@ -192,6 +195,13 @@ export async function devicesChecks() {
     check(!wavs().some((f) => /_X(-\d+)?_mic-2\.wav$/.test(f)), 'the unavailable backup recorded nothing');
   }
   check(wavs().some((f) => /^take01_X_mic\.wav$/.test(f)), 'X\x27s own track landed');
+  // Each segment and the backup are aligned as tracks of their own.
+  const ALIGNED = join(TAKE, 'aligned');
+  const aligned = () => (existsSync(ALIGNED) ? readdirSync(ALIGNED) : []);
+  const wantAligned = [...yMain.map((s) => s.f), ...wavs().filter((f) => /_mic-2\.wav$/.test(f))];
+  await waitFor(async () => wantAligned.every((f) => aligned().includes(f)) ? true : null,
+    'the host aligned every segment and the backup', 30000, 250);
+  check(true, 'every segment and the backup are aligned: ' + wantAligned.join(' '));
 
   // Leave releases the backups too.
   for (const [n, p] of [['X', X], ['Y', Y]]) {

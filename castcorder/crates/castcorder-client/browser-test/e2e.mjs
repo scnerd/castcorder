@@ -350,7 +350,8 @@ try {
   if (MODE !== 'fallback') await roomsChecks();
   if (FULL) await rejoinChecks();
   }
-  if (MODE !== 'fallback') await devicesChecks();
+  // Every mode: in fallback the backups take the AudioWorklet path too.
+  await devicesChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
