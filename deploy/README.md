@@ -144,7 +144,7 @@ apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
    `castcorder-production` with the bootstrap token and stores its id and API token in
    `deploy/secrets.sops.yaml` as `cf_turn_key_id` and `cf_turn_api_token`. Cloudflare
    shows the API token only on creation and the OpenTofu provider does not keep it, so
-   SOPS holds it rather than tofu. Run it once; `FORCE=1` makes a new key (then delete
+   SOPS holds it rather than tofu. Run it once; `task deploy:turn-key FORCE=1` makes a new key (then delete
    the old one under **Realtime** > **TURN Server**).
 
 4. **Create the infrastructure.** `task deploy:infra:plan` shows what will change;
@@ -171,7 +171,7 @@ apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
 **Changing it later.** Edit `deploy/tofu`, then `task deploy:infra` and commit the
 state. To rotate a credential, replace its resource and rerun the workflow:
 `sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`.
-For the TURN key, `FORCE=1 task deploy:turn-key` then `task deploy:infra`. Cloudflare
+For the TURN key, `task deploy:turn-key FORCE=1` then `task deploy:infra`. Cloudflare
 returns token and key values only when it creates them, so tofu refuses to write an empty GitHub secret rather than
 overwrite a good one. `task deploy:infra:validate` (fmt and validate, no secrets) runs in
 CI's hygiene job. To remove a secret from the Worker, run
