@@ -164,3 +164,66 @@ tasks:
     desc: Stop the local dev services
     cmds:
       - docker compose down
+
+  # Deploy setup (deploy/README.md, ADR 0004). OpenTofu in deploy/tofu owns the Cloudflare
+  # deploy token, the Realtime TURN key and the GitHub production environment and its
+  # secrets; wrangler in .github/workflows/deploy.yml deploys the Worker. Inputs come from
+  # deploy/secrets.sops.yaml through `sops exec-env`, so they exist only in the
+  # environment of the processes that need them, never on disk or in the log.
+
+  deploy:secrets:edit:
+    desc: Create or edit deploy/secrets.sops.yaml (cloudflare_bootstrap_token, tofu_state_passphrase) in $EDITOR
+    interactive: true
+    cmds:
+      - sops edit deploy/secrets.sops.yaml
+
+  deploy:infra:plan:
+    desc: Show what `task deploy:infra` would change (Cloudflare token and TURN key, GitHub environment and secrets)
+    interactive: true
+    cmds:
+      - sops exec-env {{.SECRETS}} "task deploy:infra:tofu -- plan"
+    vars:
+      SECRETS: '{{.SECRETS | default "deploy/secrets.sops.yaml"}}'
+
+  deploy:infra:
+    desc: Apply deploy/tofu after a plan you confirm; commit deploy/tofu/terraform.tfstate afterwards (it is encrypted)
+    interactive: true
+    cmds:
+      - sops exec-env {{.SECRETS}} "task deploy:infra:tofu -- apply"
+    vars:
+      SECRETS: '{{.SECRETS | default "deploy/secrets.sops.yaml"}}'
+
+  # Runs inside `sops exec-env` (no desc: not listed): maps the SOPS keys onto the names
+  # tofu and the providers read. Task echoes commands before expanding variables, so no
+  # value reaches the log. Any tofu subcommand: `-- plan`, `-- apply`, `-- state list`.
+  deploy:infra:tofu:
+    interactive: true
+    preconditions:
+      - sh: '[ -n "$tofu_state_passphrase" ] && [ -n "$cloudflare_bootstrap_token" ]'
+        msg: "Run through `task deploy:infra` or `task deploy:infra:plan` (sops exec-env sets tofu_state_passphrase and cloudflare_bootstrap_token)."
+    env:
+      TF_IN_AUTOMATION: "1"
+    cmds:
+      - TF_VAR_state_passphrase="$tofu_state_passphrase" tofu -chdir=deploy/tofu init -input=false
+      - >-
+        TF_VAR_state_passphrase="$tofu_state_passphrase"
+        CLOUDFLARE_API_TOKEN="$cloudflare_bootstrap_token"
+        GITHUB_TOKEN="$(gh auth token)"
+        tofu -chdir=deploy/tofu {{.CLI_ARGS}}
+
+  deploy:infra:validate:
+    desc: tofu fmt -check and validate on deploy/tofu (no secrets, no Cloudflare or GitHub calls; downloads the pinned providers)
+    cmds:
+      - tofu -chdir=deploy/tofu fmt -check -recursive
+      - tofu -chdir=deploy/tofu init -backend=false -input=false -lockfile=readonly
+      - tofu -chdir=deploy/tofu validate
+
+  deploy:check:
+    desc: Smoke-check the live Worker at PROJECT_RENDEZVOUS (deploy/smoke.mjs; versions after --, default the workspace version)
+    vars:
+      URL:
+        sh: grep -E 'const PROJECT_RENDEZVOUS' castcorder/crates/castcorder-host/src/lib.rs | grep -oE 'https?://[A-Za-z0-9.:-]+'
+      VERSION:
+        sh: grep -m1 -E '^version = ' castcorder/Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+    cmds:
+      - node deploy/smoke.mjs {{.URL}} {{.CLI_ARGS | default .VERSION}}

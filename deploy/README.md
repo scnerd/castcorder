@@ -80,66 +80,95 @@ deploy if a published release lacks its archive. At about 11 files per version t
 
 ### Secrets
 
-All four live in the GitHub environment `production` (names exactly):
+OpenTofu ([tofu/](tofu)) creates every credential the deploy uses and writes it to
+GitHub; nobody copies one by hand. In the GitHub environment `production` (deployments
+from `main` only):
 
-| Secret                  | What it is                                            |
-| ----------------------- | ----------------------------------------------------- |
-| `CLOUDFLARE_API_TOKEN`  | API token from the "Edit Cloudflare Workers" template |
-| `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare account id                             |
-| `CF_TURN_KEY_ID`        | the Realtime TURN key's Token ID                      |
-| `CF_TURN_API_TOKEN`     | the Realtime TURN key's API token                     |
+| Secret                  | What it is                                                     |
+| ----------------------- | -------------------------------------------------------------- |
+| `CLOUDFLARE_API_TOKEN`  | account-owned API token `castcorder deploy` that wrangler uses |
+| `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare account id                                      |
+| `CF_TURN_KEY_ID`        | the Realtime TURN key `castcorder-production`'s Turn Token ID  |
+| `CF_TURN_API_TOKEN`     | that TURN key's API token                                      |
 
-### One-time setup, click by click
+`CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` are also repository secrets, so CI's
+`test:worker:relay` exercises real Cloudflare TURN. The deploy token holds Workers Scripts
+Write (creating the Worker on its first deploy needs account-wide Workers Admin) and
+Account Settings Read, for this account only (`deploy_token_permission_groups` in
+[tofu/variables.tf](tofu/variables.tf)).
 
-1. **Create the Cloudflare account.** Go to <https://dash.cloudflare.com/sign-up>, sign
-   up with an email and password, and verify the email. The free plan is enough; no
-   domain is needed.
-2. **Choose the workers.dev subdomain.** In the dashboard open **Workers & Pages**. If
-   asked, pick your subdomain there; otherwise select **Change** next to **Your
-   subdomain**. Choose `castcorder` if it is free: the Worker is then
-   `https://castcorder.castcorder.workers.dev`, which the apps already default to. With
-   another subdomain `<sub>` the Worker is `https://castcorder.<sub>.workers.dev`:
-   change `PROJECT_RENDEZVOUS` in `castcorder/crates/castcorder-host/src/lib.rs` to it
-   (the one place the default lives; the deploy job warns while they differ).
-3. **Find the account id.** On the **Workers & Pages** page, under **Account details**,
-   select the copy button next to **Account ID** (or press Ctrl+K and run `Copy account ID`). Keep it for step 6.
-4. **Create the deploy API token.** Go to the **Account API tokens** page
-   (<https://dash.cloudflare.com/?to=/:account/api-tokens>) and select **Create Token**.
-   Under **Permission policies**, open the **Custom** dropdown and select **Edit
-   Cloudflare Workers**. Name the token `castcorder deploy` and scope it to this account
-   only (if the form also asks for zones, pick all zones of this account; there are
-   none). Select **Continue to summary**, then **Create Token**, and copy the token
-   (shown only once).
-5. **Create the Realtime TURN key.** Open the Realtime TURN page of the dashboard
-   (<https://dash.cloudflare.com/?to=/:account/calls>) and create a TURN key, named
-   `castcorder-production`. Copy its **Turn Token ID** and its **API token** (the token
-   is shown only once). The Worker uses this long-lived key to mint short-lived
-   credentials; it is never sent to hosts or guests.
-6. **Add the GitHub secrets.** In the GitHub repository go to **Settings** >
-   **Environments**. If `production` is already listed (the first push to `main` after
-   this workflow landed creates it), select it; otherwise select **New environment**,
-   name it `production`, and select **Configure environment**. Under **Deployment
-   branches and tags** choose **Selected branches and tags** and add `main`. Under **Environment secrets** select **Add environment
-   secret** four times: `CLOUDFLARE_API_TOKEN` (step 4), `CLOUDFLARE_ACCOUNT_ID` (step
-   3), `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` (step 5). Optional: also add the two
-   `CF_TURN_*` values under **Settings** > **Secrets and variables** > **Actions** >
-   **New repository secret**, so CI's `test:worker:relay` exercises real Cloudflare
-   TURN too (it skips that part without them).
-7. **Run the workflow.** **Actions** > **Deploy** > **Run workflow** on `main` (or push
-   to `main`). The first run creates the Worker, its Durable Object class and its rate
-   limiter.
-8. **Verify.** The **deploy** job links the environment URL, and its "Smoke check the
-   live Worker" step ends with `SMOKE OK`. By hand:
-   - `https://castcorder.<sub>.workers.dev/healthz` answers `ok`;
-   - `https://castcorder.<sub>.workers.dev/v/0.0.0/` loads the client;
-   - `castcorder-host --dist castcorder/crates/castcorder-client/dist --rendezvous https://castcorder.<sub>.workers.dev`
-     prints `CALL_LINK https://castcorder.<sub>.workers.dev/v/0.0.0/#...`; open that
+The inputs OpenTofu needs live in `deploy/secrets.sops.yaml`, committed and encrypted
+with [SOPS](https://github.com/getsops/sops) to the maintainer's age key
+([.sops.yaml](../.sops.yaml)):
+
+| Key                          | What it is                                                                                                  |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `cloudflare_bootstrap_token` | account API token: Account API Tokens Edit, Realtime (Calls) Edit, Account Settings Read; this account only |
+| `tofu_state_passphrase`      | 16 or more characters; encrypts the OpenTofu state and plans                                                |
+
+The tasks hand them to tofu through `sops exec-env`, so they exist only in the
+environment of the processes that need them: never decrypted to disk, never in the
+log. The GitHub provider authenticates with `gh auth token` at run time. The state,
+`deploy/tofu/terraform.tfstate`, is committed: OpenTofu encrypts it (and any saved plan)
+with a key derived from the passphrase, and refuses to read or write it unencrypted.
+
+### One-time setup
+
+Needs [OpenTofu](https://opentofu.org) (`tofu`), [SOPS](https://github.com/getsops/sops),
+[age](https://github.com/FiloSottile/age) with your key at the SOPS default location
+(`%APPDATA%\sops\age\keys.txt` on Windows, `~/.config/sops/age/keys.txt` on Linux, or set
+`SOPS_AGE_KEY_FILE`), [GitHub CLI](https://cli.github.com) logged in as a repository
+admin (`gh auth login`), Task and Node. You need a Cloudflare account whose workers.dev
+subdomain is `jexmax` (the Worker is then `https://castcorder.jexmax.workers.dev`, the
+apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
+
+1. **Write the inputs.** `task deploy:secrets:edit` opens a new
+   `deploy/secrets.sops.yaml` in your editor (SOPS uses `$EDITOR`; for example
+   `EDITOR="code --wait"`). Enter the two keys and save; SOPS encrypts on save:
+
+   ```yaml
+   cloudflare_bootstrap_token: <the bootstrap token>
+   tofu_state_passphrase: <a long random passphrase>
+   ```
+
+   Keep the passphrase somewhere else too (a password manager): without it the state
+   cannot be read.
+
+2. **Check the account id.** `cloudflare_account_id` in
+   [tofu/terraform.tfvars](tofu/terraform.tfvars) is the project's account (**Workers &
+   Pages** > **Account details** > **Account ID**; it is not secret). A fork sets its
+   own; left empty, tofu reads it from the bootstrap token, which then must see exactly
+   one account.
+
+3. **Create the infrastructure.** `task deploy:infra:plan` shows what will change;
+   `task deploy:infra` shows the plan again and applies it after you type `yes`. It
+   creates the deploy token and the TURN key, adopts the existing `production`
+   environment, restricts it to `main`, and writes the six secrets. Then commit
+   `deploy/secrets.sops.yaml` and the encrypted `deploy/tofu/terraform.tfstate`.
+
+4. **Deploy.** **Actions** > **Deploy** > **Run workflow** on `main`, or push to `main`.
+   The first run creates the Worker, its Durable Object class and its rate limiter.
+
+5. **Verify.** `task deploy:check` runs [smoke.mjs](smoke.mjs) against
+   `PROJECT_RENDEZVOUS` (versions after `--`; default the workspace version) and ends
+   with `SMOKE OK`. The deploy job runs the same check and links the environment URL.
+   By hand:
+
+   - `https://castcorder.jexmax.workers.dev/healthz` answers `ok`;
+   - `castcorder-host --dist castcorder/crates/castcorder-client/dist --rendezvous https://castcorder.jexmax.workers.dev`
+     prints `CALL_LINK https://castcorder.jexmax.workers.dev/v/0.0.0/#...`; open that
      link in a browser on another network and join the call;
    - in the dashboard, **Workers & Pages** > **castcorder** > **Settings** lists
      `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` as secrets, and **Logs** shows requests.
 
-To rotate a credential, replace the GitHub secret and rerun the workflow. To remove a
-secret from the Worker, run `npx wrangler secret delete NAME` in `castcorder/worker`.
+**Changing it later.** Edit `deploy/tofu`, then `task deploy:infra` and commit the
+state. To rotate a credential, replace its resource and rerun the workflow:
+`sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`
+(or `cloudflare_calls_turn_app.production`). Cloudflare returns token and key values
+only when it creates them, so tofu refuses to write an empty GitHub secret rather than
+overwrite a good one. `task deploy:infra:validate` (fmt and validate, no secrets) runs in
+CI's hygiene job. To remove a secret from the Worker, run
+`npx wrangler secret delete NAME` in `castcorder/worker`.
 
 ### The default rendezvous
 
@@ -161,7 +190,9 @@ infrastructure instead of the project's:
   `docker-compose.yml` does for development (`task dev:up`). Start hosts with
   `--rendezvous https://your.host`.
 - **Your own Worker** (your Cloudflare account): fork the repository and follow the
-  setup above, or deploy by hand: `task worker:assets` and `task worker:build`, then in
+  setup above (put your age key in `.sops.yaml`, your owner in `github_owner` and
+  `github_repository` in `deploy/tofu/terraform.tfvars`, and delete the committed
+  `deploy/secrets.sops.yaml` and `terraform.tfstate` if present), or deploy by hand: `task worker:assets` and `task worker:build`, then in
   `castcorder/worker` `npx wrangler login` and `npx wrangler deploy`. For the relay,
   either `npx wrangler secret put CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` (Cloudflare
   TURN), or `RELAY=coturn` with `TURN_URLS` and the secret `TURN_SECRET`, or
