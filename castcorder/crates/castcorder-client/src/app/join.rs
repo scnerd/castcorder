@@ -530,11 +530,12 @@ async fn signal_offer(
 }
 
 /// The host's scope for tracks and logs: `link-<host>` for a page opened
-/// from a call link, else the signaling URL.
+/// from a call link, else the signaling URL without its query (every
+/// room's page of one host shares it: [`crate::scope`]).
 pub(super) fn host_scope(url: &str) -> String {
     match LINK.with(|l| l.borrow().clone()) {
         Some(link) => format!("link-{}", link.host.short()),
-        None => url.to_string(),
+        None => crate::scope::lan_host_scope(url),
     }
 }
 

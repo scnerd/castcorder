@@ -143,7 +143,7 @@ fn release(file: &str) {
 /// this host, then post every offer the host has not confirmed.
 pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
     let call = string(&msg, "call");
-    let legacy = string(&msg, "legacy");
+    let legacy = crate::scope::normalize(&string(&msg, "legacy"));
     if !call.is_empty() {
         CALL.with(|c| *c.borrow_mut() = call);
         let changed = LEGACY.with(|l| l.replace(legacy.clone()) != legacy);
@@ -164,16 +164,10 @@ pub async fn prepare(msg: JsValue) -> Result<(), JsValue> {
 }
 
 /// Whether a track's sidecar `call` belongs to this host: any of its calls
-/// (`<legacy>/<room>/<call>`), or from before rooms (`<legacy>`).
+/// (`<legacy>/<room>/<call>`), or from before rooms (`<legacy>`), whichever
+/// room's page recorded it ([`crate::scope::in_scope`]).
 fn in_scope(meta_call: &str) -> bool {
-    LEGACY.with(|l| {
-        let l = l.borrow();
-        !l.is_empty()
-            && (meta_call == l.as_str()
-                || meta_call
-                    .strip_prefix(l.as_str())
-                    .is_some_and(|rest| rest.starts_with('/')))
-    })
+    LEGACY.with(|l| crate::scope::in_scope(meta_call, &l.borrow()))
 }
 
 /// The room and call an item is offered for: empty for the call this device
@@ -184,21 +178,7 @@ fn offer_call(scope: &str) -> (String, String) {
         CALL.with(|c| c.borrow().clone()),
         LEGACY.with(|l| l.borrow().clone()),
     );
-    if scope == call || legacy.is_empty() {
-        return Default::default();
-    }
-    let Some(rest) = scope
-        .strip_prefix(legacy.as_str())
-        .and_then(|r| r.strip_prefix('/'))
-    else {
-        return Default::default();
-    };
-    match rest.split_once('/') {
-        Some((room, call)) if !room.is_empty() && !call.is_empty() && !call.contains('/') => {
-            (room.to_string(), call.to_string())
-        }
-        _ => Default::default(),
-    }
+    crate::scope::offer_call(scope, &call, &legacy)
 }
 
 /// Remember which call these outbox items were recorded in.
@@ -607,7 +587,7 @@ fn log_call(text: &str) -> String {
             break;
         };
         let call = &rest[..end];
-        if in_scope(call) && LEGACY.with(|l| call != l.borrow().as_str()) {
+        if in_scope(call) && LEGACY.with(|l| !crate::scope::is_host(call, &l.borrow())) {
             return call.to_string();
         }
     }
