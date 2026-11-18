@@ -7,12 +7,12 @@ locals {
   environment_secrets = {
     CLOUDFLARE_API_TOKEN  = cloudflare_account_token.deploy.value
     CLOUDFLARE_ACCOUNT_ID = local.account_id
-    CF_TURN_KEY_ID        = cloudflare_calls_turn_app.production.uid
-    CF_TURN_API_TOKEN     = cloudflare_calls_turn_app.production.key
+    CF_TURN_KEY_ID        = var.cf_turn_key_id
+    CF_TURN_API_TOKEN     = var.cf_turn_api_token
   }
   repository_secrets = {
-    CF_TURN_KEY_ID    = cloudflare_calls_turn_app.production.uid
-    CF_TURN_API_TOKEN = cloudflare_calls_turn_app.production.key
+    CF_TURN_KEY_ID    = var.cf_turn_key_id
+    CF_TURN_API_TOKEN = var.cf_turn_api_token
   }
 }
 
@@ -49,7 +49,7 @@ resource "github_actions_environment_secret" "production" {
   lifecycle {
     precondition {
       condition     = try(length(local.environment_secrets[each.value]) > 0, false)
-      error_message = "No value for this secret: Cloudflare returns token and key values only on creation. Replace the source resource (tofu apply -replace=...) to mint a new one."
+      error_message = "No value for this secret: Cloudflare returns token and key values only on creation. For CF_TURN_*, run `task deploy:turn-key`; for the deploy token, replace it (tofu apply -replace=cloudflare_account_token.deploy)."
     }
   }
 }
@@ -64,7 +64,7 @@ resource "github_actions_secret" "ci" {
   lifecycle {
     precondition {
       condition     = try(length(local.repository_secrets[each.value]) > 0, false)
-      error_message = "No value for this secret: Cloudflare returns key values only on creation. Replace cloudflare_calls_turn_app.production (tofu apply -replace=...) to mint a new one."
+      error_message = "No value for this secret: run `task deploy:turn-key` to create the TURN key and store it in deploy/secrets.sops.yaml."
     }
   }
 }

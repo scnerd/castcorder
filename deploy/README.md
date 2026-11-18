@@ -140,16 +140,23 @@ apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
    own; left empty, tofu reads it from the bootstrap token, which then must see exactly
    one account.
 
-3. **Create the infrastructure.** `task deploy:infra:plan` shows what will change;
+3. **Create the TURN key.** `task deploy:turn-key` creates the Realtime TURN key
+   `castcorder-production` with the bootstrap token and stores its id and API token in
+   `deploy/secrets.sops.yaml` as `cf_turn_key_id` and `cf_turn_api_token`. Cloudflare
+   shows the API token only on creation and the OpenTofu provider does not keep it, so
+   SOPS holds it rather than tofu. Run it once; `FORCE=1` makes a new key (then delete
+   the old one under **Realtime** > **TURN Server**).
+
+4. **Create the infrastructure.** `task deploy:infra:plan` shows what will change;
    `task deploy:infra` shows the plan again and applies it after you type `yes`. It
-   creates the deploy token and the TURN key, adopts the existing `production`
+   creates the deploy token, adopts the existing `production`
    environment, restricts it to `main`, and writes the six secrets. Then commit
    `deploy/secrets.sops.yaml` and the encrypted `deploy/tofu/terraform.tfstate`.
 
-4. **Deploy.** **Actions** > **Deploy** > **Run workflow** on `main`, or push to `main`.
+5. **Deploy.** **Actions** > **Deploy** > **Run workflow** on `main`, or push to `main`.
    The first run creates the Worker, its Durable Object class and its rate limiter.
 
-5. **Verify.** `task deploy:check` runs [smoke.mjs](smoke.mjs) against
+6. **Verify.** `task deploy:check` runs [smoke.mjs](smoke.mjs) against
    `PROJECT_RENDEZVOUS` (versions after `--`; default the workspace version) and ends
    with `SMOKE OK`. The deploy job runs the same check and links the environment URL.
    By hand:
@@ -163,9 +170,9 @@ apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
 
 **Changing it later.** Edit `deploy/tofu`, then `task deploy:infra` and commit the
 state. To rotate a credential, replace its resource and rerun the workflow:
-`sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`
-(or `cloudflare_calls_turn_app.production`). Cloudflare returns token and key values
-only when it creates them, so tofu refuses to write an empty GitHub secret rather than
+`sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`.
+For the TURN key, `FORCE=1 task deploy:turn-key` then `task deploy:infra`. Cloudflare
+returns token and key values only when it creates them, so tofu refuses to write an empty GitHub secret rather than
 overwrite a good one. `task deploy:infra:validate` (fmt and validate, no secrets) runs in
 CI's hygiene job. To remove a secret from the Worker, run
 `npx wrangler secret delete NAME` in `castcorder/worker`.

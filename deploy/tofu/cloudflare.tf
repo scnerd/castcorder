@@ -52,9 +52,7 @@ resource "cloudflare_account_token" "deploy" {
   }
 }
 
-# The long-lived key the Worker mints short-lived TURN credentials from: uid is its Turn
-# Token ID (CF_TURN_KEY_ID), key its API token (CF_TURN_API_TOKEN).
-resource "cloudflare_calls_turn_app" "production" {
-  account_id = local.account_id
-  name       = "castcorder-production"
-}
+# The Realtime TURN key is not managed here: Cloudflare returns its API token only on
+# creation and cloudflare_calls_turn_app (5.29.0) does not keep it in state, so
+# `task deploy:turn-key` creates it and stores cf_turn_key_id and cf_turn_api_token in
+# deploy/secrets.sops.yaml, which reach tofu as variables.

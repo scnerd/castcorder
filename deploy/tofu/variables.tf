@@ -37,3 +37,16 @@ variable "deploy_token_permission_groups" {
   type        = list(string)
   default     = ["Workers Scripts Write", "Account Settings Read"]
 }
+
+variable "cf_turn_key_id" {
+  description = "Realtime TURN key id (cf_turn_key_id in deploy/secrets.sops.yaml, written by `task deploy:turn-key`)."
+  type        = string
+  default     = ""
+}
+
+variable "cf_turn_api_token" {
+  description = "Realtime TURN key API token (cf_turn_api_token in deploy/secrets.sops.yaml, written by `task deploy:turn-key`)."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
