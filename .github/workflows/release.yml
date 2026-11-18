@@ -241,14 +241,14 @@ jobs:
       contents: write
     steps:
       - name: Download installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: installers-*
           path: installers
           merge-multiple: true
 
       - name: Download the client archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: client
           path: installers
