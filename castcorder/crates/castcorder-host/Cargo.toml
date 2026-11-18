@@ -28,7 +28,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # The rendezvous connection: a blocking WebSocket on its own thread; TLS for
 # wss:// is rustls (below) with the Mozilla roots, not tungstenite's TLS features.
-getrandom = "0.3"
+getrandom = "0.4"
 tungstenite = { version = "0.30", default-features = false, features = [
   "handshake",
 ] }
