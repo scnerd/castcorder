@@ -256,6 +256,8 @@ jobs:
           (cd "$RUNNER_TEMP" && "$OLDPWD/$appimage" --appimage-extract >/dev/null)
           echo "GStreamer files inside the AppImage:"
           find "$RUNNER_TEMP/squashfs-root" -name 'libgst*' -o -name 'gstreamer-1.0' -type d | sed "s|$RUNNER_TEMP/squashfs-root||" | sort
+          ls "$RUNNER_TEMP/squashfs-root/apprun-hooks" && cat "$RUNNER_TEMP"/squashfs-root/apprun-hooks/* | grep -n -i -E 'gst|gio|LD_' || true
+          GST_DEBUG=GST_PLUGIN_LOADING:4,GST_REGISTRY:4 "$appimage" --smoke-gst 2>&1 | grep -v -E 'GST_MISSING' | head -60 || true
           "$appimage" --smoke-gst 2>&1 | tee smoke-gst-appimage.log
           grep -q GST_OK smoke-gst-appimage.log
 
