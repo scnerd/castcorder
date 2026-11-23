@@ -306,6 +306,8 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   /* The end side holds Leave call: a call must always be leavable (cast-abe). */
   .dock-label, .dock-side:not(.end) { display: none; }
   .dock-side.end { width: auto; }
+  /* Above the full-screen side panel (open by default for producers). */
+  .dock { position: relative; z-index: 11; }
   .side { position: fixed; inset: 0; width: auto; z-index: 10; }
 }
 

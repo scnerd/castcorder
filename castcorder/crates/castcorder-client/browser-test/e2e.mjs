@@ -319,8 +319,11 @@ try {
     check(last.tracks.length === 0 && last.contexts === 0, 'guest ' + n + ' ' + what + ': ' + last.total + ' tracks all ended'
       + (last.tracks.length ? ' (still live: ' + last.tracks.join(', ') + ')' : '') + ', open audio contexts ' + last.contexts);
   };
-  // A call is always leavable on a phone (cast-abe): B, a plain guest.
+  // A call is always leavable on a phone (cast-abe): B, a plain guest, and
+  // A, a producer, whose side panel (People) is open by default.
   await phoneLeaveChecks(B, 'B');
+  console.log('info A side panel open: ' + (await A.locator('aside.side').isVisible()));
+  await phoneLeaveChecks(A, 'A');
   for (const [n, p] of [['A', A], ['B', B]]) {
     await noErrors(p, n);
     await p.click('#leave');
