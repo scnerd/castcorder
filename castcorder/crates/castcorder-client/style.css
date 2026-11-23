@@ -102,7 +102,9 @@ input[type="text"], input[type="password"], input:not([type]), select {
   background: var(--surface2); }
 
 /* App shell */
-.app { height: 100vh; display: flex; flex-direction: column; }
+/* 100dvh where supported: on a phone 100vh reaches under the browser's own bars,
+   which would hide the dock (and Leave call) below the fold (cast-abe). */
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
 .call { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 /* Lobby */
@@ -301,7 +303,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
   .stage { grid-template-columns: minmax(0, 1fr); }
-  .dock-label, .dock-side { display: none; }
+  /* The end side holds Leave call: a call must always be leavable (cast-abe). */
+  .dock-label, .dock-side:not(.end) { display: none; }
+  .dock-side.end { width: auto; }
   .side { position: fixed; inset: 0; width: auto; z-index: 10; }
 }
 

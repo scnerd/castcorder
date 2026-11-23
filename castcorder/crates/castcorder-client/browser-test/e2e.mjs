@@ -107,6 +107,7 @@ import { rejoinChecks } from './lib/rejoin.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { devicesChecks } from './lib/devices.mjs';
 import { openGuest } from './lib/guest.mjs';
+import { phoneLeaveChecks } from './lib/phone.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -318,6 +319,8 @@ try {
     check(last.tracks.length === 0 && last.contexts === 0, 'guest ' + n + ' ' + what + ': ' + last.total + ' tracks all ended'
       + (last.tracks.length ? ' (still live: ' + last.tracks.join(', ') + ')' : '') + ', open audio contexts ' + last.contexts);
   };
+  // A call is always leavable on a phone (cast-abe): B, a plain guest.
+  await phoneLeaveChecks(B, 'B');
   for (const [n, p] of [['A', A], ['B', B]]) {
     await noErrors(p, n);
     await p.click('#leave');
