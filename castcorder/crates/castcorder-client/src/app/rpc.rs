@@ -126,6 +126,14 @@ pub(super) fn pump_rpc(ui: Ui) {
                             }
                         }
                     }
+                    // The others learn this camera's state (on or off) now,
+                    // then whenever it changes (`media::report_camera`).
+                    match rpc.send(Request::CameraState {
+                        on: e.camera.is_some(),
+                    }) {
+                        Ok(id) => e.camera_requests.push(id),
+                        Err(err) => warn!(error = ?err, "camera report not sent"),
+                    }
                 }
                 other => {
                     warn!(call = %ctx.call, device = %ctx.device, response = ?other, "join refused");
@@ -147,6 +155,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 Some(Response::Done) => {}
                 Some(other) => warn!(response = ?other, "microphone report refused"),
                 None => e.mic_requests.push(id),
+            }
+        }
+        for id in std::mem::take(&mut e.camera_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "camera report refused"),
+                None => e.camera_requests.push(id),
             }
         }
         for id in std::mem::take(&mut e.ack_requests) {
@@ -301,6 +316,15 @@ pub(super) fn pump_rpc(ui: Ui) {
                     ui.call_ref.set(Some(c));
                 }
                 Event::Calls(list) => ui.calls.set(list),
+                Event::CameraState { participant, on } => {
+                    info!(call = %ctx.call, device = %ctx.device, guest = participant.0,
+                        "camera signalled {}", if on { "on" } else { "off" });
+                    match e.cameras.iter_mut().find(|(p, _)| *p == participant.0) {
+                        Some((_, c)) => *c = on,
+                        None => e.cameras.push((participant.0, on)),
+                    }
+                    show_camera(participant.0, on);
+                }
             }
         }
         (statuses, e.ctx.clone())
@@ -619,14 +643,19 @@ pub(super) fn on_track(ev: RtcTrackEvent) {
         el.set_class_name("remote-video");
         let _ = el.set_attribute("width", "320");
         let _ = el.set_attribute("height", "180");
-        // A camera turned off sends nothing: the browser mutes the track.
+        // A camera turned off sends nothing, and some browsers then mute the
+        // track; the signalled state (`Event::CameraState`) is what counts,
+        // so an unmute never shows video while the camera is signalled off.
         let tile2 = tile.clone();
         let on_mute = Closure::<dyn FnMut()>::new(move || {
             let _ = tile2.class_list().add_1("camera-off");
         });
         let tile3 = tile.clone();
+        let participant = origin_participant(&origin);
         let on_unmute = Closure::<dyn FnMut()>::new(move || {
-            let _ = tile3.class_list().remove_1("camera-off");
+            if signalled_camera(participant) != Some(false) {
+                let _ = tile3.class_list().remove_1("camera-off");
+            }
         });
         track.set_onmute(Some(on_mute.as_ref().unchecked_ref()));
         track.set_onunmute(Some(on_unmute.as_ref().unchecked_ref()));
@@ -702,9 +731,57 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     let words = doc.create_element("span").ok()?;
     let _ = chip.append_child(&words);
     let _ = tile.append_child(&chip);
+    // Its camera may have been signalled off before its first track came.
+    if signalled_camera(origin_participant(origin)) == Some(false) {
+        let _ = tile.class_list().add_1("camera-off");
+    }
     let _ = remote.append_child(&tile);
     chip_tile(&tile);
     Some(tile)
+}
+
+/// The participant id a forwarded stream id `<name>-<id>` ends in.
+fn origin_participant(origin: &str) -> Option<u64> {
+    origin.rsplit_once('-').and_then(|(_, id)| id.parse().ok())
+}
+
+/// A participant's camera as last signalled (`Event::CameraState`), if it
+/// has been.
+fn signalled_camera(participant: Option<u64>) -> Option<bool> {
+    let participant = participant?;
+    with_engine(|e| {
+        e.cameras
+            .iter()
+            .find(|(p, _)| *p == participant)
+            .map(|(_, on)| *on)
+    })
+}
+
+/// Show a participant's signalled camera state on their tile (if it exists
+/// yet; [`remote_tile`] applies it to one made later): camera-off shows the
+/// avatar, not the video element's last frame.
+fn show_camera(participant: u64, on: bool) {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i)
+            && t.get_attribute("data-origin")
+                .as_deref()
+                .and_then(origin_participant)
+                == Some(participant)
+        {
+            let _ = if on {
+                t.class_list().remove_1("camera-off")
+            } else {
+                t.class_list().add_1("camera-off")
+            };
+        }
+    }
 }
 
 /// The name shown on a remote tile: the participant's display name (the

@@ -175,6 +175,17 @@ pub enum Request {
         /// The track.
         offer: TrackOffer,
     },
+    /// This participant's camera in the call: on (its video track is on the
+    /// sender) or off (nothing is sent). Sent after every join and whenever
+    /// it changes, so the others show the camera-off tile instead of a
+    /// frozen last frame, whatever the browser reports of a silent track.
+    /// The host keeps the latest per participant and relays it to everyone
+    /// else in the call, latecomers included ([`Event::CameraState`]).
+    /// Answered with [`Response::Done`] (appended).
+    CameraState {
+        /// The camera is on.
+        on: bool,
+    },
 }
 
 /// One recorded source's state on its device, as the device reports it.
@@ -501,6 +512,15 @@ pub enum Event {
     /// The room's calls, oldest first (sent to producers only, after joining
     /// and whenever they change; appended).
     Calls(Vec<CallSummary>),
+    /// Another participant's camera, as it reported it
+    /// ([`Request::CameraState`]): relayed when it changes, and every
+    /// participant's latest to a device right after it joins (appended).
+    CameraState {
+        /// Whose camera (their forwarded stream id ends in `-<id>`).
+        participant: ParticipantId,
+        /// The camera is on.
+        on: bool,
+    },
 }
 
 /// A call of a room on a host.
@@ -730,6 +750,7 @@ mod tests {
                     format: "wav".into(),
                 },
             },
+            Request::CameraState { on: true },
         ];
         for (i, request) in client.into_iter().enumerate() {
             let msg = ClientMessage::Request {
@@ -795,6 +816,10 @@ mod tests {
                 participant: ParticipantId(2),
                 muted: true,
                 level: 128,
+            }),
+            CoreMessage::Event(Event::CameraState {
+                participant: ParticipantId(2),
+                on: false,
             }),
             CoreMessage::Event(Event::Recorders(vec![Recorder {
                 participant: ParticipantId(2),
@@ -1137,6 +1162,15 @@ mod tests {
                 current: true,
             }])),
             vec![11, 1, 0, 1, 2, 3, 1]
+        );
+        // Camera state (appended).
+        assert_eq!(encode(&Request::CameraState { on: false }), vec![14, 0]);
+        assert_eq!(
+            encode(&Event::CameraState {
+                participant: ParticipantId(4),
+                on: true
+            }),
+            vec![12, 4, 1]
         );
     }
 

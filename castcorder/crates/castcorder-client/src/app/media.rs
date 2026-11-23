@@ -148,6 +148,7 @@ pub(super) async fn camera_on(ui: Ui, epoch: u32) {
                 .unwrap_or_default();
             info!(call = %ctx.call, device = %ctx.device, settings = %settings, "camera on");
             ui.camera_state.set("on".into());
+            report_camera();
             // Mid-take, with video recorded this take: a new video track.
             if let Some(take) = with_engine(|e| e.video_take) {
                 start_video(ui, take);
@@ -158,6 +159,7 @@ pub(super) async fn camera_on(ui: Ui, epoch: u32) {
             ui.camera.set(false);
             ui.camera_state
                 .set(format!("unavailable ({})", describe(&e)));
+            report_camera();
         }
     }
 }
@@ -175,6 +177,30 @@ pub(super) fn camera_off(ui: Ui) {
     show_preview(None);
     info!(call = %ctx.call, device = %ctx.device, "camera off");
     ui.camera_state.set("off".into());
+    report_camera();
+}
+
+/// Tell the others whether this participant's camera is on
+/// ([`Request::CameraState`]): sent when it turns on or off, and after every
+/// join (from `rpc`), so their tile never keeps a frozen last frame.
+pub(super) fn report_camera() {
+    with_engine(send_camera);
+}
+
+/// [`report_camera`] on an engine already borrowed. Nothing before joining:
+/// the join sends it.
+pub(super) fn send_camera(e: &mut super::Engine) {
+    if e.participant.is_none() {
+        return;
+    }
+    let on = e.camera.is_some();
+    let Some(rpc) = e.rpc.as_mut() else {
+        return;
+    };
+    match rpc.send(Request::CameraState { on }) {
+        Ok(id) => e.camera_requests.push(id),
+        Err(err) => warn!(error = ?err, "camera report not sent"),
+    }
 }
 
 /// Put the current camera track (or nothing) on the connection's video sender.

@@ -216,6 +216,9 @@ pub(super) fn disconnect() {
         e.offered.clear();
         e.offer_requests.clear();
         e.mic_requests.clear();
+        e.camera_requests.clear();
+        // The host sends every camera's state again after the next join.
+        e.cameras.clear();
         e.join_request = None;
         e.status_request = None;
         e.participant = None;

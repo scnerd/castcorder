@@ -1,6 +1,24 @@
 import { ctx } from './ctx.mjs';
 import { sleep, waitFor, text, json, check, videoFrom, decoding, audioRising } from './helpers.mjs';
 
+// When `rx`'s tile for `from` reaches camera-off == `want` (Date.now()), or
+// null if not within `timeout` ms.
+async function camOff(rx, from, want, timeout) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeout) {
+    const is = await rx.evaluate((from) => {
+      const t = [...document.querySelectorAll('#remote .tile')].find((e) => e.dataset.origin.startsWith(from + '-'));
+      return t ? t.classList.contains('camera-off') : null;
+    }, from);
+    if (is === want) return Date.now();
+    await sleep(50);
+  }
+  return null;
+}
+
+// Whether the receiver logged a signalled camera state `on` (rpc.rs).
+const signalled = (lines, on, since) => lines.slice(since).some((l) => l.includes('camera signalled ' + (on ? 'on' : 'off')));
+
 // Live video (cast-riw): A and B each decode the other's forwarded camera
 // (fake devices) and show it in a tile named after them; A sends two
 // simulcast layers where the browser does (Chromium); A's camera turned off
@@ -33,8 +51,15 @@ export async function videoChecks(A, B) {
   // Camera off: released, B's frames from A stop, audio goes on.
   const offers = () => (ctx.hostLog.match(/sent offer/g) || []).length;
   const offersBefore = offers();
+  const offLogs = ctx.logs.B.length;
   await A.click('#camera');
+  const tOff = Date.now();
   await waitFor(async () => (await text(A, '#camera-state')) === 'off', 'A camera off', 5000);
+  // B's tile for A shows camera off (the avatar, not a frozen last frame)
+  // from A's signalled camera state, not only the track's mute (cast-qoz).
+  const off = await camOff(B, 'A', true, 3000);
+  check(off !== null && off - tOff <= 1500 && signalled(ctx.logs.B, false, offLogs),
+    'B\x27s tile for A turns camera-off ' + (off === null ? 'never' : (off - tOff) + ' ms') + ' after A turns its camera off, from A\x27s signalled state');
   const live = await A.evaluate(() => window.__tracks.filter((t) => t.kind === 'video' && t.readyState !== 'ended').length);
   check(live === 0, 'turning the camera off releases it (' + live + ' live video tracks)');
   await sleep(1500);
@@ -44,8 +69,13 @@ export async function videoChecks(A, B) {
   const y = videoFrom(await json(B, '#debug-inbound'), 'A');
   check(y.frames - x.frames <= 2 && audio > 0,
     'with A\x27s camera off B decodes no new frames from A (' + (y.frames - x.frames) + ' in 3 s) and still gets A\x27s audio (' + audio + ' packets in 2 s)');
+  const onLogs = ctx.logs.B.length;
   await A.click('#camera');
   await waitFor(async () => (await text(A, '#camera-state')) === 'on', 'A camera on again', 10000);
+  const tOn = Date.now();
+  const on = await camOff(B, 'A', false, 3000);
+  check(on !== null && on - tOn <= 1500 && signalled(ctx.logs.B, true, onLogs),
+    'B\x27s tile for A shows video again ' + (on === null ? 'never' : (on - tOn) + ' ms') + ' after A\x27s camera is on again');
   const again = await decoding(B, 'A', 'B decoding A\x27s camera again', 20000);
   check(again.fps >= 3 && offers() === offersBefore, 'A\x27s camera back on: B decodes it again (' + again.fps.toFixed(1)
     + ' fps); the host sent ' + (offers() - offersBefore) + ' offers meanwhile (no renegotiation)');

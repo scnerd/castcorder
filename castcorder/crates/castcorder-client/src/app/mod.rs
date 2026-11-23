@@ -227,6 +227,12 @@ struct Engine {
     /// (Date.now() ms) the last was sent.
     mic_requests: Vec<RequestId>,
     mic_sent_at: f64,
+    /// Camera reports (`CameraState`) awaiting their answer.
+    camera_requests: Vec<RequestId>,
+    /// The others' cameras as signalled (`Event::CameraState`), by
+    /// participant id: their tile shows camera-off while it says off,
+    /// whatever its video track reports.
+    cameras: Vec<(u64, bool)>,
     /// Disk reports awaiting their answer, and when (Date.now() ms) the next
     /// is due while nothing else triggers one.
     disk_requests: Vec<RequestId>,
