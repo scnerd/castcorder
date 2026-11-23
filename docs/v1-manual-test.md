@@ -28,7 +28,7 @@ can (one on mobile data is ideal), and the draft release's installers.
 Use the default rendezvous (no flags), with the guests on a different network from the host.
 
 - [ ] **Call link.** On the host, open a room. Expect: a call link
-  `https://castcorder.app/v/X.Y.Z/#...` (this release's version) with a Copy button.
+  `https://castcorder.jexmax.workers.dev/v/X.Y.Z/#...` (this release's version) with a Copy button.
 - [ ] **Browser guest (Chrome or Edge).** Open the link on another network, enter a name, allow
   the microphone, Join. Expect: both sides see each other's tile and hear each other within a
   few seconds.
@@ -138,7 +138,7 @@ talking, with a stretch where each speaks alone and a few seconds of silence at 
 After everything above passes and you publish the draft.
 
 - [ ] **Publish run.** The Publish workflow starts Deploy on `main`, and the run is green.
-- [ ] **Web client.** `https://castcorder.app/v/X.Y.Z/` loads the browser client.
+- [ ] **Web client.** `https://castcorder.jexmax.workers.dev/v/X.Y.Z/` loads the browser client.
 - [ ] **Deploy check.** `task deploy:check -- X.Y.Z` passes.
 - [ ] **Fresh call link.** A host on the published installer makes a call link pinned to
   `/v/X.Y.Z/` and a browser guest joins it.
