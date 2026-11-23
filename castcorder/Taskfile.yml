@@ -218,13 +218,17 @@ tasks:
       host serves it from beside the executable or the platform's resource
       directory), then runs `cargo tauri build` (tauri-cli 2: `cargo binstall
       tauri-cli --version "^2"`). Installers land in
-      <target dir>/release/bundle/. By default built without native-capture
-      (the webview microphone only). With native capture on Windows, stage the
-      trimmed GStreamer first and add its config (what release.yml does):
+      <target dir>/release/bundle/ (<target dir>/<target>/release/bundle/ with
+      --target). By default built without native-capture (the webview
+      microphone only). With native capture on Windows, stage the trimmed
+      GStreamer first and add its config (what release.yml does):
       task app:gst:stage
       task app:bundle FEATURES=desktop,native-capture EXTRA_CONFIG="--config tauri.gst.conf.json"
-      On Linux add EXTRA_CONFIG="--config tauri.gst-deb.conf.json" instead: the
-      .deb depends on the distro's GStreamer (1.24 or newer). Pass bundles after --, e.g.
+      On macOS the same with EXTRA_CONFIG="--config tauri.gst-macos.conf.json"
+      (release.yml adds -- --target universal-apple-darwin, with
+      PKG_CONFIG_ALLOW_CROSS=1). On Linux add EXTRA_CONFIG="--config
+      tauri.gst-deb.conf.json" instead: the .deb depends on the distro's
+      GStreamer (1.24 or newer). Pass bundles after --, e.g.
       task app:bundle -- --bundles nsis
     vars:
       FEATURES: '{{.FEATURES | default "desktop"}}'
@@ -243,16 +247,21 @@ tasks:
       - uv run ../scripts/render_icons.py
 
   app:gst:stage:
-    desc: Stage the trimmed, LGPL-only GStreamer the Windows installer bundles (crates/castcorder-app/gstreamer)
+    desc: Stage the trimmed, LGPL-only GStreamer the Windows and macOS installers bundle (crates/castcorder-app/gstreamer)
     summary: |
-      Copies the plugins native capture uses and the DLLs they import from the
-      MSVC GStreamer install (GSTREAMER_1_0_ROOT_MSVC_X86_64, or GST_ROOT=...)
-      with their licences; refuses GPL or patent-encumbered libraries. The app
-      loads the libraries from beside its executable and scans the plugins in
-      gstreamer-1.0 there (castcorder-capture-gst). See scripts/gst_bundle.py.
-    platforms: [windows]
+      Copies the plugins native capture uses and the libraries they import with
+      their licences; refuses GPL or patent-encumbered libraries. See
+      scripts/gst_bundle.py. Windows: from the MSVC GStreamer install
+      (GSTREAMER_1_0_ROOT_MSVC_X86_64, or GST_ROOT=...); the app loads the DLLs
+      from beside its executable and scans the plugins in gstreamer-1.0 there
+      (castcorder-capture-gst). macOS: from the universal GStreamer.framework
+      (runtime and devel packages; GST_ROOT defaults to its Versions/1.0);
+      tauri.gst-macos.conf.json puts the libraries in the .app's
+      Contents/Frameworks (the executable's rpath) and the plugins in
+      Contents/Frameworks/gstreamer-1.0.
+    platforms: [windows, darwin]
     vars:
-      GST_ROOT: "{{.GST_ROOT | default .GSTREAMER_1_0_ROOT_MSVC_X86_64}}"
+      GST_ROOT: '{{.GST_ROOT | default .GSTREAMER_1_0_ROOT_MSVC_X86_64 | default "/Library/Frameworks/GStreamer.framework/Versions/1.0"}}'
     cmds:
       - uv run ../scripts/gst_bundle.py '{{.GST_ROOT}}' crates/castcorder-app/gstreamer
 
