@@ -85,9 +85,15 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
-/// The directory beside the executable that holds a bundled GStreamer's
-/// plugins (the Windows installer; its libraries sit beside the executable).
-pub const BUNDLED_PLUGINS: &str = "gstreamer-1.0";
+/// The directory, relative to the executable's, that holds a bundled
+/// GStreamer's plugins: beside the exe on Windows (its libraries sit beside
+/// the exe too), `Contents/Frameworks/gstreamer-1.0` in the macOS `.app`
+/// (its libraries in `Contents/Frameworks`, the exe's rpath).
+pub const BUNDLED_PLUGINS: &str = if cfg!(target_os = "macos") {
+    "../Frameworks/gstreamer-1.0"
+} else {
+    "gstreamer-1.0"
+};
 
 fn init() -> io::Result<()> {
     gst::init().map_err(|e| err(format!("gstreamer init failed: {e}")))?;
