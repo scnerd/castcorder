@@ -69,9 +69,10 @@ tasks:
       Other build dirs: task worker:assets CLIENT_DIST=dist-agent
     vars:
       CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
-      # The workspace version, which hosts pin in their call links (ADR 0002).
+      # The workspace version, which hosts pin in their call links (ADR 0002). jq, not uv:
+      # deploy.yml's build job has no uv.
       WORKSPACE_VERSION:
-        sh: uv run --quiet ../scripts/release.py version
+        sh: jq -rRn '[inputs | capture("^version = \"(?<v>[0-9]+[.][0-9]+[.][0-9]+)\"")? | .v] | first // empty' Cargo.toml
       CLIENT_VERSION: "{{.CLIENT_VERSION | default .WORKSPACE_VERSION}}"
     cmds:
       - cd crates/castcorder-client && trunk build --release --dist {{.CLIENT_DIST}}

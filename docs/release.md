@@ -92,7 +92,7 @@ The private key must never enter the repository.
    linux-x86_64). Tauri's updater reads it from
    `https://github.com/scnerd/castcorder/releases/latest/download/latest.json`.
 
-4. Still to do in the app (a follow-up): add `tauri-plugin-updater`, put the public key and
+4. Still to do in the app (cast-qci): add `tauri-plugin-updater`, put the public key and
    that endpoint under `plugins.updater` in `tauri.conf.json`, and check for updates.
    Installed apps only update once a release containing that has been installed.
 

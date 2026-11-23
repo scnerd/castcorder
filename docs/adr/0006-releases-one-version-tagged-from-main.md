@@ -20,5 +20,5 @@ ADR 0002 makes a release a concept: every release's browser client stays at its 
 ## Consequences
 
 - A release is two human steps (merge the prepare pull request, push the tag) and one review (publish the draft).
-- The installed app does not check for updates yet: that needs `tauri-plugin-updater` and the public key in `tauri.conf.json`, which wait for the key. The manifest is ready for it.
+- The installed app does not check for updates yet: that needs `tauri-plugin-updater` and the public key in `tauri.conf.json`, which wait for the key (cast-qci). The manifest is ready for it.
 - A wire change that breaks the last release needs a `PROTOCOL_VERSION` bump, which a host checks on join; guests on an older client then get a clean version error.
