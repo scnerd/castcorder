@@ -22,8 +22,11 @@ jobs:
     name: hygiene
     runs-on: ubuntu-latest
     steps:
+      # Full history and tags: the protocol check compares with the last release tag.
       - name: Check out repository
         uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
 
       # Python tooling always goes through uv, never pip.
       - name: Install uv
@@ -47,6 +50,14 @@ jobs:
       # No secrets and no Cloudflare or GitHub calls: fmt, provider download, validate.
       - name: Validate deploy/tofu
         run: task deploy:infra:validate
+
+      # docs/release.md: every copy of the workspace version agrees, CHANGELOG.md is well
+      # formed, and the wire encodings of the last release are unchanged.
+      - name: Release consistency
+        run: task release:check
+
+      - name: Protocol compatibility with the last release
+        run: task release:protocol
 
   check:
     name: check
@@ -347,7 +358,9 @@ jobs:
         run: |
           docker compose up -d --build --wait --wait-timeout 600 || { docker compose logs; exit 1; }
           for _ in $(seq 1 30); do curl -fsS http://localhost:8080/healthz && break; sleep 1; done
-          curl -fsS -o /dev/null -w 'client index %{http_code}\n' http://localhost:8080/v/0.0.0/
+          version=$(cargo metadata --no-deps --format-version 1 --manifest-path castcorder/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "castcorder-client") | .version')
+          curl -fsS -o /dev/null -w 'client index %{http_code}\n' "http://localhost:8080/v/$version/"
           node castcorder/crates/castcorder-client/browser-test/stun-probe.mjs 127.0.0.1:3479 127.0.0.1:3478
 
       - name: Stack logs

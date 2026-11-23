@@ -69,13 +69,16 @@ tasks:
       Other build dirs: task worker:assets CLIENT_DIST=dist-agent
     vars:
       CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
-      CLIENT_VERSION: '{{.CLIENT_VERSION | default "0.0.0"}}'
+      # The workspace version, which hosts pin in their call links (ADR 0002).
+      WORKSPACE_VERSION:
+        sh: uv run --quiet ../scripts/release.py version
+      CLIENT_VERSION: "{{.CLIENT_VERSION | default .WORKSPACE_VERSION}}"
     cmds:
       - cd crates/castcorder-client && trunk build --release --dist {{.CLIENT_DIST}}
       - node worker/stage-assets.mjs crates/castcorder-client/{{.CLIENT_DIST}} {{.CLIENT_VERSION}}
 
   worker:dev:
-    desc: Run the Worker locally under wrangler dev (client at /v/0.0.0/, rendezvous at /ws; no Cloudflare account needed)
+    desc: Run the Worker locally under wrangler dev (client at /v/<workspace version>/, rendezvous at /ws; no Cloudflare account needed)
     summary: |
       Builds the client and the Worker, then `wrangler dev` on 127.0.0.1:8787
       (extra wrangler arguments after --). Point a host at it with

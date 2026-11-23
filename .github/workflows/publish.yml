@@ -1,0 +1,28 @@
+name: Publish
+
+# Publishing a release (docs/release.md) puts its web client live: this starts deploy.yml on
+# main, which stages every published release's client at /v/<version>/ (ADR 0002) and
+# deploys the Worker. A dispatch rather than deploying here: the production environment
+# only accepts main, and a release event runs on the tag.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy the released client
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Start the deploy workflow on main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh workflow run deploy.yml --ref main
+          echo "::notice::Started deploy.yml on main for $TAG; its smoke check covers /v/${TAG#v}/."

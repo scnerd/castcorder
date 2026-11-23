@@ -32,6 +32,42 @@ tasks:
       # pre-commit-uv makes hook environments install via uv, never pip.
       - uvx --with pre-commit-uv pre-commit run --all-files
 
+  # Releases (docs/release.md, ADR 0006). The version lives in castcorder/Cargo.toml
+  # ([workspace.package]); scripts/release.py writes and checks every copy of it.
+
+  release:prepare:
+    desc: "Bump every copy of the version and move CHANGELOG.md's Unreleased entries under it: task release:prepare VERSION=X.Y.Z"
+    requires:
+      vars: [VERSION]
+    cmds:
+      - uv run scripts/release.py prepare {{.VERSION}}
+
+  release:check:
+    desc: Every copy of the workspace version agrees and CHANGELOG.md is well formed (TAG=vX.Y.Z also checks the tag and the changelog entry)
+    cmds:
+      - uv run scripts/release.py check {{if .TAG}}--tag {{.TAG}}{{end}}
+
+  release:notes:
+    desc: Print CHANGELOG.md's entry for the workspace version (VERSION=X.Y.Z for another), the release's notes
+    vars:
+      WORKSPACE_VERSION:
+        sh: uv run --quiet scripts/release.py version
+    cmds:
+      - uv run scripts/release.py notes {{.VERSION | default .WORKSPACE_VERSION}}
+
+  release:protocol:
+    desc: The protocol's wire encodings (wire.golden) keep every line of the last release unless PROTOCOL_VERSION went up (BASE=<ref> to compare with another)
+    cmds:
+      - uv run scripts/release.py protocol {{if .BASE}}--base {{.BASE}}{{end}}
+
+  protocol:golden:
+    desc: Rewrite castcorder/crates/castcorder-protocol/wire.golden from the protocol test samples (after an intended wire change)
+    dir: castcorder
+    env:
+      CASTCORDER_BLESS: "1"
+    cmds:
+      - cargo test --locked -p castcorder-protocol --lib wire_encodings_match_the_golden_file
+
   test:
     desc: Everything in check, plus the system and browser tiers
     summary: |
