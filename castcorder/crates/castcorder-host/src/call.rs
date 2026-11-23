@@ -339,6 +339,9 @@ pub struct Call {
     tracks_due_us: i64,
     /// Free bytes each guest last reported ([`Request::DiskFree`]).
     disk: BTreeMap<GuestId, u64>,
+    /// Each joined guest's camera as it last reported it
+    /// ([`Request::CameraState`]), for latecomers: it is sent only on change.
+    cameras: BTreeMap<GuestId, bool>,
     /// The library volume's free bytes as last read, and when it is read next
     /// (host timeline, us): a syscall per half second would be needless, and
     /// this thread answers clock pings.
@@ -474,6 +477,7 @@ impl Call {
             tracks_sent: BTreeMap::new(),
             tracks_due_us: 0,
             disk: BTreeMap::new(),
+            cameras: BTreeMap::new(),
             library_free: None,
             library_free_due_us: 0,
             disk_due_us: 0,
@@ -565,6 +569,50 @@ impl Call {
             }
         }
         Response::Done
+    }
+
+    /// A participant's camera turned on or off (or its state after joining):
+    /// keep it for latecomers and relay it to everyone else who has joined,
+    /// so their tile for it shows the camera-off state instead of a frozen
+    /// last frame.
+    fn relay_camera(&mut self, from: GuestId, on: bool) -> Response {
+        if !self.names.contains_key(&from) {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "join first".into(),
+            };
+        }
+        self.cameras.insert(from, on);
+        let event = Event::CameraState {
+            participant: ParticipantId(from.0),
+            on,
+        };
+        for (id, rpc) in &mut self.rpc {
+            if *id != from && self.names.contains_key(id) && rpc.emit(event.clone()).is_err() {
+                warn!(guest = id.0, "camera state not sent: channel closed");
+            }
+        }
+        Response::Done
+    }
+
+    /// Tell a guest that just joined every other participant's camera state.
+    fn send_cameras(&mut self, to: GuestId) {
+        let Some(rpc) = self.rpc.get_mut(&to) else {
+            return;
+        };
+        for (&from, &on) in &self.cameras {
+            if from == to {
+                continue;
+            }
+            let event = Event::CameraState {
+                participant: ParticipantId(from.0),
+                on,
+            };
+            if rpc.emit(event).is_err() {
+                warn!(guest = to.0, "camera states not sent: channel closed");
+                return;
+            }
+        }
     }
 
     /// A device cannot meet the recording profile: warn, and tell every
@@ -1376,6 +1424,7 @@ impl Call {
                     Request::Room(action) => self.room_action(id, &action),
                     Request::ProfileUnmet(issue) => self.profile_unmet(id, issue),
                     Request::MicState { muted, level } => self.relay_mic(id, muted, level),
+                    Request::CameraState { on } => self.relay_camera(id, on),
                     Request::SourceAck(ack) => self.source_ack(id, ack),
                     Request::DiskFree { free_bytes } => {
                         self.disk.insert(id, free_bytes);
@@ -1390,6 +1439,7 @@ impl Call {
                     // everyone producing learns who is in.
                     self.send_call(&[id]);
                     self.send_roles(&[id.0]);
+                    self.send_cameras(id);
                     self.calls_dirty = true;
                     self.save_room();
                     self.broadcast_room();
@@ -1434,6 +1484,7 @@ impl Call {
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
                                 self.disk.remove(&guest);
+                                self.cameras.remove(&guest);
                                 self.unmet.remove(&guest);
                                 self.recorders.left(guest.0);
                                 self.recorders_dirty = true;
