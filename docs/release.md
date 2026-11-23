@@ -52,7 +52,8 @@ exists, a signed updater manifest. The decisions behind this are in
    and Linux, builds `castcorder-client-X.Y.Z.tar.gz`, and creates a **draft** release
    whose notes are the changelog entry. Check the draft: every installer is attached, the
    client archive is there, and (with the updater on) `latest.json` and the `.sig` files.
-   Install one if in doubt.
+   Install one if in doubt. For a first release, run the
+   [v1 manual test checklist](v1-manual-test.md) against the draft's installers.
 
 6. **Publish** the draft. That starts the Publish workflow, which runs the Deploy
    workflow on `main`: it stages every published release's client and deploys, and its
