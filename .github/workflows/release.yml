@@ -215,7 +215,8 @@ jobs:
           mnt="$RUNNER_TEMP/castcorder-dmg"
           dir="$RUNNER_TEMP/castcorder-install"
           mkdir -p "$mnt" "$dir"
-          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          # The .dmg shows the licence (bundle.licenseFile) and waits for "Y".
+          (yes || true) | PAGER="cat" hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" > /dev/null
           cp -R "$mnt"/*.app "$dir/"
           hdiutil detach "$mnt"
           app=$(ls -d "$dir"/*.app)
@@ -247,7 +248,8 @@ jobs:
           grep -q APP_READY smoke.log
 
       # The AppImage bundles what the executable links (libgstreamer and the
-      # other GStreamer libraries) but loads plugins from the system's GStreamer.
+      # other GStreamer libraries, 1.24 from the build machine) but no plugins:
+      # castcorder-capture-gst scans the system's plugin directories.
       - name: Smoke test the AppImage (Linux)
         if: matrix.name == 'linux'
         run: |
@@ -256,8 +258,6 @@ jobs:
           (cd "$RUNNER_TEMP" && "$OLDPWD/$appimage" --appimage-extract >/dev/null)
           echo "GStreamer files inside the AppImage:"
           find "$RUNNER_TEMP/squashfs-root" -name 'libgst*' -o -name 'gstreamer-1.0' -type d | sed "s|$RUNNER_TEMP/squashfs-root||" | sort
-          ls "$RUNNER_TEMP/squashfs-root/apprun-hooks" && cat "$RUNNER_TEMP"/squashfs-root/apprun-hooks/* | grep -n -i -E 'gst|gio|LD_' || true
-          GST_DEBUG=GST_PLUGIN_LOADING:4,GST_REGISTRY:4 "$appimage" --smoke-gst 2>&1 | grep -v -E 'GST_MISSING' | head -60 || true
           "$appimage" --smoke-gst 2>&1 | tee smoke-gst-appimage.log
           grep -q GST_OK smoke-gst-appimage.log
 
