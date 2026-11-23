@@ -84,8 +84,8 @@ Each device continuously measures its clock offset to the host and logs it besid
 
 - Licences: MIT/Apache-2.0 for the app and client crates, AGPL for the rendezvous, the shared mailbox crate and the Worker. No GPL GStreamer plugins.
 - Tooling mirrors the genesys repo: Taskfile as the single entry point, the `.githooks` chain running beads then pre-commit, hygiene-only hooks, beads for issues.
-- CI: GitHub-hosted runners (the repo is public). Linux runs every automated test tier on each pull request. A release is a version tag that builds Windows, macOS, and Linux installers and publishes the matching web client.
-- Builds are unsigned. Windows is first-class, macOS best-effort, Linux gets builds. Tauri's updater uses its own key.
+- CI: GitHub-hosted runners (the repo is public). Linux runs every automated test tier on each pull request. A release is a `vX.Y.Z` tag on `main` that builds Windows, macOS, and Linux installers into a draft GitHub Release; publishing it serves the matching web client at `/v/X.Y.Z/`. One version in `castcorder/Cargo.toml`, a Keep a Changelog `CHANGELOG.md`, and wire encodings frozen per release ([docs/release.md](release.md), ADR 0006).
+- Builds are unsigned. Windows is first-class, macOS best-effort, Linux gets builds. Tauri's updater uses its own key: release.yml signs updater artifacts and attaches `latest.json` once the key is in the repository's secrets; the app's update check is not built yet.
 - English-only UI in v1.
 
 ## Testing

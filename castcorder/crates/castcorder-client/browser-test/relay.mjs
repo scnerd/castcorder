@@ -39,6 +39,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
+import { VERSION } from './lib/version.mjs';
 import { callDir } from './lib/helpers.mjs';
 import { COTURN_IMAGE, docker, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
@@ -57,7 +58,6 @@ const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
 for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
   if (!existsSync(f)) { console.log('FAIL missing ' + f); process.exit(1); }
 }
-const VERSION = '0.0.0';
 // Lifetime of minted TURN credentials (s). The host renews at 80% of it, so
 // the first renewal lands mid-test. The guests renew theirs at 80% too
 // (cast-lxt.11, an ICE restart they ask the host for), so their restarts

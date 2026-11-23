@@ -108,6 +108,10 @@ _Avoid_: Background connection, upload session
 A connection opened on demand between two online devices of contacts, outside any call: no media, closed when idle. It carries track delivery, invites, and the status of shared rooms.
 _Avoid_: Channel, tunnel, sync session
 
+**Release**:
+A published version of Castcorder, `vX.Y.Z`: the installers, and the browser client served at `/v/X.Y.Z/` for as long as that version is supported, which the call links of its hosts pin. Its wire encodings are frozen: a later release changes them only with a new protocol version.
+_Avoid_: Build, deploy, drop
+
 **Invite**:
 A contact's request that you join a room now. It carries the room's call link and its sender, and the room's normal join rules still apply.
 _Avoid_: Ring, page, notification

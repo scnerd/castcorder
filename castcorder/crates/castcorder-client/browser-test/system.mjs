@@ -47,6 +47,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
+import { VERSION } from './lib/version.mjs';
 import { callDir, check, checks } from './lib/helpers.mjs';
 import { ctx } from './lib/ctx.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
@@ -72,7 +73,6 @@ const needed = WORKER ? [join(WORKER_DIR, 'build', 'index.js'), WRANGLER] : [RV_
 for (const f of [HOST_EXE, ...needed, join(dist, 'index.html')]) {
   if (!existsSync(f)) { console.log('FAIL missing ' + f); process.exit(1); }
 }
-const VERSION = '0.0.0';
 
 mkdirSync(RESULTS, { recursive: true });
 const INPUT_WAV = join(RESULTS, 'input-44k-s16-stereo.wav');
