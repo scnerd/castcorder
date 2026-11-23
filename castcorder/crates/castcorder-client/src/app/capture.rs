@@ -5,6 +5,9 @@ use super::*;
 /// How long a capture attempt may take to deliver its first audio.
 pub(super) const SOURCE_TIMEOUT_MS: i32 = 4000;
 
+/// How long the join's capture waits for the storage worker to listen.
+const WORKER_READY_WAIT_MS: i32 = 15_000;
+
 /// Where a capture attempt delivers its audio: the storage worker (the main
 /// microphone, source `mic`) or a backup microphone's own worker (its source
 /// id, see [`super::devices`]).
@@ -23,10 +26,26 @@ impl To {
     }
 
     fn post(&self, msg: &JsValue) {
-        if let Some(w) = self.worker()
-            && let Err(err) = w.post_message(msg)
-        {
+        if let Err(err) = self.send(msg, None) {
             warn!(error = %describe(&err), "post to worker failed");
+        }
+    }
+
+    /// Post `msg` to the target's worker: the storage worker's commands wait
+    /// for it to listen (see [`post_main_worker`]); a backup's worker is
+    /// used only once ready (see [`super::devices`]).
+    fn send(&self, msg: &JsValue, transfer: Option<&Array>) -> Result<(), JsValue> {
+        match self {
+            To::Main => post_main_worker(msg, transfer),
+            To::Backup(_) => {
+                let w = self
+                    .worker()
+                    .ok_or_else(|| JsValue::from_str("no worker"))?;
+                match transfer {
+                    Some(t) => w.post_message_with_transfer(msg, t),
+                    None => w.post_message(msg),
+                }
+            }
         }
     }
 
@@ -99,14 +118,7 @@ pub(super) async fn try_source(
             timeout_ms,
         );
     });
-    let posted = match to.worker() {
-        Some(w) => match transfer {
-            Some(t) => w.post_message_with_transfer(&msg, t),
-            None => w.post_message(&msg),
-        }
-        .map_err(|err| describe(&err)),
-        None => Err("no worker".to_string()),
-    };
+    let posted = to.send(&msg, transfer).map_err(|err| describe(&err));
     if let Err(err) = posted {
         SOURCE_ACK.with(|a| a.borrow_mut().retain(|(i, _)| *i != id));
         return Err(err);
@@ -317,6 +329,24 @@ pub(super) async fn start_capture(ui: Ui, raw: MediaStream, epoch: u32) {
         .unwrap_or_default();
     let mut failures = Vec::new();
     let mut chosen = "none";
+    // A page just loaded may join before its storage worker listens: each
+    // path's timeout must measure the source, not the worker's start, and
+    // the worker's features (MediaStreamTrackProcessor there) must be known.
+    let mut waited = 0;
+    while !worker_ready() && waited < WORKER_READY_WAIT_MS {
+        crate::mailbox::sleep_ms(50).await;
+        waited += 50;
+        if stale(epoch) {
+            return;
+        }
+    }
+    if waited > 0 {
+        info!(
+            waited_ms = waited,
+            ready = worker_ready(),
+            "capture waited for the storage worker"
+        );
+    }
     if let Some(track) = track.as_ref() {
         match capture_paths(ui, &To::Main, track, epoch).await {
             Ok(path) => chosen = path,

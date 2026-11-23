@@ -267,6 +267,10 @@ thread_local! {
     static DOCK_FLOOR: RefCell<crate::levels::NoiseFloor> = RefCell::new(Default::default());
     /// What the worker said at `ready`: is MediaStreamTrackProcessor exposed there?
     static MSTP_IN_WORKER: Cell<Option<bool>> = const { Cell::new(None) };
+    /// The storage worker has said `ready`: it listens for commands. Until
+    /// then they wait in `WORKER_QUEUE` (see [`post_main_worker`]).
+    static WORKER_READY: Cell<bool> = const { Cell::new(false) };
+    static WORKER_QUEUE: RefCell<Vec<(JsValue, Option<Array>)>> = const { RefCell::new(Vec::new()) };
     /// The capture attempts waiting for their worker's `source-ok` or
     /// `source-failed`, by attempt id (the storage worker and backup workers).
     static SOURCE_ACK: RefCell<Vec<(f64, js_sys::Function)>> = const { RefCell::new(Vec::new()) };
@@ -473,17 +477,48 @@ fn query_param(key: &str) -> Option<String> {
 }
 
 fn post_worker(msg: &JsValue, transfer: Option<&Array>) {
-    with_engine(|e| {
-        if let Some(w) = e.worker.as_ref() {
-            let r = match transfer {
-                Some(t) => w.post_message_with_transfer(msg, t),
-                None => w.post_message(msg),
-            };
-            if let Err(err) = r {
-                warn!(error = %describe(&err), "post to worker failed");
-            }
-        }
-    });
+    if let Err(err) = post_main_worker(msg, transfer) {
+        warn!(error = %describe(&err), "post to worker failed");
+    }
+}
+
+/// Post a command to the storage worker. A worker starts listening only once
+/// its wasm has loaded (its `ready`); a command posted before then would be
+/// dispatched to no handler and lost (cast-n1s: the join's capture source was,
+/// and a take that started meanwhile recorded nothing), so it waits here and
+/// goes, in order, at `ready`.
+fn post_main_worker(msg: &JsValue, transfer: Option<&Array>) -> Result<(), JsValue> {
+    let Some(w) = with_engine(|e| e.worker.clone()) else {
+        return Err(JsValue::from_str("no worker"));
+    };
+    if !WORKER_READY.get() {
+        WORKER_QUEUE.with(|q| q.borrow_mut().push((msg.clone(), transfer.cloned())));
+        return Ok(());
+    }
+    match transfer {
+        Some(t) => w.post_message_with_transfer(msg, t),
+        None => w.post_message(msg),
+    }
+}
+
+/// The storage worker said `ready`: what waited for it goes now, in order.
+fn worker_listening() {
+    WORKER_READY.set(true);
+    let queued = WORKER_QUEUE.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    if !queued.is_empty() {
+        info!(
+            commands = queued.len(),
+            "storage worker ready; posting what waited for it"
+        );
+    }
+    for (msg, transfer) in queued {
+        post_worker(&msg, transfer.as_ref());
+    }
+}
+
+/// Whether the storage worker listens yet (see [`post_main_worker`]).
+fn worker_ready() -> bool {
+    WORKER_READY.get()
 }
 
 /// Ship the page's buffered log lines to the worker, which writes them to its
@@ -517,6 +552,7 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
         match string(&d, "type").as_str() {
             "ready" => {
                 MSTP_IN_WORKER.set(Some(get(&d, "mstpInWorker").is_truthy()));
+                worker_listening();
                 post_worker(&worker_cmd("list"), None);
                 background::worker_ready(ui);
             }

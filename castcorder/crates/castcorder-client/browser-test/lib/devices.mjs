@@ -10,7 +10,10 @@ import { openGuest } from './guest.mjs';
 // and three outputs.
 //
 // Chromium: guest Y picks Fake Audio Input 1 and Fake Audio Output 1 in the
-// lobby, and both are still picked after a reload. In the call Y's Devices
+// lobby, and both are still picked after a reload. Y's storage worker starts
+// late (its wasm is served 2.5 s late), so Y joins before that worker
+// listens; its main microphone still records through the first capture path
+// (cast-n1s). In the call Y's Devices
 // dialog shows them, every participant's <audio> plays through the picked
 // output (sinkId), and Y adds Fake Audio Input 2 as a backup microphone. The
 // producer X starts a take; Y's backup records beside its main microphone.
@@ -22,7 +25,8 @@ import { openGuest } from './guest.mjs';
 // microphone still records, and the producers see that it cannot meet the
 // recording profile. After the take the host holds, verified: Y's two main
 // segments (named for their devices in order, the second starting after the
-// first ends, each with timing on the host timeline), Y's backup track
+// first ends, each with timing on the host timeline, the first holding the
+// audio from when Y said it recorded until the switch), Y's backup track
 // (source mic-2), and X's track. After Leave nothing is left open.
 //
 // fallback (MediaStreamTrackProcessor deleted from window): the same, with
@@ -49,7 +53,12 @@ export async function devicesChecks() {
     });
   });
   const X = await openGuest('X', [], HTTP9);
-  const Y = await openGuest('Y', [], HTTPS9);
+  // Y's storage worker starts late (its wasm is served 2.5 s late), so Y
+  // joins before that worker listens: the join's capture must still reach
+  // it (cast-n1s: the command was lost and the take's first segment held
+  // almost no audio).
+  const slowWorker = (c) => c.route('**/worker_bg.wasm', async (r) => { await sleep(2500); await r.continue(); });
+  const Y = await openGuest('Y', [], HTTPS9, slowWorker);
   const chosen = (p, sel) => p.evaluate((s) => { const e = document.querySelector(s); return e ? e.options[e.selectedIndex].textContent : null; }, sel);
   const options = (p, sel) => p.evaluate((s) => [...document.querySelectorAll(s + ' option')].map((o) => o.textContent), sel);
   const firefox = MODE === 'firefox';
@@ -77,6 +86,9 @@ export async function devicesChecks() {
   check(true, 'the lobby microphone pick is remembered across a reload');
   if (sinks) check((await chosen(Y, '#pick-out')) === 'Fake Audio Output 1', 'the lobby speakers pick is remembered across a reload');
 
+  // Only what this section logs: X and Y are names other sections use too.
+  const mark = { X: ctx.logs.X.length, Y: ctx.logs.Y.length };
+  const since = (n) => ctx.logs[n].slice(mark[n]);
   for (const p of [X, Y]) await p.click('#join');
   for (const [n, p] of [['X', X], ['Y', Y]]) {
     await waitFor(async () => (await text(p, '#participant')).length > 0, n + ' joined', 40000);
@@ -105,13 +117,28 @@ export async function devicesChecks() {
 
   // Both record from the take start (a capture path is chosen; a page whose
   // first path gave no audio in time has fallen back by then).
+  // The page logs the chosen path across several console lines.
+  const chosenPath = (n) => {
+    const l = since(n);
+    const i = l.findIndex((x) => x.includes('recording capture path chosen'));
+    if (i < 0) return null;
+    const m = l.slice(i, i + 4).join(' ').match(/capture_path = "([^"]+)"/);
+    return m ? m[1] : '?';
+  };
   for (const n of ['X', 'Y']) {
-    await waitFor(async () => ctx.logs[n].some((l) => l.includes('recording capture path chosen')), n + ' chose a capture path', 20000);
+    await waitFor(async () => chosenPath(n), n + ' chose a capture path', 20000);
   }
+  const yPath = chosenPath('Y');
+  // The first path that can work there (in fallback a Chromium with
+  // MediaStreamTrackProcessor in workers takes it there).
+  const wantPaths = firefox ? ['worklet'] : MODE === 'fallback' ? ['mstp-worker', 'worklet'] : ['mstp-window'];
+  check(wantPaths.includes(yPath), 'Y, joined before its storage worker listened, records its main microphone through '
+    + wantPaths.join(' or ') + ': ' + yPath);
   await waitFor(async () => X.isEnabled('#take-start'), 'X can start a take', 15000);
   await X.click('#take-start');
   await waitFor(async () => (await text(X, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
   const seg1 = await waitFor(async () => { const r = await text(Y, '#recording'); return r.includes('recording take0001') ? r : null; }, 'Y recording', 15000);
+  const recordingAt = Date.now();
   if (!firefox) {
     await waitFor(async () => (await Y.locator('#dev-recorded li[data-source="mic-2"][data-state="recording"]').count()) === 1,
       'Y backup microphone recording', 15000);
@@ -121,6 +148,7 @@ export async function devicesChecks() {
 
   // Switch the live microphone mid-take.
   const pcs = await Y.evaluate(() => window.__pcs.length);
+  const switchAt = Date.now();
   await Y.selectOption('#dev-mic', { value: '' });
   const seg2 = await waitFor(async () => { const r = await text(Y, '#recording'); return r.includes('recording take0001') && r !== seg1 ? r : null; },
     'Y main track continues in a new segment after the switch', 20000);
@@ -179,6 +207,12 @@ export async function devicesChecks() {
     const aEnd = a.t.hostUsAt(a.t.end);
     const bStart = b.t.hostUsAt(0);
     check(a.t.end > rate(a.t) * 2 && b.t.end > rate(b.t) * 2, 'both segments hold audio (' + a.t.end + ' and ' + b.t.end + ' frames)');
+    // The first segment holds all the audio from when Y said it recorded
+    // until the switch (less 0.5 s of slack), not just its start.
+    const aSec = a.t.end / rate(a.t);
+    const heldSec = (switchAt - recordingAt) / 1000;
+    check(aSec > heldSec - 0.5, 'the first segment holds the audio up to the switch ('
+      + aSec.toFixed(2) + ' s recorded, ' + heldSec.toFixed(2) + ' s between recording and the switch)');
     check(Number.isFinite(aEnd) && Number.isFinite(bStart), 'both segments are placed on the host timeline');
     const gapMs = (bStart - aEnd) / 1000;
     check(gapMs > -50 && gapMs < 3000, 'the second segment starts after the first ends (gap ' + gapMs.toFixed(0) + ' ms)');
