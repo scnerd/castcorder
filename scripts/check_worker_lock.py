@@ -8,8 +8,8 @@
 The Worker is its own cargo workspace that path-depends on castcorder-link and
 castcorder-mailbox, so a dependency change in either one leaves its lockfile
 out of date, and `task worker:clippy --locked` (part of `task check`) then
-fails. `cargo metadata --locked --offline` re-resolves without touching the
-network and errors if the lockfile would change. The pre-commit hook runs this
+fails. `cargo metadata --locked` re-resolves (fetching the index if it is not
+cached, as on a fresh CI runner) and errors if the lockfile would change. The pre-commit hook runs this
 when those crates' Cargo.toml files or castcorder/Cargo.lock change.
 
 Fix: `task worker:lock`.
@@ -24,7 +24,7 @@ MANIFEST = Path(__file__).resolve().parent.parent / "castcorder" / "worker" / "C
 
 def main() -> int:
     proc = subprocess.run(
-        ["cargo", "metadata", "--locked", "--offline", "--format-version", "1",
+        ["cargo", "metadata", "--locked", "--format-version", "1",
          "--manifest-path", str(MANIFEST)],
         capture_output=True, text=True,
     )
