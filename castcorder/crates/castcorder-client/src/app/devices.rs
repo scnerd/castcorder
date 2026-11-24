@@ -983,7 +983,6 @@ fn picker(ui: Ui, kind: Kind, id: &'static str) -> impl IntoView {
 /// The lobby's device pickers, remembered for this browser profile.
 #[component]
 pub(super) fn LobbyDevices(ui: Ui) -> impl IntoView {
-    let d = ui.devices;
     view! {
         <div class="field">
             <label for="pick-mic">"Microphone"</label>
@@ -999,12 +998,24 @@ pub(super) fn LobbyDevices(ui: Ui) -> impl IntoView {
                 {picker(ui, Kind::Speakers, "pick-out")}
             </div>
         </Show>
-        <Show when=move || d.unnamed.get()>
-            <div class="row">
-                <button id="devices-allow" class="btn outline" on:click=move |_| spawn_local(allow(ui))>"Show device names"</button>
-                <span class="small muted">"The browser names your devices once you allow them."</span>
-            </div>
-        </Show>
+    }
+}
+
+/// The lobby's offer to name the devices. Whether the browser names them is
+/// known only after the lobby is drawn (Firefox does not until allowed), and
+/// the lobby centres its form vertically, so a row appearing anywhere in it
+/// would move the Join button from under a pointer about to click it
+/// (cast-9n7: a fresh guest's Join landed on the form and was lost). The row
+/// is therefore always laid out and only shown or hidden, below Join so a
+/// browser that names its devices sees no gap above it.
+#[component]
+pub(super) fn LobbyAllowNames(ui: Ui) -> impl IntoView {
+    let d = ui.devices;
+    view! {
+        <div class="row" style:visibility=move || if d.unnamed.get() { "visible" } else { "hidden" }>
+            <button id="devices-allow" class="btn outline" on:click=move |_| spawn_local(allow(ui))>"Show device names"</button>
+            <span class="small muted">"The browser names your devices once you allow them."</span>
+        </div>
     }
 }
 
