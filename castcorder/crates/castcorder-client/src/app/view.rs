@@ -697,8 +697,9 @@ pub(super) fn App() -> impl IntoView {
     let hash = window().location().hash().unwrap_or_default();
     let link = CallLink::parse_fragment(&hash).ok();
     // A link code (`#link.<host-id>.<secret>`) opens the page that links
-    // this browser to a person, not a call.
-    let link_page = hash.starts_with("#link.");
+    // this browser to a person, not a call; a contact code
+    // (`#contact.<host-id>.<secret>`) says to paste it into the app.
+    let link_page = hash.starts_with("#link.") || hash.starts_with("#contact.");
     let bad_link = hash.len() > 1 && link.is_none() && !link_page;
     // A LAN or host machine page joins the room its `?room=` names.
     let room_param = query_param("room").unwrap_or_default();

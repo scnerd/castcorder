@@ -149,6 +149,18 @@ pub enum Command {
         /// The call's id, or why not.
         reply: mpsc::Sender<Result<String, String>>,
     },
+    /// Trust (or stop trusting) a whole person in a room (the host
+    /// machine's home; ADR 0005).
+    TrustPerson {
+        /// The room.
+        room: String,
+        /// The person id.
+        person: String,
+        /// Trust, or stop trusting.
+        trust: bool,
+        /// Done, or why not.
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     /// The open call (room, call id, folder), if a call is open.
     Current {
         /// Where it goes.
@@ -1559,7 +1571,17 @@ impl Call {
                     .rooms
                     .persons
                     .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
-                let seat = crate::room::Seat { at_host, owner };
+                // The person it vouches for (any person): a room may trust
+                // a whole person.
+                let person = crate::person::cert_person(
+                    cert.as_ref(),
+                    routing::proof_key(proof.as_ref()).as_ref(),
+                );
+                let seat = crate::room::Seat {
+                    at_host,
+                    owner,
+                    person,
+                };
                 if sync_only {
                     // Beside any live call, in any room: not a participant.
                     let r = self.offer_sync(
@@ -1686,6 +1708,14 @@ impl Call {
             }
             Command::ChooseCall { room, call, reply } => {
                 let _ = reply.send(self.choose_call(&room, call));
+            }
+            Command::TrustPerson {
+                room,
+                person,
+                trust,
+                reply,
+            } => {
+                let _ = reply.send(self.trust_person(&room, &person, trust));
             }
             Command::Current { reply } => {
                 let current = match (&self.call_id, &self.call_dir) {

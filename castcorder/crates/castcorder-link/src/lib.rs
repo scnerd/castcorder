@@ -30,5 +30,5 @@ pub mod wire;
 
 pub use identity::{DeviceProof, ProofError};
 pub use link::{CallLink, CallSecret, HostId, LinkError};
-pub use person::{DeviceCert, DeviceKind, LinkCode, PersonKey};
+pub use person::{ContactCode, DeviceCert, DeviceKind, LinkCode, PersonKey};
 pub use seal::{GuestSeal, HostKey, ReplySeal, SealError};

@@ -257,6 +257,261 @@ pub(super) fn PersonCard() -> impl IntoView {
     }
 }
 
+/// One contact, as `GET /contacts` says.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub(super) struct ContactItem {
+    pub(super) id: String,
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) nickname: String,
+}
+
+impl ContactItem {
+    /// How the home names them: the nickname, else the name they gave.
+    pub(super) fn label(&self) -> String {
+        match (self.nickname.is_empty(), self.name.is_empty()) {
+            (false, true) => self.nickname.clone(),
+            (false, false) => format!("{} ({})", self.nickname, self.name),
+            (true, false) => self.name.clone(),
+            (true, true) => "Someone without a name".into(),
+        }
+    }
+}
+
+/// A contact request waiting for a decision.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct ContactAskItem {
+    device: String,
+    fingerprint: String,
+    name: String,
+}
+
+/// `GET /contacts`.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct ContactsView {
+    contacts: Vec<ContactItem>,
+    requests: Vec<ContactAskItem>,
+    adding: Option<Joining>,
+}
+
+/// The contacts on the host machine's home (docs/design.md "Contacts"):
+/// make a contact code to send, use one someone sent, accept or decline
+/// requests, nickname and remove contacts. `list` is shared with the rooms'
+/// trust pickers.
+#[component]
+pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
+    let data = RwSignal::new(ContactsView::default());
+    let message = RwSignal::new(String::new());
+    let links = RwSignal::new(Vec::<String>::new());
+    let code = RwSignal::new(String::new());
+    let refresh = move || {
+        spawn_local(async move {
+            match person_request("/contacts", None).await {
+                Ok(t) => match serde_json::from_str::<ContactsView>(&t) {
+                    Ok(v) => {
+                        if data.get_untracked() != v {
+                            list.set(v.contacts.clone());
+                            data.set(v);
+                        }
+                    }
+                    Err(e) => message.set(format!("contacts not readable: {e}")),
+                },
+                Err(e) => message.set(e),
+            }
+        })
+    };
+    refresh();
+    let timer = every(1500, refresh);
+    on_cleanup(move || {
+        if let Some(t) = timer {
+            window().clear_interval_with_handle(t);
+        }
+    });
+    let post = move |path: &'static str, body: serde_json::Value, done: &'static str| {
+        spawn_local(async move {
+            match person_request(path, Some(body.to_string())).await {
+                Ok(_) => message.set(done.into()),
+                Err(e) => message.set(e),
+            }
+            refresh();
+        })
+    };
+    let make_code = move |_| {
+        spawn_local(async move {
+            match person_request("/contacts/code", Some("{}".into())).await {
+                Ok(t) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+                    links.set(
+                        v["links"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    );
+                    message.set(
+                        "Send this to the person you want to add. It works once, for 10 minutes. Then accept their request here."
+                            .into(),
+                    );
+                }
+                Err(e) => message.set(e),
+            }
+        })
+    };
+    let add = move |_| {
+        let c = code.get_untracked();
+        code.set(String::new());
+        post(
+            "/contacts/add",
+            serde_json::json!({ "code": c }),
+            "Asked: they accept it on their side.",
+        )
+    };
+    view! {
+        <section id="contacts" class="room-card">
+            <div class="room-head">
+                <h2>"Contacts"</h2>
+                <span class="small muted">"People you both agreed to add. Being a contact does not let anyone into your rooms."</span>
+            </div>
+            <div class="row">
+                <button id="add-contact" class="btn primary" on:click=make_code>"Add a contact"</button>
+                <span id="contacts-message" class="small muted">{move || message.get()}</span>
+            </div>
+            <ul id="contact-codes" class="list">
+                <For each=move || links.get() key=|l| l.clone() let:l>
+                    <li class="linkbar"><code class="contact-code">{l}</code></li>
+                </For>
+            </ul>
+            <div class="row">
+                <label class="sr-only" for="contact-code-input">"Contact code someone sent you"</label>
+                <input id="contact-code-input" placeholder="Paste a contact code someone sent you" prop:value=move || code.get()
+                    on:input=move |ev| code.set(event_target_value(&ev)) />
+                <button id="use-contact-code" class="btn" disabled=move || code.get().trim().is_empty() on:click=add>"Add"</button>
+                <span id="contact-adding" class="small muted">{move || match data.get().adding {
+                    Some(j) if j.state == "waiting" => "Waiting for them to accept".to_string(),
+                    Some(j) if j.state == "added" => format!("Added {} as a contact", j.detail.unwrap_or_default()),
+                    Some(j) => format!("Not added: {}", j.detail.unwrap_or_default()),
+                    None => String::new(),
+                }}</span>
+            </div>
+            <ul id="contact-requests" class="list">
+                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
+                    {
+                        let (d1, d2) = (r.device.clone(), r.device.clone());
+                        let who = if r.name.is_empty() { "Someone".to_string() } else { r.name.clone() };
+                        view! {
+                            <li class="call-row" data-device=r.device.clone()>
+                                <span>{format!("{who} wants to add you as a contact")}</span>
+                                <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
+                                <span class="call-actions">
+                                    <button class="btn tiny primary accept-contact"
+                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d1.clone(), "accept": true }), "Contact added.")>"Accept"</button>
+                                    <button class="btn tiny outline decline-contact"
+                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d2.clone(), "accept": false }), "Declined.")>"Decline"</button>
+                                </span>
+                            </li>
+                        }
+                    }
+                </For>
+            </ul>
+            <ul id="contact-list" class="list">
+                <For each=move || data.get().contacts key=|c| format!("{c:?}") let:c>
+                    {
+                        let nick = RwSignal::new(c.nickname.clone());
+                        let (p1, p2) = (c.id.clone(), c.id.clone());
+                        view! {
+                            <li class="call-row contact" data-person=c.id.clone()>
+                                <span class="contact-name">{c.label()}</span>
+                                <span class="call-actions">
+                                    <input class="contact-nickname" placeholder="Nickname (only you see it)" prop:value=move || nick.get()
+                                        on:input=move |ev| nick.set(event_target_value(&ev)) />
+                                    <button class="btn tiny save-nickname"
+                                        on:click=move |_| post("/contacts/nickname", serde_json::json!({ "person": p1.clone(), "nickname": nick.get_untracked() }), "Saved.")>"Save"</button>
+                                    <button class="btn tiny outline remove-contact"
+                                        on:click=move |_| post("/contacts/remove", serde_json::json!({ "person": p2.clone() }), "Removed.")>"Remove"</button>
+                                </span>
+                            </li>
+                        }
+                    }
+                </For>
+            </ul>
+            <Show when=move || data.get().contacts.is_empty()><span class="small muted">"No contacts yet."</span></Show>
+        </section>
+    }
+}
+
+/// Who a room trusts as whole persons, on its card on the host machine's
+/// home: trust a contact (each of their devices may enter the room when it
+/// is locked, and can be made a producer), or stop trusting someone.
+#[component]
+pub(super) fn RoomTrust(
+    room: String,
+    trusted: Vec<String>,
+    contacts: RwSignal<Vec<ContactItem>>,
+) -> impl IntoView {
+    let pick = RwSignal::new(String::new());
+    let message = RwSignal::new(String::new());
+    let post = move |room: String, person: String, trust: bool| {
+        spawn_local(async move {
+            let body = serde_json::json!({ "room": room, "person": person, "trust": trust });
+            match person_request("/rooms/trust", Some(body.to_string())).await {
+                Ok(_) => message.set(
+                    if trust {
+                        "Trusted: the room list updates in a moment."
+                    } else {
+                        "No longer trusted."
+                    }
+                    .into(),
+                ),
+                Err(e) => message.set(e),
+            }
+        })
+    };
+    let name_of = move |id: &str| {
+        contacts
+            .get()
+            .iter()
+            .find(|c| c.id == id)
+            .map(ContactItem::label)
+            .unwrap_or_else(|| "Someone no longer in your contacts".into())
+    };
+    let t2 = trusted.clone();
+    let (r1, r2) = (room.clone(), room.clone());
+    let untrusted = move || {
+        contacts
+            .get()
+            .into_iter()
+            .filter(|c| !t2.contains(&c.id))
+            .collect::<Vec<_>>()
+    };
+    view! {
+        <div class="row room-trust">
+            <span class="small muted">"Trusted people (all their devices may enter, even when locked):"</span>
+            {trusted.into_iter().map(|id| {
+                let (room, i2, i3) = (r1.clone(), id.clone(), id.clone());
+                view! {
+                    <span class="chip trusted-person" data-person=i3>{move || name_of(&id)}
+                        <button class="btn tiny outline untrust-person"
+                            on:click=move |_| post(room.clone(), i2.clone(), false)>"Stop trusting"</button>
+                    </span>
+                }
+            }).collect_view()}
+            <label class="sr-only">"Contact to trust in this room"</label>
+            <select class="trust-pick" on:change=move |ev| pick.set(event_target_value(&ev))>
+                <option value="">"Pick a contact"</option>
+                <For each=untrusted key=|c| c.id.clone() let:c>
+                    <option value=c.id.clone()>{c.label()}</option>
+                </For>
+            </select>
+            <button class="btn tiny trust-person" disabled=move || pick.get().is_empty()
+                on:click=move |_| { let p = pick.get_untracked(); if !p.is_empty() { post(r2.clone(), p, true) } }>"Trust"</button>
+            <span class="small muted">{move || message.get()}</span>
+        </div>
+    }
+}
+
 /// The link code this page was opened with, if any.
 pub(super) fn page_code() -> Option<LinkCode> {
     let hash = window().location().hash().unwrap_or_default();
@@ -333,6 +588,7 @@ async fn link_this(code: LinkCode, name: String) -> Result<LinkGrant, String> {
                 name: name.clone(),
                 kind: DeviceKind::Browser,
             }),
+            contact: None,
         };
         match ask(&code, &plain).await? {
             AnswerPlain::Link(LinkAnswer::Pending) => {}
@@ -353,6 +609,36 @@ async fn link_this(code: LinkCode, name: String) -> Result<LinkGrant, String> {
 /// The page a link opens: link this browser profile.
 #[component]
 pub(super) fn LinkPage(ui: Ui) -> impl IntoView {
+    if window()
+        .location()
+        .hash()
+        .unwrap_or_default()
+        .starts_with("#contact.")
+    {
+        return view! { <ContactCodePage ui=ui/> }.into_any();
+    }
+    link_page(ui).into_any()
+}
+
+/// The page a contact code opens in a browser: contacts live in the app, so
+/// say where to paste it.
+#[component]
+fn ContactCodePage(ui: Ui) -> impl IntoView {
+    view! {
+        <div id="contact-code-page" class="lobby home">
+            <div class="brand"><Mark/> "Castcorder"<ThemeToggle ui=ui/></div>
+            <div class="home-main">
+                <div class="home-head">
+                    <h1>"Add a contact"</h1>
+                    <span class="small muted">"Someone sent you this to add you as a contact. Contacts live in the Castcorder app: copy this page's address and paste it under Contacts on the app's home."</span>
+                </div>
+            </div>
+        </div>
+    }
+}
+
+/// Link this browser profile ([`LinkPage`] for a link code).
+fn link_page(ui: Ui) -> impl IntoView {
     let code = page_code();
     let name = RwSignal::new("Browser".to_string());
     let state = RwSignal::new(match &code {

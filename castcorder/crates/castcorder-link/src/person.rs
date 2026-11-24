@@ -23,6 +23,11 @@
 //!   new device seals a link request to that host key (a
 //!   [`crate::wire::LinkAsk`] in an offer whose proof signs a nonce), and
 //!   asks again until a person at that device approves or declines it.
+//! - A contact code (`contact.<host-id>.<secret>`, [`ContactCode`]) works
+//!   the same way between two persons: the other person's app install seals
+//!   a contact request ([`crate::wire::ContactAsk`], with its certificate in
+//!   the offer) to the app install that made the code, and asks again until
+//!   a person there accepts or declines it.
 //!
 //! Pure Rust, no randomness: callers pass key and secret bytes in.
 
@@ -234,17 +239,8 @@ impl LinkCode {
 
     /// Parse a fragment (with or without `#`), or a whole URL ending in one.
     pub fn parse(s: &str) -> Result<Self, LinkError> {
-        let s = s.trim();
-        let frag = s.rsplit_once('#').map_or(s, |(_, f)| f);
-        let rest = frag.strip_prefix("link.").ok_or(LinkError::Shape)?;
-        let (h, k) = rest.split_once('.').ok_or(LinkError::Shape)?;
-        let secret = unb64(k)
-            .and_then(|b| b.try_into().ok())
-            .ok_or(LinkError::Secret)?;
-        Ok(LinkCode {
-            host: HostId::parse(h)?,
-            secret,
-        })
+        let (host, secret) = parse_code("link.", s)?;
+        Ok(LinkCode { host, secret })
     }
 
     /// The full link for a rendezvous base URL and a client version (a
@@ -261,6 +257,67 @@ impl LinkCode {
 impl std::fmt::Debug for LinkCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "LinkCode({}, ..)", self.host.short())
+    }
+}
+
+/// `<prefix><host-id>.<secret>` from a fragment (with or without `#`) or a
+/// whole URL ending in one.
+fn parse_code(prefix: &str, s: &str) -> Result<(HostId, [u8; 16]), LinkError> {
+    let s = s.trim();
+    let frag = s.rsplit_once('#').map_or(s, |(_, f)| f);
+    let rest = frag.strip_prefix(prefix).ok_or(LinkError::Shape)?;
+    let (h, k) = rest.split_once('.').ok_or(LinkError::Shape)?;
+    let secret = unb64(k)
+        .and_then(|b| b.try_into().ok())
+        .ok_or(LinkError::Secret)?;
+    Ok((HostId::parse(h)?, secret))
+}
+
+/// A one-time code for becoming contacts (ADR 0005, CONTEXT.md "Contact
+/// Code"): which app install to ask, and the secret it made for this one
+/// request. Shaped like a [`LinkCode`] (`contact.<host-id>.<secret>`), but
+/// it never links a device: the other person asks with it to become a
+/// contact of the person who made it, and that person accepts or declines.
+/// Not a contact link, which is the connection between contacts' devices.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ContactCode {
+    /// The app install that made the code (its host key).
+    pub host: HostId,
+    /// 16 random bytes, single use.
+    pub secret: [u8; 16],
+}
+
+impl ContactCode {
+    /// The fragment text, without `#`: `contact.<host-id>.<secret>`.
+    pub fn fragment(&self) -> String {
+        format!("contact.{}.{}", self.host.encode(), b64(&self.secret))
+    }
+
+    /// The secret in its text form (what a contact request carries).
+    pub fn secret_text(&self) -> String {
+        b64(&self.secret)
+    }
+
+    /// Parse a fragment (with or without `#`), or a whole URL ending in one.
+    pub fn parse(s: &str) -> Result<Self, LinkError> {
+        let (host, secret) = parse_code("contact.", s)?;
+        Ok(ContactCode { host, secret })
+    }
+
+    /// The full code as a URL for a rendezvous base URL and a client version
+    /// (a browser that opens it says to paste it into the app).
+    pub fn url(&self, rendezvous: &str, version: &str) -> String {
+        format!(
+            "{}/v/{version}/#{}",
+            rendezvous.trim_end_matches('/'),
+            self.fragment()
+        )
+    }
+}
+
+impl std::fmt::Debug for ContactCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ContactCode({}, ..)", self.host.short())
     }
 }
 
@@ -338,6 +395,49 @@ mod tests {
         );
         assert_eq!(
             LinkCode::parse("link.abc"),
+            Err(LinkError::Shape),
+            "no secret"
+        );
+    }
+
+    #[test]
+    fn contact_codes_round_trip_and_are_neither_link_codes_nor_call_links() {
+        let code = ContactCode {
+            host: HostKey::from_secret([3; 32]).id(),
+            secret: [9; 16],
+        };
+        let url = code.url("https://rv.example.org/", "1");
+        assert!(
+            url.starts_with("https://rv.example.org/v/1/#contact."),
+            "{url}"
+        );
+        assert_eq!(ContactCode::parse(&url).unwrap(), code);
+        assert_eq!(ContactCode::parse(&code.fragment()).unwrap(), code);
+        assert_eq!(
+            ContactCode::parse(&format!("https://192.168.1.2:8443/#{}", code.fragment())).unwrap(),
+            code
+        );
+        // Each kind of code parses only as itself.
+        let link = LinkCode {
+            host: code.host,
+            secret: code.secret,
+        };
+        assert_eq!(LinkCode::parse(&url), Err(LinkError::Shape));
+        assert_eq!(
+            ContactCode::parse(&link.url("https://rv", "1")),
+            Err(LinkError::Shape)
+        );
+        assert!(CallLink::parse(&url).is_err());
+        let call = CallLink {
+            host: code.host,
+            secret: crate::CallSecret([9; 16]),
+        };
+        assert_eq!(
+            ContactCode::parse(&call.url("https://rv", "1")),
+            Err(LinkError::Shape)
+        );
+        assert_eq!(
+            ContactCode::parse("contact.abc"),
             Err(LinkError::Shape),
             "no secret"
         );

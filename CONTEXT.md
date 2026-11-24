@@ -33,8 +33,12 @@ _Avoid_: User, account, identity
 A person you have mutually agreed to know. Contacts can see when each other's devices are online, open a contact link, and send invites. Being a contact grants no access to a room.
 _Avoid_: Friend, buddy, peer
 
+**Contact Code**:
+A one-time code, shared as a link or QR code, that one person's app install makes so that another person can ask to become their contact. The maker accepts or declines the request; it is single use and expires.
+_Avoid_: Contact link, invite, friend code
+
 **Trusted Device**:
-A device that joined a room while a producer was present. Only trusted devices may enter a locked room or be granted the producer role, and a trusted device is told a room's current call link, so it can rejoin from its list of rooms after the link is regenerated.
+A device that joined a room while a producer was present, or a device of a person the room trusts. Only trusted devices may enter a locked room or be granted the producer role, and a trusted device is told a room's current call link, so it can rejoin from its list of rooms after the link is regenerated.
 _Avoid_: Paired device, known device
 
 **App Guest**:
