@@ -615,6 +615,21 @@ impl Call {
         }
     }
 
+    /// Someone was refused at the locked call: tell every producer in it, so
+    /// the guest's wait is not silent on this side.
+    fn tell_producers_locked(&mut self, name: &str) {
+        let event = Event::JoinRefusedLocked {
+            name: name.to_string(),
+        };
+        for p in self.room.producers() {
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(p))
+                && rpc.emit(event.clone()).is_err()
+            {
+                warn!(guest = p, "locked-join notice not sent: channel closed");
+            }
+        }
+    }
+
     /// A device cannot meet the recording profile: warn, and tell every
     /// producer. The take goes on.
     fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
@@ -1593,10 +1608,14 @@ impl Call {
                 let device = verified.clone().unwrap_or(device);
                 // The old id the signature covers (migration from pre-key ids).
                 let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
-                let r = match verified.and_then(|d| {
+                let admitted = verified.and_then(|d| {
                     self.room
                         .admit_offer_as(&d, alias, seat, password.as_deref())
-                }) {
+                });
+                if matches!(admitted, Err(crate::room::Refusal::Locked)) {
+                    self.tell_producers_locked(&name);
+                }
+                let r = match admitted {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     // The first one in opens the room's current call (or

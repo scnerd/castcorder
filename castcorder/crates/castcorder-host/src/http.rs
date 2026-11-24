@@ -451,6 +451,8 @@ fn refusal_status(message: &str) -> u16 {
     match code {
         "waiting" => 503,
         "kicked" | "locked" | "wrong_password" | "bad_device" | "not_current" => 403,
+        // A room this host does not have: the guest's page stops asking.
+        "unknown_room" => 404,
         _ => 400,
     }
 }
@@ -763,7 +765,7 @@ fn serve_file(dir: &Path, path: &str) -> Response {
     let name = path.trim_start_matches('/');
     let name = if name.is_empty() { "index.html" } else { name };
     if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains(':') {
-        return text(404, "not found");
+        return missing_page();
     }
     let content_type = match name.rsplit_once('.').map(|(_, e)| e) {
         Some("html") => "text/html; charset=utf-8",
@@ -784,8 +786,26 @@ fn serve_file(dir: &Path, path: &str) -> Response {
             if name == "index.html" {
                 warn!(dist = %dir.display(), error = %e, "client build missing");
             }
-            text(404, "not found")
+            missing_page()
         }
+    }
+}
+
+/// What a browser sees at an address this host does not serve: plain words,
+/// not a bare "not found".
+fn missing_page() -> Response {
+    let body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Page not found - Castcorder</title></head><body>\
+<main id=\"page-missing\" style=\"font-family:sans-serif;max-width:32em;margin:3em auto;padding:0 1em\">\
+<h1>This page doesn't exist</h1>\
+<p>The address may have a typo, or the link may be old. Open the call link the host sent you, \
+or ask them for a new one.</p>\
+<p><a href=\"/\">Go to the start page</a></p></main></body></html>";
+    Response {
+        status: 404,
+        content_type: "text/html; charset=utf-8",
+        body: body.as_bytes().to_vec(),
     }
 }
 

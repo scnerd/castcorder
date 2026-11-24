@@ -46,7 +46,23 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
     ui.joined.set(true);
     ui.connection.set("opening microphones".into());
 
-    let (raw, live) = open_media().await?;
+    let (raw, live) = match open_media().await {
+        Ok(m) => m,
+        Err(e) => {
+            if stale(epoch) {
+                return Ok(());
+            }
+            // Back to the lobby with words the guest can act on, not the
+            // browser's error name over the call screen.
+            warn!(error = %describe(&e), "the microphone could not be opened; back to the lobby");
+            leave(ui);
+            ui.connection.set("idle".into());
+            ui.join_note.set(mic_help(&e));
+            ui.join_retry.set(true);
+            show_join_note();
+            return Ok(());
+        }
+    };
     if stale(epoch) {
         // Left while the browser was opening the devices.
         stop_tracks(&[Some(raw), Some(live)], &[]);
@@ -128,6 +144,9 @@ pub(super) fn connect(ui: Ui, epoch: u32) {
                 ui.error("join", &err);
                 leave(ui);
                 ui.connection.set(refusal_state(&why).into());
+                ui.join_note.set(refusal_note(&why).into());
+                ui.join_retry.set(refusal_retry(&why));
+                show_join_note();
             } else {
                 connection_lost(ui, epoch, &why);
             }
@@ -135,9 +154,83 @@ pub(super) fn connect(ui: Ui, epoch: u32) {
     });
 }
 
+/// Scroll the lobby's note beside Join into view once it is drawn.
+fn show_join_note() {
+    let cb = Closure::once_into_js(|| {
+        if let Some(el) = window()
+            .document()
+            .and_then(|d| d.get_element_by_id("join-note"))
+        {
+            let _ = call(&el, "scrollIntoView", &[]);
+        }
+    });
+    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 50);
+}
+
+/// What to tell a guest whose microphone could not be opened, in plain words.
+pub(super) fn mic_help(e: &JsValue) -> String {
+    let name = string(e, "name");
+    match name.as_str() {
+        "NotAllowedError" | "SecurityError" => "Castcorder can't use your microphone because the browser is blocking it. \
+            Click the icon at the left of the address bar (a lock or a microphone), allow the microphone and the camera, \
+            then press Try again."
+            .into(),
+        "NotFoundError" | "OverconstrainedError" => {
+            "No microphone was found. Plug one in or turn it on, then press Try again.".into()
+        }
+        "NotReadableError" | "AbortError" => "Your microphone could not be started. Another program may be using it: \
+            close that program, then press Try again."
+            .into(),
+        _ => format!(
+            "Your microphone could not be opened ({}). Check that it is plugged in and allowed in the browser, then press Try again.",
+            describe(e)
+        ),
+    }
+}
+
+/// What to tell a guest whose camera is blocked while they joined anyway.
+pub(super) fn camera_help(e: &JsValue) -> String {
+    match string(e, "name").as_str() {
+        "NotAllowedError" | "SecurityError" => "Your camera is blocked, so you joined with sound only. \
+            To use it, click the icon at the left of the address bar, allow the camera, then turn your camera on."
+            .into(),
+        "NotFoundError" | "OverconstrainedError" => {
+            "No camera was found, so you joined with sound only.".into()
+        }
+        _ => "Your camera could not be started, so you joined with sound only.".into(),
+    }
+}
+
+/// Plain words beside Join after the host refused this device.
+pub(super) fn refusal_note(why: &str) -> &'static str {
+    if why.contains("kicked:") {
+        "A producer removed you from this call, so you can't come back in."
+    } else if why.contains("locked:") {
+        "This call is locked, so new people can't join right now. If a producer is in the call, they have been told you are here. \
+         Ask the host to unlock it, then press Try again."
+    } else if why.contains("wrong_password:") {
+        "That password isn't right. Check it with the host, type it again, then press Try again."
+    } else if why.contains("bad_device:") {
+        "Your browser couldn't prove who it is. Reload this page, then press Join call."
+    } else if why.contains("not_current:") {
+        "That call has ended and the room has moved on. Press Join call to join the current one, or ask a producer to continue the old one."
+    } else if why.contains("unknown_room:") {
+        "This call or room doesn't exist on this host, or it has ended. Check the link you were sent, or ask the host for a new one."
+    } else {
+        "The host wouldn't let you in. Ask them to check the call, then press Try again."
+    }
+}
+
+/// Offer Try again after this refusal (only where trying again can differ).
+pub(super) fn refusal_retry(why: &str) -> bool {
+    why.contains("locked:") || why.contains("wrong_password:")
+}
+
 /// What the connection line says after the host refused this device.
 pub(super) fn refusal_state(why: &str) -> &'static str {
-    if why.contains("kicked:") {
+    if why.contains("unknown_room:") {
+        "this call or room does not exist"
+    } else if why.contains("kicked:") {
         "removed from the call by a producer"
     } else if why.contains("locked:") {
         "the call is locked"
@@ -637,11 +730,16 @@ pub(super) async fn direct_offer(
         // 403 (refused) and 503 (waiting) are the room's decisions, coded
         // like a refusal through the rendezvous; anything else is retried.
         let status = num(&resp, "status") as u16;
-        return Err(JsValue::from_str(&if status == 403 || status == 503 {
-            format!("{}: {text}", crate::mailbox::REJECTED)
-        } else {
-            format!("offer rejected: {text}")
-        }));
+        // An unknown room (404 with its code) is just as final: asking again
+        // cannot make the room exist.
+        let unknown_room = status == 404 && text.starts_with("unknown_room:");
+        return Err(JsValue::from_str(
+            &if status == 403 || status == 503 || unknown_room {
+                format!("{}: {text}", crate::mailbox::REJECTED)
+            } else {
+                format!("offer rejected: {text}")
+            },
+        ));
     }
     let answer = JsFuture::from(Promise::from(call(&resp, "json", &[])?)).await?;
     Ok(string(&answer, "sdp"))

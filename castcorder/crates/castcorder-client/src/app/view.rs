@@ -289,6 +289,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
 #[component]
 fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
     let on_join = move |_| {
+        ui.join_note.set(String::new());
+        ui.join_retry.set(false);
         spawn_local(async move {
             if let Err(e) = join(ui).await {
                 ui.error("join", &e);
@@ -371,9 +373,12 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                         <span>"This call is recorded. Your microphone, and your camera if it is on, record on this computer at full quality and go to the host after each take. Producers can see and switch which microphone and camera you use."</span>
                     </div>
                     <button id="join" class="btn primary big" disabled=move || ui.joined.get() on:click=on_join>"Join call"</button>
-                    <span class="lobby-status">{status}</span>
+                    <div id="join-note" class="lobby-error" role="alert" hidden=move || ui.join_note.get().is_empty()>
+                        <span>{move || ui.join_note.get()}</span>
+                        <button id="join-retry" class="btn" hidden=move || !ui.join_retry.get() on:click=on_join>"Try again"</button></div>
+                    <span class="lobby-status" hidden=move || !ui.join_note.get().is_empty()>{status}</span>
                     <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
-                    <span class="lobby-error" hidden=move || ui.errors.get().is_empty()>{last_error}</span>
+                    <span class="lobby-error" hidden=move || ui.errors.get().is_empty() || !ui.join_note.get().is_empty()>{last_error}</span>
                     // Below Join: it can appear after the lobby is drawn.
                     <devices::LobbyAllowNames ui=ui/>
                     <details class="advanced">
@@ -533,6 +538,9 @@ fn Call(ui: Ui) -> impl IntoView {
                 <main class="main">
                     <div id="warning" class="banner" role="alert" hidden=move || ui.warning.get().is_empty()>
                         {move || ui.warning.get()}</div>
+                    <div id="call-notes" class="banner" role="status" hidden=move || ui.notes.get().is_empty()>
+                        <span>{move || ui.notes.get().join(" ")}</span>
+                        <button id="call-notes-dismiss" class="btn" on:click=move |_| ui.notes.set(Vec::new())>"Dismiss"</button></div>
                     <div id="disk-warning" class="banner" role="status" hidden=move || !ui.disk.get().iter().any(|d| d.low)>
                         <Icon name="alert" small=true/>
                         <span><strong>"Low disk space"</strong>
@@ -726,6 +734,9 @@ pub(super) fn App() -> impl IntoView {
         inbound_json: RwSignal::new("[]".into()),
         errors: RwSignal::new(Vec::new()),
         warning: RwSignal::new(String::new()),
+        notes: RwSignal::new(Vec::new()),
+        join_note: RwSignal::new(String::new()),
+        join_retry: RwSignal::new(false),
         password: RwSignal::new(String::new()),
         role: RwSignal::new(Role::default()),
         room: RwSignal::new(None),

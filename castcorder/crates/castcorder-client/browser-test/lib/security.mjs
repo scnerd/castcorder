@@ -84,6 +84,14 @@ export async function securityChecks() {
   await D.click('#join');
   await waitFor(async () => (await state(D)) === 'the call is locked', 'D refused by the lock', 20000);
   check((await text(D, '#errors')).includes('locked') && !(await joined(D)), 'a locked call refuses a new untrusted device: ' + (await text(D, '#errors')));
+  // cast-puo: the reason is in plain words beside Join, with Try again, and
+  // the producer on the host machine is told someone tried.
+  const note = await waitFor(async () => { const t = await text(D, '#join-note'); return t.includes('locked') ? t : null; }, 'D sees the plain reason beside Join', 10000);
+  check(await D.isVisible('#join-note') && await D.isVisible('#join-retry') && !note.includes('rejected by the host')
+    && await D.evaluate(() => document.getElementById('join-note').getBoundingClientRect().top < window.innerHeight),
+    'locked call: the plain reason shows in view beside Join, with Try again: ' + note);
+  await waitFor(async () => (await text(H, '#call-notes')).includes('D tried to join'), 'H is told D tried to join the locked call', 10000);
+  check(await H.isVisible('#call-notes'), 'locked call: the producer is told that D tried to join');
   await H.click('#lock');
   await waitFor(async () => (await text(H, '#room-locked')) === 'unlocked', 'call unlocked', 10000);
 

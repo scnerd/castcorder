@@ -337,6 +337,14 @@ pub(super) fn pump_rpc(ui: Ui) {
                     }
                     show_camera(participant.0, on);
                 }
+                Event::JoinRefusedLocked { name } => {
+                    info!(call = %ctx.call, device = %ctx.device, name = %name, "someone tried to join the locked call");
+                    ui.notes.update(|v| {
+                        v.push(format!(
+                            "{name} tried to join, but the call is locked. Unlock the call in the People panel to let new people in."
+                        ))
+                    });
+                }
             }
         }
         (statuses, e.ctx.clone())
