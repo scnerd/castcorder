@@ -8,6 +8,10 @@
 //! - Allocation, its refresh and permission refresh are the library's (it
 //!   refreshes ahead of expiry); a closed or failed allocation is retried
 //!   after [`RETRY`].
+//! - An allocation the server never answers moves on to the server's next
+//!   address ([`TurnServer::alternates`]) at once: a path can black-hole one
+//!   port of a server and pass another (cast-wtf: Cloudflare's UDP 3478 drops
+//!   some flows for good; its UDP 443 answers most of them).
 //! - A str0m transmit whose source is the relayed address goes out as a TURN
 //!   Send indication. Sending to a peer without a permission asks for one and
 //!   drops the datagram (ICE retransmits its checks).
@@ -47,6 +51,24 @@ pub struct TurnServer {
     pub username: String,
     /// The TURN password.
     pub password: String,
+    /// Other UDP addresses of the same server (the same credentials work on
+    /// each, like Cloudflare's UDP 443 beside 3478), tried in order after an
+    /// allocation on the one before goes unanswered for [`ALLOCATE_TIMEOUT`].
+    pub alternates: Vec<SocketAddr>,
+}
+
+impl TurnServer {
+    /// How many addresses the server has.
+    fn addresses(&self) -> usize {
+        1 + self.alternates.len()
+    }
+
+    /// Address `i`: 0 is [`TurnServer::addr`], then the alternates.
+    fn address(&self, i: usize) -> SocketAddr {
+        i.checked_sub(1)
+            .and_then(|j| self.alternates.get(j).copied())
+            .unwrap_or(self.addr)
+    }
 }
 
 /// Counters for the relay, for tests and status.
@@ -83,6 +105,8 @@ pub(crate) enum FromServer {
 #[derive(Default)]
 pub(crate) struct Relay {
     server: Option<TurnServer>,
+    /// Which of the server's addresses is in use.
+    at: usize,
     client: Option<TurnClientUdp>,
     local: Option<SocketAddr>,
     relayed: Option<SocketAddr>,
@@ -221,8 +245,9 @@ impl Relay {
         self.flush(socket, now);
     }
 
+    /// The server address in use (allocated on, or being tried).
     pub(crate) fn server(&self) -> Option<SocketAddr> {
-        self.server.as_ref().map(|s| s.addr)
+        self.server.as_ref().map(|s| s.address(self.at))
     }
 
     /// The relayed address, once the server has granted the allocation.
@@ -242,12 +267,9 @@ impl Relay {
             }
             let local = self.local.unwrap_or_else(|| socket.local_addr());
             let creds = TurnCredentials::new(&server.username, &server.password);
-            info!(server = %server.addr, local = %local, "turn allocation requested");
-            self.client = Some(TurnClientUdp::allocate(
-                local,
-                server.addr,
-                TurnConfig::new(creds),
-            ));
+            let addr = server.address(self.at);
+            info!(server = %addr, local = %local, "turn allocation requested");
+            self.client = Some(TurnClientUdp::allocate(local, addr, TurnConfig::new(creds)));
             self.deadline = Some(now + ALLOCATE_TIMEOUT);
             self.send_failed = false;
             self.stats.last_error = None;
@@ -261,7 +283,20 @@ impl Relay {
                 None => "timed out: no answer from the server".to_string(),
             };
             self.stats.last_error = Some(why.clone());
-            self.fail(now, &format!("turn allocation {why}; retrying later"));
+            // Unanswered, so this path may drop this address only: move on
+            // to the next one at once, and wait only after trying them all.
+            let next = (self.at + 1) % server.addresses();
+            if next == 0 {
+                self.fail(now, &format!("turn allocation {why}; retrying later"));
+            } else {
+                let to = server.address(next);
+                self.fail(
+                    now,
+                    &format!("turn allocation {why}; trying the server's next address {to}"),
+                );
+                self.retry_at = now;
+            }
+            self.at = next;
             return self.retry_at;
         }
         let c = self.client.as_mut().expect("just set");

@@ -230,6 +230,7 @@ fn mint(turn: &mut SimTurn, ttl: Duration) -> TurnServer {
         addr: turn.addr(),
         username,
         password: PASS.into(),
+        alternates: vec![],
     }
 }
 
@@ -269,6 +270,7 @@ impl World {
                 addr: turn.addr(),
                 username: USER.into(),
                 password: PASS.into(),
+                alternates: vec![],
             },
         };
         host.set_turn_server(Some(creds));
@@ -449,6 +451,7 @@ fn wrong_credentials_fail_and_are_retried() {
         addr: turn.addr(),
         username: USER.into(),
         password: "wrong".into(),
+        alternates: vec![],
     }));
     let end = time.now() + Duration::from_secs(100);
     while time.now() < end {
@@ -485,6 +488,7 @@ fn a_server_that_never_answers_times_out_and_is_retried() {
         addr: silent.local_addr(),
         username: USER.into(),
         password: PASS.into(),
+        alternates: vec![],
     }));
     // Two attempts time out; the third has not started.
     let end = time.now() + castcorder_transport::ALLOCATE_TIMEOUT * 2 + Duration::from_secs(7);
@@ -498,6 +502,84 @@ fn a_server_that_never_answers_times_out_and_is_retried() {
     assert_eq!(stats.failures, stats.timeouts, "{stats:?}");
     let why = stats.last_error.unwrap_or_default();
     assert!(why.contains("no answer"), "last error: {why}");
+}
+
+/// cast-wtf: from some GitHub runners, Cloudflare TURN's UDP 3478 drops every
+/// datagram of a flow while another port of the same server answers it. Here the
+/// server's first port is bound and never read; its alternate is a real TURN
+/// server on another port of the same address.
+#[test]
+fn an_unanswered_address_moves_on_to_the_servers_next_address() {
+    init_log();
+    let time = SimTime::new();
+    let net = SimNetwork::new(time.clone(), SEED);
+    let silent = net.bind(ip(TURN_IP));
+    let mut turn = SimTurn::new(&net, &time);
+    let mut host = Host::new(
+        net.bind(ip(1)),
+        time.clock(SimClockConfig::default()),
+        HostConfig::default(),
+    );
+    host.set_turn_server(Some(TurnServer {
+        addr: silent.local_addr(),
+        username: USER.into(),
+        password: PASS.into(),
+        alternates: vec![turn.addr()],
+    }));
+    let start = time.now();
+    let end = start + castcorder_transport::ALLOCATE_TIMEOUT + Duration::from_secs(2);
+    while host.relayed().is_none() {
+        assert!(time.now() < end, "no allocation on the alternate address");
+        host.poll();
+        turn.step();
+        time.advance(Duration::from_millis(10));
+    }
+    // At once after the timeout, not a retry interval later.
+    assert!(time.now() - start >= castcorder_transport::ALLOCATE_TIMEOUT);
+    let stats = host.relay_stats();
+    assert_eq!((stats.timeouts, stats.allocations), (1, 1), "{stats:?}");
+    assert_eq!(turn.allocates, 2, "the 401, then the authenticated request");
+}
+
+/// RFC 8489 retransmission: an Allocate whose first datagrams are lost is
+/// sent again, so a lossy path allocates late rather than timing out.
+#[test]
+fn lost_allocate_requests_are_retransmitted() {
+    init_log();
+    let time = SimTime::new();
+    let net = SimNetwork::new(time.clone(), SEED);
+    let mut turn = SimTurn::new(&net, &time);
+    let mut host = Host::new(
+        net.bind(ip(1)),
+        time.clock(SimClockConfig::default()),
+        HostConfig::default(),
+    );
+    net.partition(ip(1), ip(TURN_IP));
+    host.set_turn_server(Some(TurnServer {
+        addr: turn.addr(),
+        username: USER.into(),
+        password: PASS.into(),
+        alternates: vec![],
+    }));
+    let start = time.now();
+    while host.relayed().is_none() {
+        if time.now() - start >= Duration::from_secs(2) {
+            net.heal(ip(1), ip(TURN_IP));
+        }
+        assert!(
+            time.now() - start < castcorder_transport::ALLOCATE_TIMEOUT,
+            "not allocated before the allocation timeout"
+        );
+        host.poll();
+        turn.step();
+        time.advance(Duration::from_millis(10));
+    }
+    let stats = host.relay_stats();
+    assert_eq!((stats.timeouts, stats.allocations), (0, 1), "{stats:?}");
+    assert_eq!(
+        turn.allocates, 2,
+        "only the retransmit after the heal arrived"
+    );
 }
 
 #[allow(dead_code)]
