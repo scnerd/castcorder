@@ -273,7 +273,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                         {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
                 </div>
                 <span class="small muted">"Take: " <span id="take-status">{move || take.get()}</span>
-                    " " <code id="take-result" hidden>{move || ui.producer_result.get()}</code></span>
+                    " " <code id="take-result" hidden=move || { let t = ui.producer_result.get(); t.starts_with('{') || t == "done" }>{move || ui.producer_result.get()}</code></span>
                 <span class="small muted">"Host library: " <span id="library-disk">{move || ui.disk.get().into_iter().find(|d| d.participant.is_none()).map(|d| format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))).unwrap_or_else(|| "not known".into())}</span></span>
                 <ul id="profile-warnings" class="list">
                     <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
