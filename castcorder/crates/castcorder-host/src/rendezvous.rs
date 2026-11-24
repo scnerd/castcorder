@@ -613,10 +613,6 @@ fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
                 addrs.push(a);
             }
         }
-        // TEMPORARY (cast-wtf verification): try the alternate first.
-        if !addrs.is_empty() {
-            addrs.rotate_left(1);
-        }
         let (&addr, alternates) = addrs.split_first()?;
         Some((
             TurnServer {
