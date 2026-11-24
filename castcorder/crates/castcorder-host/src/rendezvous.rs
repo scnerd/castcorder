@@ -527,7 +527,8 @@ fn session(
     match turn_server(&ice_servers) {
         Some((server, expires)) => {
             let renewed = turn_held.is_some();
-            info!(server = %server.addr, expires = ?expires, renewed, "relay (TURN) server from the rendezvous");
+            let alternates: Vec<String> = server.alternates.iter().map(|a| a.to_string()).collect();
+            info!(server = %server.addr, alternates = ?alternates, expires = ?expires, renewed, "relay (TURN) server from the rendezvous");
             *turn_held = Some(Held { expires });
             let _ = tx.send(Command::Turn { server });
         }
@@ -595,26 +596,33 @@ fn session(
     }
 }
 
-/// The first UDP `turn:` server with credentials among `servers`, resolved,
-/// and when its credentials expire (if known).
+/// The first server with credentials and a UDP `turn:` URL among `servers`,
+/// resolved, and when its credentials expire (if known). Its other UDP URLs
+/// (Cloudflare's port 53 beside 3478) are the alternates the transport moves
+/// on to when an address goes unanswered.
 fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     servers.iter().find_map(|s| {
         let (username, password) = (s.username.clone()?, s.credential.clone()?);
-        s.urls.iter().find_map(|u| {
+        let mut addrs: Vec<SocketAddr> = vec![];
+        for u in &s.urls {
             if is_stream_turn(u) {
                 info!(url = %u, "relay URL skipped: the host's TURN client is UDP only (no turn TCP or turns TLS yet)");
-                return None;
+            } else if let Some(a) = turn_addr(u)
+                && !addrs.contains(&a)
+            {
+                addrs.push(a);
             }
-            let addr = turn_addr(u)?;
-            Some((
-                TurnServer {
-                    addr,
-                    username: username.clone(),
-                    password: password.clone(),
-                },
-                expiry_of(s),
-            ))
-        })
+        }
+        let (&addr, alternates) = addrs.split_first()?;
+        Some((
+            TurnServer {
+                addr,
+                username,
+                password,
+                alternates: alternates.to_vec(),
+            },
+            expiry_of(s),
+        ))
     })
 }
 
@@ -826,12 +834,16 @@ mod tests {
                 urls: vec![
                     "turn:127.0.0.1:3478?transport=tcp".into(),
                     "turn:127.0.0.1:3478?transport=udp".into(),
+                    "turns:127.0.0.1:5349?transport=tcp".into(),
+                    "turn:127.0.0.1:53?transport=udp".into(),
+                    "turn:127.0.0.1:3478".into(),
                 ],
                 username: Some("1:h".into()),
                 credential: Some("pw".into()),
                 expires: None,
             },
         ];
+        // Every UDP URL, in order and once: the rest are alternates.
         assert_eq!(
             turn_server(&servers),
             Some((
@@ -839,6 +851,7 @@ mod tests {
                     addr: "127.0.0.1:3478".parse().unwrap(),
                     username: "1:h".into(),
                     password: "pw".into(),
+                    alternates: vec!["127.0.0.1:53".parse().unwrap()],
                 },
                 Some(1)
             ))
