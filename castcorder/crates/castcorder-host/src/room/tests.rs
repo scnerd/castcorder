@@ -767,8 +767,8 @@ fn an_owner_device_is_a_trusted_producer_but_not_the_host_machine() {
     room.left(h);
     room.left(2);
     let owner = Seat {
-        at_host: false,
         owner: true,
+        ..Seat::default()
     };
     // A guest with the same device key but no certificate waits or is kept out.
     assert!(
@@ -796,4 +796,80 @@ fn an_owner_device_is_a_trusted_producer_but_not_the_host_machine() {
     assert!(m.producer && m.trusted && !m.removed);
     assert!(room.membership("dev-never", None).is_none());
     assert!(!room.to_json().contains("owner"));
+}
+
+/// Room trust granted to a whole person (ADR 0005, cast-40e.2): any device
+/// whose verified certificate names that person is trusted in the room (it
+/// enters a locked room and may be granted the producer role), and stops
+/// being trusted when the host machine takes it back. Saved in room.json.
+#[test]
+fn a_trusted_person_s_devices_are_trusted_in_the_room() {
+    let bob = [42u8; 32];
+    let bob_id = castcorder_link::person::person_id(&bob);
+    let mut room = Room::new(true);
+    let h = host_page(&mut room);
+    room.apply(h, &RoomAction::Lock(true), SALT).unwrap();
+    // Nobody at the host machine: Bob's device joins without a producer,
+    // so only the person trust makes it trusted.
+    room.left(h);
+    let seat = Seat {
+        person: Some(bob),
+        ..Seat::default()
+    };
+    // Not yet trusted: a locked room keeps Bob's device out.
+    assert_eq!(
+        room.admit_offer_as("dev-bob", None, seat, None),
+        Err(Refusal::Locked)
+    );
+    assert!(room.trust_person("not-a-person", true).is_err());
+    assert_eq!(room.trust_person(&bob_id, true), Ok(true));
+    assert_eq!(room.trust_person(&bob_id, true), Ok(false));
+    assert!(room.take_dirty());
+    assert_eq!(room.trusted_persons(), vec![bob_id.clone()]);
+    // Another person's device, or one with no certificate, stays out.
+    let other = Seat {
+        person: Some([43; 32]),
+        ..Seat::default()
+    };
+    assert_eq!(
+        room.admit_offer_as("dev-cy", None, other, None),
+        Err(Refusal::Locked)
+    );
+    assert_eq!(
+        room.admit_offer_as("dev-bob", None, Seat::default(), None),
+        Err(Refusal::Locked)
+    );
+    // Bob's device enters, is trusted, and may be granted the producer role.
+    assert_eq!(
+        room.admit_offer_as("dev-bob", None, seat, None),
+        Ok(Admission::Enter)
+    );
+    room.accepted_as(2, "dev-bob", seat);
+    room.join(2, "Bob").unwrap();
+    let p = &room.state(None).participants[0];
+    assert!(p.trusted && !p.producer, "{p:?}");
+    let h = host_page(&mut room);
+    room.apply(
+        h,
+        &RoomAction::SetProducer {
+            participant: ParticipantId(2),
+            producer: true,
+        },
+        SALT,
+    )
+    .unwrap();
+    assert!(room.role(2).producer);
+    // Survives a restart.
+    let again = Room::from_json(&room.to_json()).unwrap();
+    assert_eq!(again.trusted_persons(), vec![bob_id.clone()]);
+    // Taken back: no longer trusted, so no longer a producer either.
+    assert_eq!(room.trust_person(&bob_id, false), Ok(true));
+    assert!(!room.role(2).producer);
+    assert!(!room.state(None).participants[1].trusted);
+    room.left(2);
+    assert_eq!(
+        room.admit_offer_as("dev-bob", None, seat, None),
+        Err(Refusal::Locked)
+    );
+    assert!(!room.to_json().contains("persons"));
 }

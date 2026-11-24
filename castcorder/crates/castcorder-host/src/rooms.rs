@@ -5,6 +5,7 @@
 //! ```text
 //! <library>/host-identity.key, host-cert.pem, host-key.pem
 //! <library>/person.json                      this install's person (crate::person)
+//! <library>/contacts.json                    its contacts (crate::contact)
 //! <library>/logs/host-<start>.jsonl          the host's own log
 //! <library>/<room>/room.json                 room security (crate::room)
 //! <library>/<room>/call-secret               the secret in the room's call link

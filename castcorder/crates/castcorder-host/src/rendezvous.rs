@@ -236,6 +236,8 @@ pub struct Config {
     pub version: String,
     /// This install's person (link requests are answered here).
     pub persons: crate::person::Persons,
+    /// This install's contacts (contact requests are answered here).
+    pub contacts: crate::contact::Contacts,
 }
 
 impl Config {
@@ -688,6 +690,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         Ok((_, o)) if o.link.is_some() => {
             AnswerPlain::Link(cfg.persons.answer(&o, crate::wall_ms()))
         }
+        // So does a contact request: the contact code is its own.
+        Ok((_, o)) if o.contact.is_some() => {
+            AnswerPlain::Contact(cfg.contacts.answer(&o, crate::wall_ms()))
+        }
         // A status query needs no call secret: the host answers for the
         // rooms the device's key was in, so a regenerated link still works.
         Ok((_, o)) if o.status => {
@@ -758,6 +764,16 @@ mod tests {
             std::env::temp_dir().join(format!("castcorder-rv-person-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::person::Persons::load_or_create(&dir, &HostKey::from_secret([3; 32]), 1).unwrap()
+    }
+
+    fn test_contacts() -> crate::contact::Contacts {
+        let persons = test_persons();
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("castcorder-rv-contacts-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::contact::Contacts::load(&dir, &HostKey::from_secret([3; 32]), persons, 1).unwrap()
     }
 
     #[test]
@@ -891,6 +907,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let (tx, rx) = mpsc::channel();
         let seal = |secret: &CallSecret, eph: u8| {
@@ -912,6 +929,7 @@ mod tests {
                 call: None,
                 cert: None,
                 link: None,
+                contact: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -986,6 +1004,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let code = cfg.persons.new_code(crate::wall_ms()).unwrap();
         let me = HostKey::from_secret([8; 32]);
@@ -1022,6 +1041,60 @@ mod tests {
         assert_eq!(cfg.persons.view(crate::wall_ms()).requests.len(), 1);
     }
 
+    /// A contact request (an empty call secret) is answered by the contacts,
+    /// not the host thread, through the real sealing: pending until someone
+    /// accepts it.
+    #[test]
+    fn a_contact_request_needs_no_call_secret_and_skips_the_host_thread() {
+        let cfg = Config {
+            base: "http://127.0.0.1:1".into(),
+            key: HostKey::from_secret([3; 32]),
+            secret: Arc::new(Mutex::new(Secrets {
+                rooms: [("show".to_string(), CallSecret([7; 16]))].into(),
+                default: "show".into(),
+            })),
+            version: "0.0.0".into(),
+            persons: test_persons(),
+            contacts: test_contacts(),
+        };
+        let code = cfg.contacts.new_code(crate::wall_ms()).unwrap();
+        // Another person's app install.
+        let me = HostKey::from_secret([8; 32]);
+        let dir = std::env::temp_dir().join(format!("castcorder-rv-other-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = crate::person::Persons::load_or_create(&dir, &me, 1).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut exchange = |sealed: &[u8]| {
+            answer(&cfg, &tx, 1, &b64(sealed))
+                .and_then(|a| unb64(&a))
+                .ok_or_else(|| "no answer".to_string())
+        };
+        let mut bogus = code.clone();
+        bogus.secret = [0; 16];
+        let r = crate::contact::request_contact(
+            &bogus,
+            &me,
+            &other.cert(),
+            "Bob",
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("unknown")));
+        let r = crate::contact::request_contact(
+            &code,
+            &me,
+            &other.cert(),
+            "Bob",
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("in time")));
+        assert!(rx.try_recv().is_err());
+        let v = cfg.contacts.view(crate::wall_ms());
+        assert_eq!(v.requests.len(), 1);
+        assert_eq!(v.requests[0].name, "Bob");
+    }
+
     /// Regenerating the link: the old secret no longer admits, the new one
     /// does, and the file holds the new one (so it survives a restart).
     #[test]
@@ -1038,6 +1111,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let old_link = cfg.link();
         let new = regenerate_secret(&dir, "show", &cfg.secret).unwrap();
@@ -1064,6 +1138,7 @@ mod tests {
             call: None,
             cert: None,
             link: None,
+            contact: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())

@@ -215,6 +215,44 @@ pub struct OfferPlain {
     /// [`AnswerPlain::Link`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkAsk>,
+    /// A contact request, not an offer ([`crate::person::ContactCode`]):
+    /// `secret` is ignored, `sdp` is a fresh random nonce the proof signs,
+    /// `cert` must be the asking app install's certificate, and the host
+    /// answers [`AnswerPlain::Contact`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactAsk>,
+}
+
+/// A person asks to become a contact of the person whose app install made a
+/// contact code. The asking install's certificate is the offer's `cert`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactAsk {
+    /// The contact code's secret ([`crate::person::ContactCode::secret_text`]).
+    pub code: String,
+    /// The asking person's display name, shown to the person deciding.
+    pub name: String,
+}
+
+/// The answer to a contact request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactAnswer {
+    /// Nobody has decided yet: ask again.
+    Pending,
+    /// Accepted: the two persons are now contacts.
+    Accepted(ContactGrant),
+    /// Declined, expired, unknown, or claimed by another device.
+    Refused(String),
+}
+
+/// What the asking person learns once accepted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactGrant {
+    /// The certificate of the app install that made the code (for the host
+    /// key the code names, which is the key the answer was sealed with).
+    pub cert: crate::person::DeviceCert,
+    /// The accepting person's display name.
+    pub name: String,
 }
 
 /// A new device asks to be linked to the person of the device that made a
@@ -269,6 +307,8 @@ pub enum AnswerPlain {
     Status(HostStatus),
     /// The answer to a link request ([`OfferPlain::link`]).
     Link(LinkAnswer),
+    /// The answer to a contact request ([`OfferPlain::contact`]).
+    Contact(ContactAnswer),
 }
 
 /// What a host tells a device about the rooms it was in (a status query).
@@ -455,6 +495,43 @@ mod tests {
             }))),
             r#"{"link":{"granted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"person_name":"Ann"}}}"#
         );
+        // Contact requests and their answers.
+        assert_eq!(
+            to_json(&ContactAsk {
+                code: "c".into(),
+                name: "Bob".into(),
+            }),
+            r#"{"code":"c","name":"Bob"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Pending)),
+            r#"{"contact":"pending"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Refused("no".into()))),
+            r#"{"contact":{"refused":"no"}}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Accepted(
+                ContactGrant {
+                    cert: crate::person::DeviceCert {
+                        person: "P".into(),
+                        device: "D".into(),
+                        kind: crate::person::DeviceKind::App,
+                        issued_ms: 5,
+                        sig: "S".into(),
+                    },
+                    name: "Ann".into(),
+                }
+            ))),
+            r#"{"contact":{"accepted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"name":"Ann"}}}"#
+        );
+        let asked: OfferPlain =
+            from_json(r#"{"secret":"","name":"n","sdp":"x","contact":{"code":"c","name":"Bob"}}"#)
+                .unwrap();
+        assert_eq!(asked.contact.unwrap().name, "Bob");
+        let plain: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
+        assert!(!to_json(&plain).contains("contact"));
         // An offer from an older page (no device, no password) still parses.
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));

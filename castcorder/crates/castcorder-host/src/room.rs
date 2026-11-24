@@ -52,7 +52,7 @@
 //! (the old id was a bearer secret anyway); bindings are per call; clearing
 //! browser storage makes a new, untrusted device.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use castcorder_link::identity::{self, DeviceProof};
 use castcorder_protocol::{ParticipantId, Role, RoomAction, RoomParticipant, RoomState};
@@ -136,6 +136,10 @@ struct Saved {
     /// The recording profile records video (webcams). Default off.
     #[serde(default)]
     record_video: bool,
+    /// Persons (ids) the host machine trusts in this room: each of their
+    /// devices is trusted here, whether or not it joined with a producer.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    persons: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +148,8 @@ struct Conn {
     at_host: bool,
     /// One of the room owner's devices (a certificate of this host's person).
     owner: bool,
+    /// The person its certificate names (verified), if any.
+    person: Option<String>,
     joined: bool,
 }
 
@@ -154,6 +160,9 @@ pub struct Seat {
     pub at_host: bool,
     /// From one of the room owner's devices (its certificate verified).
     pub owner: bool,
+    /// The person key its certificate names (verified for the key that
+    /// signed the offer), if any: the room may trust that whole person.
+    pub person: Option<[u8; 32]>,
 }
 
 impl Seat {
@@ -162,7 +171,7 @@ impl Seat {
     pub fn host(at_host: bool) -> Self {
         Self {
             at_host,
-            owner: false,
+            ..Self::default()
         }
     }
 }
@@ -321,6 +330,16 @@ pub fn valid_device(device: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// A person id (castcorder-link `person::person_id`): `p` and 40 lowercase
+/// hex digits.
+fn is_person_id(id: &str) -> bool {
+    id.len() == 41
+        && id.starts_with('p')
+        && id[1..]
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn role_name(r: Role) -> &'static str {
     match (r.host_machine, r.producer) {
         (true, _) => "host-machine",
@@ -403,6 +422,57 @@ impl Room {
         self.saved.record_video
     }
 
+    /// Trust (or stop trusting) the person `id` in this room: each of their
+    /// devices is a trusted device here (it may enter a locked room and be
+    /// granted the producer role), decided per offer by its certificate. Only
+    /// the host machine does this. Whether it changed anything.
+    pub fn trust_person(&mut self, id: &str, trust: bool) -> Result<bool, String> {
+        if !is_person_id(id) {
+            return Err(format!("not a person id: {id}"));
+        }
+        let changed = if trust {
+            self.saved.persons.insert(id.to_string())
+        } else {
+            self.saved.persons.remove(id)
+        };
+        if changed {
+            self.dirty = true;
+            decision(
+                id,
+                "person",
+                if trust {
+                    "trust person"
+                } else {
+                    "stop trusting person"
+                },
+                true,
+                "by the host machine",
+            );
+        }
+        Ok(changed)
+    }
+
+    /// The persons trusted in this room, by id.
+    pub fn trusted_persons(&self) -> Vec<String> {
+        self.saved.persons.iter().cloned().collect()
+    }
+
+    /// Whether the person key `person` (verified) is trusted in this room.
+    fn person_trusted(&self, person: Option<&[u8; 32]>) -> bool {
+        person.is_some_and(|k| {
+            self.saved
+                .persons
+                .contains(&castcorder_link::person::person_id(k))
+        })
+    }
+
+    /// Whether a connection's person is trusted in this room.
+    fn conn_person_trusted(&self, c: &Conn) -> bool {
+        c.person
+            .as_ref()
+            .is_some_and(|p| self.saved.persons.contains(p))
+    }
+
     /// The host's own native participant is (or is no longer) in the call.
     pub fn set_native_producer(&mut self, on: bool) {
         self.native_producer = on;
@@ -415,11 +485,10 @@ impl Room {
     }
 
     fn conn_role(&self, c: &Conn) -> Role {
-        let granted = self
-            .saved
-            .devices
-            .get(&c.device)
-            .is_some_and(|d| d.producer && d.trusted && !d.banned);
+        let granted =
+            self.saved.devices.get(&c.device).is_some_and(|d| {
+                d.producer && (d.trusted || self.conn_person_trusted(c)) && !d.banned
+            });
         Role {
             producer: c.at_host || c.owner || granted,
             host_machine: c.at_host,
@@ -656,11 +725,11 @@ impl Room {
         {
             return Err(Refusal::WrongPassword);
         }
-        let trusted = rec.is_some_and(|d| d.trusted);
+        let trusted = rec.is_some_and(|d| d.trusted) || self.person_trusted(seat.person.as_ref());
         if self.saved.locked && !trusted {
             return Err(Refusal::Locked);
         }
-        let producer = rec.is_some_and(|d| d.producer && d.trusted);
+        let producer = trusted && rec.is_some_and(|d| d.producer);
         if !self.saved.open && !producer && !self.producer_present() {
             return Ok(Admission::Wait);
         }
@@ -750,6 +819,7 @@ impl Room {
                 device: device.to_string(),
                 at_host: seat.at_host,
                 owner: seat.owner,
+                person: seat.person.map(|k| castcorder_link::person::person_id(&k)),
                 joined: false,
             },
         );
@@ -890,8 +960,9 @@ impl Room {
                         "someone at the host machine is always a producer",
                     );
                 }
+                let by_person = self.conn_person_trusted(&target);
                 let rec = self.saved.devices.entry(target.device.clone()).or_default();
-                if *producer && !rec.trusted {
+                if *producer && !rec.trusted && !by_person {
                     return self.deny(&by, role, name, "only a trusted device can be a producer");
                 }
                 rec.producer = *producer;
@@ -972,7 +1043,10 @@ impl Room {
                         participant: ParticipantId(*id),
                         name: rec.map(|d| d.name.clone()).unwrap_or_default(),
                         device: c.device.clone(),
-                        trusted: c.at_host || c.owner || rec.is_some_and(|d| d.trusted),
+                        trusted: c.at_host
+                            || c.owner
+                            || rec.is_some_and(|d| d.trusted)
+                            || self.conn_person_trusted(c),
                         producer: role.producer,
                         host_machine: role.host_machine,
                     }
