@@ -1,7 +1,8 @@
 name: Deploy
 
 # The public services (ADR 0004): one Cloudflare Worker serving every released client at
-# /v/<version>/ and the rendezvous at /ws. Every push to main (and a manual run) builds the
+# /v/<version>/ and the rendezvous at /ws. Every push to main and a manual run (publish.yml
+# starts one on main when a release is published, docs/release.md) builds the
 # client and the Worker, stages every published release's client beside this build's
 # (deploy/stage-releases.sh), and runs `wrangler deploy`, then smoke-checks the live Worker
 # (deploy/smoke.mjs). Pull requests only build and run `wrangler deploy --dry-run`.

@@ -85,9 +85,15 @@ fn err(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
-/// The directory beside the executable that holds a bundled GStreamer's
-/// plugins (the Windows installer; its libraries sit beside the executable).
-pub const BUNDLED_PLUGINS: &str = "gstreamer-1.0";
+/// The directory, relative to the executable's, that holds a bundled
+/// GStreamer's plugins: beside the exe on Windows (its libraries sit beside
+/// the exe too), `Contents/Frameworks/gstreamer-1.0` in the macOS `.app`
+/// (its libraries in `Contents/Frameworks`, the exe's rpath).
+pub const BUNDLED_PLUGINS: &str = if cfg!(target_os = "macos") {
+    "../Frameworks/gstreamer-1.0"
+} else {
+    "gstreamer-1.0"
+};
 
 fn init() -> io::Result<()> {
     gst::init().map_err(|e| err(format!("gstreamer init failed: {e}")))?;
@@ -100,9 +106,32 @@ fn init() -> io::Result<()> {
             let added = gst::Registry::get().scan_path(&dir);
             tracing::info!(dir = %dir.display(), added, "bundled GStreamer plugins");
         }
+        // The AppImage carries the distro's libgstreamer with its built-in
+        // plugin directory rewritten (AppImage tools patch /usr out of
+        // libraries), so it finds no plugins: fall back to the system's.
+        if cfg!(target_os = "linux") && gst::Registry::get().find_plugin("coreelements").is_none() {
+            for dir in SYSTEM_PLUGIN_DIRS.iter().map(std::path::Path::new) {
+                if dir.is_dir() {
+                    let added = gst::Registry::get().scan_path(dir);
+                    tracing::info!(dir = %dir.display(), added, "system GStreamer plugins");
+                }
+            }
+        }
     });
     Ok(())
 }
+
+/// Where Linux distributions install GStreamer's plugins (Debian multiarch,
+/// Fedora, Arch).
+const SYSTEM_PLUGIN_DIRS: &[&str] = &[
+    if cfg!(target_arch = "aarch64") {
+        "/usr/lib/aarch64-linux-gnu/gstreamer-1.0"
+    } else {
+        "/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+    },
+    "/usr/lib64/gstreamer-1.0",
+    "/usr/lib/gstreamer-1.0",
+];
 
 /// The elements the capture, live and playback pipelines need: the
 /// platform's microphone source first.

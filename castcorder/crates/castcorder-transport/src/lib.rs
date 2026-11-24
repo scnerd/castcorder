@@ -134,7 +134,7 @@ mod relay;
 pub mod signal;
 
 pub use channel::{ChannelError, ChannelKind, GuestChannel, MAX_MESSAGE};
-pub use relay::{RelayStats, TurnServer};
+pub use relay::{ALLOCATE_TIMEOUT, RelayStats, TurnServer};
 
 use crate::channel::lock;
 use crate::guest::{Guest, Propagated, Timing, TrackIn, Wire};
@@ -512,6 +512,12 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             permissions: a.permissions + b.permissions,
             sent: a.sent + b.sent,
             received: a.received + b.received,
+            timeouts: a.timeouts + b.timeouts,
+            last_error: self.relays[self.active]
+                .stats
+                .last_error
+                .clone()
+                .or_else(|| self.relays[1 - self.active].stats.last_error.clone()),
         }
     }
 

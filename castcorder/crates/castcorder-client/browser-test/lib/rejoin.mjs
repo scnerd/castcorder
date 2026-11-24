@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
+import { VERSION } from './version.mjs';
 import { sleep, waitFor, text, check } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
@@ -34,7 +35,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
   };
   let RV = rendezvous;
   if (!RV) {
-    ctx.rv8 = spawn(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', '0.0.0=' + dist], { stdio: ['ignore', 'pipe', 'pipe'] });
+    ctx.rv8 = spawn(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist], { stdio: ['ignore', 'pipe', 'pipe'] });
     const rv = out(ctx.rv8, 'rv8');
     RV = (await waitFor(() => rv.out.match(/RENDEZVOUS_READY http=(\S+)/), 'RENDEZVOUS_READY', 20000))[1];
   }

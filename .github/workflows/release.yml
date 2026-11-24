@@ -1,12 +1,20 @@
 name: Release
 
-# A `v*` tag builds the unsigned desktop installers on Windows, macOS and Linux and attaches
-# them to a draft GitHub Release, with the web client as castcorder-client-<version>.tar.gz:
-# once the release is published, every deploy (deploy.yml, deploy/stage-releases.sh) serves
-# that client at /v/<version>/ for good (ADR 0002). The installers register with the
-# project's rendezvous by default (the project-rendezvous feature). workflow_dispatch builds
-# the same files as workflow artifacts only, for testing. No signing or updater yet
-# (docs/design.md, "Repository and delivery").
+# The release process is docs/release.md (ADR 0006). A `v*` tag first verifies the release
+# (the tag names the workspace version, every copy of it agrees, CHANGELOG.md has its
+# entry, the tagged commit is on main, the last release's wire encodings are unchanged),
+# then builds the unsigned desktop installers on Windows, macOS and Linux and attaches them
+# to a draft GitHub Release whose notes are the changelog entry, with the web client as
+# castcorder-client-<version>.tar.gz. Publishing the draft starts a deploy (publish.yml),
+# and every deploy serves that client at /v/<version>/ for good (ADR 0002). The installers
+# register with the project's rendezvous by default (the project-rendezvous feature).
+#
+# Updater: once the TAURI_SIGNING_PRIVATE_KEY secret and the TAURI_UPDATER_PUBKEY variable
+# exist (docs/release.md, "One-time setup"), the builds also sign updater artifacts and the
+# release gets a latest.json for Tauri's updater. Until then those steps are skipped.
+#
+# workflow_dispatch verifies and builds the same files as workflow artifacts only, for
+# testing; it never creates a release.
 on:
   push:
     tags: ["v*"]
@@ -16,34 +24,106 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      updater: ${{ steps.updater.outputs.updater }}
+    steps:
+      # Full history and tags: the tag must be on main, and the protocol check compares
+      # with the previous release tag.
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version
+        id: version
+        run: echo "version=$(uv run --quiet scripts/release.py version)" >> "$GITHUB_OUTPUT"
+
+      - name: The version, its copies and the changelog
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            task release:check TAG="$GITHUB_REF_NAME"
+          else
+            task release:check
+          fi
+
+      - name: The tagged commit is on main
+        if: github.ref_type == 'tag'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main: tag the merged release pull request's commit (docs/release.md)"
+            exit 1
+          fi
+
+      - name: Protocol compatibility with the previous release
+        run: task release:protocol
+
+      # `secrets` cannot appear in `if:`, so a step reads them from the environment.
+      - name: Updater signing configured?
+        id: updater
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY secret: building without updater artifacts or latest.json (docs/release.md, One-time setup)."
+            echo "updater=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$TAURI_UPDATER_PUBKEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is set but the TAURI_UPDATER_PUBKEY repository variable is not (docs/release.md, One-time setup)."
+            exit 1
+          else
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+          fi
+
   installers:
     name: installers (${{ matrix.name }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Native capture (GStreamer): bundled on Windows (a trimmed, LGPL-only copy,
-        # task app:gst:stage), the distro's packages on Linux (the .deb depends on
-        # them; 24.04 for GStreamer 1.24). macOS stays on the webview microphone.
+        # Native capture (GStreamer): bundled on Windows and macOS (a trimmed,
+        # LGPL-only copy, task app:gst:stage), the distro's packages on Linux (the
+        # .deb depends on them; 24.04 for GStreamer 1.24). macOS is one universal
+        # (x86_64 and arm64) build.
         include:
           - name: windows
             os: windows-latest
             bundles: nsis,msi
             features: desktop,native-capture,project-rendezvous
             extra_config: --config tauri.gst.conf.json
+            target_args: ""
+            bundle_dir: castcorder/target/release/bundle
           - name: macos
             os: macos-latest
             bundles: app,dmg
-            features: desktop,project-rendezvous
-            extra_config: ""
+            features: desktop,native-capture,project-rendezvous
+            extra_config: --config tauri.gst-macos.conf.json
+            target_args: --target universal-apple-darwin
+            bundle_dir: castcorder/target/universal-apple-darwin/release/bundle
           - name: linux
             os: ubuntu-24.04
             bundles: deb,appimage
             features: desktop,native-capture,project-rendezvous
             extra_config: --config tauri.gst-deb.conf.json
+            target_args: ""
+            bundle_dir: castcorder/target/release/bundle
     env:
       GST_VERSION: 1.28.8
       GST_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
+      GST_MACOS_SHA256: d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe
+      GST_MACOS_DEVEL_SHA256: e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7
       # AppImage tooling runs without FUSE on the runner.
       APPIMAGE_EXTRACT_AND_RUN: "1"
     steps:
@@ -57,6 +137,10 @@ jobs:
 
       - name: Ensure toolchain and wasm32 target
         run: rustup show active-toolchain
+
+      - name: Add both macOS targets (universal build)
+        if: matrix.name == 'macos'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       # The Tauri 2 Linux prerequisites, plus a virtual display for the smoke run.
       - name: Install webview and tray libraries
@@ -100,8 +184,41 @@ jobs:
           "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
           "$root\bin" >> $env:GITHUB_PATH
 
+      - name: Cache the GStreamer packages (macOS)
+        if: matrix.name == 'macos'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gstreamer-pkg
+          key: gstreamer-macos-universal-${{ env.GST_VERSION }}
+
+      # The official universal framework, runtime and development packages, in
+      # /Library/Frameworks: the build links against it (pkg-config, for both
+      # architectures) and task app:gst:stage copies the trimmed set.
+      - name: Install GStreamer (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/gstreamer-pkg"
+          mkdir -p "$dir"
+          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GST_VERSION"
+          for kind in "" devel-; do
+            pkg="gstreamer-1.0-$kind$GST_VERSION-universal.pkg"
+            [ -f "$dir/$pkg" ] || curl -fsSL -o "$dir/$pkg" "$base/$pkg"
+          done
+          echo "$GST_MACOS_SHA256  $dir/gstreamer-1.0-$GST_VERSION-universal.pkg" | shasum -a 256 -c -
+          echo "$GST_MACOS_DEVEL_SHA256  $dir/gstreamer-1.0-devel-$GST_VERSION-universal.pkg" | shasum -a 256 -c -
+          for kind in "" devel-; do
+            sudo installer -pkg "$dir/gstreamer-1.0-$kind$GST_VERSION-universal.pkg" -target /
+          done
+          root=/Library/Frameworks/GStreamer.framework/Versions/1.0
+          command -v pkg-config || brew install pkgconf
+          echo "PKG_CONFIG_PATH=$root/lib/pkgconfig" >> "$GITHUB_ENV"
+          # One pkg-config answers for both slices: the framework is universal.
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          PKG_CONFIG_PATH="$root/lib/pkgconfig" pkg-config --modversion gstreamer-1.0
+
       - name: Install uv
-        if: matrix.name == 'windows'
+        if: matrix.name != 'linux'
         uses: astral-sh/setup-uv@v10.3.3
 
       - name: Cache cargo
@@ -119,17 +236,33 @@ jobs:
       - name: Install tauri-cli
         run: cargo binstall tauri-cli --version "^2" --no-confirm --locked
 
-      - name: Stage the bundled GStreamer (Windows)
-        if: matrix.name == 'windows'
+      - name: Stage the bundled GStreamer (Windows, macOS)
+        if: matrix.name != 'linux'
         run: task app:gst:stage
+
+      # Only with the signing key (verify's gate): turn on Tauri's updater artifacts (the
+      # NSIS and MSI installers, the macOS .app.tar.gz and the AppImage, each with a .sig).
+      - name: Updater configuration
+        if: needs.verify.outputs.updater == 'true'
+        shell: bash
+        env:
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
+        run: |
+          jq -n --arg pubkey "$TAURI_UPDATER_PUBKEY" \
+            --arg endpoint "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" \
+            '{bundle: {createUpdaterArtifacts: true}, plugins: {updater: {pubkey: $pubkey, endpoints: [$endpoint]}}}' \
+            > castcorder/crates/castcorder-app/tauri.updater.conf.json
 
       # The client is built with trunk and bundled as the app's `client` resource.
       - name: Build installers
-        run: task app:bundle FEATURES=${{ matrix.features }} EXTRA_CONFIG="${{ matrix.extra_config }}" -- --bundles ${{ matrix.bundles }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.verify.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.verify.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+        run: task app:bundle FEATURES=${{ matrix.features }} EXTRA_CONFIG="${{ matrix.extra_config }} ${{ needs.verify.outputs.updater == 'true' && '--config tauri.updater.conf.json' || '' }}" -- --bundles ${{ matrix.bundles }} ${{ matrix.target_args }}
 
       - name: Installer sizes
         shell: bash
-        run: find castcorder/target/release/bundle -maxdepth 2 -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -exec ls -l {} \;
+        run: find ${{ matrix.bundle_dir }} -maxdepth 2 -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -exec ls -l {} \;
 
       # Without the build's GStreamer on PATH or in the environment, so only the
       # installed copy can satisfy the app.
@@ -158,6 +291,63 @@ jobs:
           Write-Host $out
           if ($out -notmatch 'APP_READY') { throw 'smoke run did not reach APP_READY' }
 
+      # Copied out of the .dmg, with the build's GStreamer.framework moved away
+      # and no GST_ or DYLD_ variables, so only the .app's copy can satisfy it.
+      - name: Smoke test the installed app (macOS)
+        if: matrix.name == 'macos'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          dmg=$(ls ${{ matrix.bundle_dir }}/dmg/*.dmg)
+          mnt="$RUNNER_TEMP/castcorder-dmg"
+          dir="$RUNNER_TEMP/castcorder-install"
+          mkdir -p "$mnt" "$dir"
+          # The .dmg shows the licence (bundle.licenseFile) and waits for "Y".
+          (yes || true) | PAGER="cat" hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg" > /dev/null
+          cp -R "$mnt"/*.app "$dir/"
+          hdiutil detach "$mnt"
+          app=$(ls -d "$dir"/*.app)
+          exe=$(ls "$app"/Contents/MacOS/*)
+          echo "$exe"
+          test -f "$app/Contents/Resources/client/index.html"
+          test -f "$app/Contents/Frameworks/libgstreamer-1.0.0.dylib"
+          test -f "$app/Contents/Resources/licenses/gstreamer/NOTICE.txt"
+          plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Info.plist"
+          lipo -archs "$exe"
+          # Every library the exe, the bundled libraries and the plugins load is
+          # the system's or in Contents/Frameworks, for both architectures.
+          uv run scripts/check_app_dylibs.py "$app"
+          sudo mv /Library/Frameworks/GStreamer.framework "$RUNNER_TEMP/GStreamer.framework.moved"
+          for v in $(env | grep -E '^(GST|DYLD)_' | cut -d= -f1); do unset "$v"; done
+          "$exe" --smoke-gst 2>&1 | tee smoke-gst.log
+          grep -q GST_OK smoke-gst.log
+          if grep '^GST_ELEMENT' smoke-gst.log | grep -v " $app/"; then
+            echo "plugins loaded from outside the app"; exit 1
+          fi
+          # The x86_64 slice too, where Rosetta is installed.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 "$exe" --smoke-gst 2>&1 | tee smoke-gst-x86_64.log
+            grep -q GST_OK smoke-gst-x86_64.log
+          else
+            echo "::warning::no Rosetta: the x86_64 slice was not run"
+          fi
+          "$exe" --smoke 2>&1 | tee smoke.log
+          grep -q APP_READY smoke.log
+
+      # The AppImage bundles what the executable links (libgstreamer and the
+      # other GStreamer libraries, 1.24 from the build machine) but no plugins:
+      # castcorder-capture-gst scans the system's plugin directories.
+      - name: Smoke test the AppImage (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          appimage=$(ls castcorder/target/release/bundle/appimage/*.AppImage)
+          chmod +x "$appimage"
+          (cd "$RUNNER_TEMP" && "$OLDPWD/$appimage" --appimage-extract >/dev/null)
+          echo "GStreamer files inside the AppImage:"
+          find "$RUNNER_TEMP/squashfs-root" -name 'libgst*' -o -name 'gstreamer-1.0' -type d | sed "s|$RUNNER_TEMP/squashfs-root||" | sort
+          "$appimage" --smoke-gst 2>&1 | tee smoke-gst-appimage.log
+          grep -q GST_OK smoke-gst-appimage.log
+
       - name: Smoke test the installed app (Linux)
         if: matrix.name == 'linux'
         # WebKitGTK under xvfb: no DMA-BUF renderer.
@@ -182,17 +372,24 @@ jobs:
         with:
           name: installers-${{ matrix.name }}
           if-no-files-found: error
+          # The .sig files and the macOS .app.tar.gz exist only with the updater on.
           path: |
             castcorder/target/release/bundle/nsis/*.exe
+            castcorder/target/release/bundle/nsis/*.exe.sig
             castcorder/target/release/bundle/msi/*.msi
-            castcorder/target/release/bundle/dmg/*.dmg
+            castcorder/target/release/bundle/msi/*.msi.sig
+            castcorder/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            castcorder/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+            castcorder/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
             castcorder/target/release/bundle/deb/*.deb
             castcorder/target/release/bundle/appimage/*.AppImage
+            castcorder/target/release/bundle/appimage/*.AppImage.sig
 
   # The web client as released, for the Worker to serve at /v/<version>/ (the Cargo
   # workspace version, which the hosts' call links pin) from every later deploy.
   client:
     name: web client
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -214,10 +411,15 @@ jobs:
 
       - name: Build the client archive
         working-directory: castcorder
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 --locked             | jq -r '.packages[] | select(.name == "castcorder-client") | .version')
-          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
-            echo "::warning::tag $GITHUB_REF_NAME but the workspace version is $version; links will use /v/$version/"
+          # verify checked the tag against this version: the one hosts' call links pin.
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "castcorder-client") | .version')
+          if [ "$version" != "$VERSION" ]; then
+            echo "::error::castcorder-client is $version but the workspace version is $VERSION"
+            exit 1
           fi
           (cd crates/castcorder-client && trunk build --release --dist dist-release)
           mkdir -p ../client-archive
@@ -235,11 +437,17 @@ jobs:
   release:
     name: draft release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [installers, client]
+    needs: [verify, installers, client]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
       - name: Download installers
         uses: actions/download-artifact@v8
         with:
@@ -253,10 +461,22 @@ jobs:
           name: client
           path: installers
 
+      # Tauri's updater reads it from releases/latest/download/latest.json, so installed
+      # apps see a release only once it is published (and not a pre-release).
+      - name: Updater manifest
+        if: needs.verify.outputs.updater == 'true'
+        run: |
+          uv run scripts/release.py updater-manifest installers \
+            --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME" \
+            --out installers/latest.json
+
+      # The notes are the changelog entry, then GitHub's list of merged pull requests.
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           ls -l installers
-          gh release create "$GITHUB_REF_NAME" installers/* --draft --generate-notes --title "$GITHUB_REF_NAME"
+          uv run --quiet scripts/release.py notes "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" installers/* --draft --verify-tag \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes --title "$GITHUB_REF_NAME"

@@ -32,6 +32,7 @@
 //! The real-browser test is `task test:browser:client` (see `browser-test/`).
 
 pub mod delivery;
+pub mod leftover;
 pub mod levels;
 pub mod recorders;
 pub mod scope;

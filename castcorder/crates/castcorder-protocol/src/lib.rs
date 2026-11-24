@@ -175,6 +175,17 @@ pub enum Request {
         /// The track.
         offer: TrackOffer,
     },
+    /// This participant's camera in the call: on (its video track is on the
+    /// sender) or off (nothing is sent). Sent after every join and whenever
+    /// it changes, so the others show the camera-off tile instead of a
+    /// frozen last frame, whatever the browser reports of a silent track.
+    /// The host keeps the latest per participant and relays it to everyone
+    /// else in the call, latecomers included ([`Event::CameraState`]).
+    /// Answered with [`Response::Done`] (appended).
+    CameraState {
+        /// The camera is on.
+        on: bool,
+    },
 }
 
 /// One recorded source's state on its device, as the device reports it.
@@ -501,6 +512,15 @@ pub enum Event {
     /// The room's calls, oldest first (sent to producers only, after joining
     /// and whenever they change; appended).
     Calls(Vec<CallSummary>),
+    /// Another participant's camera, as it reported it
+    /// ([`Request::CameraState`]): relayed when it changes, and every
+    /// participant's latest to a device right after it joins (appended).
+    CameraState {
+        /// Whose camera (their forwarded stream id ends in `-<id>`).
+        participant: ParticipantId,
+        /// The camera is on.
+        on: bool,
+    },
 }
 
 /// A call of a room on a host.
@@ -658,9 +678,10 @@ pub fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, DecodeError>
 mod tests {
     use super::*;
 
-    #[test]
-    fn every_message_round_trips() {
-        let client = vec![
+    /// One or more samples of every [`Request`] variant (checked by
+    /// `samples_cover_every_variant`); the round trip and the wire golden file use them.
+    fn client_samples() -> Vec<Request> {
+        vec![
             Request::Join {
                 display_name: "Alice".into(),
                 protocol_version: PROTOCOL_VERSION,
@@ -730,15 +751,13 @@ mod tests {
                     format: "wav".into(),
                 },
             },
-        ];
-        for (i, request) in client.into_iter().enumerate() {
-            let msg = ClientMessage::Request {
-                id: RequestId(i as u64),
-                request,
-            };
-            assert_eq!(decode::<ClientMessage>(&encode(&msg)).unwrap(), msg);
-        }
-        let core = vec![
+            Request::CameraState { on: true },
+        ]
+    }
+
+    /// One or more samples of every [`Response`] and [`Event`] variant.
+    fn core_samples() -> Vec<CoreMessage> {
+        vec![
             CoreMessage::Response {
                 id: RequestId(10),
                 response: Response::ClockPong {
@@ -795,6 +814,10 @@ mod tests {
                 participant: ParticipantId(2),
                 muted: true,
                 level: 128,
+            }),
+            CoreMessage::Event(Event::CameraState {
+                participant: ParticipantId(2),
+                on: false,
             }),
             CoreMessage::Event(Event::Recorders(vec![Recorder {
                 participant: ParticipantId(2),
@@ -854,10 +877,202 @@ mod tests {
                     host_us: 199,
                 },
             },
-        ];
-        for msg in core {
+            CoreMessage::Response {
+                id: RequestId(0),
+                response: Response::Joined {
+                    participant: ParticipantId(2),
+                },
+            },
+            CoreMessage::Response {
+                id: RequestId(2),
+                response: Response::TakeStarted { take: TakeId(1) },
+            },
+            CoreMessage::Response {
+                id: RequestId(3),
+                response: Response::TakeStopped { take: TakeId(1) },
+            },
+            CoreMessage::Response {
+                id: RequestId(4),
+                response: Response::TakeStatus(TakeStatus::Recording {
+                    take: TakeId(5),
+                    video: true,
+                    started_us: 1_767_225_600_000_000,
+                }),
+            },
+            CoreMessage::Response {
+                id: RequestId(4),
+                response: Response::TakeStatus(TakeStatus::Idle),
+            },
+            CoreMessage::Response {
+                id: RequestId(8),
+                response: Response::Room(RoomState {
+                    locked: true,
+                    password: false,
+                    open: true,
+                    link: Some("https://example.test/v/1.2.3/#k".into()),
+                    participants: Vec::new(),
+                    record_video: true,
+                }),
+            },
+            CoreMessage::Event(Event::Tracks(TracksState {
+                folder: Some("show/2026-11-15".into()),
+                takes: vec![TakeTracks {
+                    take: TakeId(1),
+                    dir: "take0001".into(),
+                    tracks: vec![TrackStatus {
+                        participant: "Alice".into(),
+                        file: "take0001-1-mic.flac".into(),
+                        kind: SourceKind::Audio,
+                        state: TrackState::Receiving { percent: 40 },
+                    }],
+                }],
+            })),
+            CoreMessage::Event(Event::Call(CallRef {
+                room: "show".into(),
+                call: "2026-11-15".into(),
+            })),
+            CoreMessage::Event(Event::Calls(vec![CallSummary {
+                id: "2026-11-15".into(),
+                started_ms: 1_767_225_600_000,
+                last_active_ms: 1_767_225_660_000,
+                takes: 2,
+                current: true,
+            }])),
+        ]
+    }
+
+    #[test]
+    fn every_message_round_trips() {
+        for (i, request) in client_samples().into_iter().enumerate() {
+            let msg = ClientMessage::Request {
+                id: RequestId(i as u64),
+                request,
+            };
+            assert_eq!(decode::<ClientMessage>(&encode(&msg)).unwrap(), msg);
+        }
+        for msg in core_samples() {
             assert_eq!(decode::<CoreMessage>(&encode(&msg)).unwrap(), msg);
         }
+    }
+
+    /// How many variants enum `T` has: postcard writes the variant index first (one
+    /// byte below 128), and zero padding is a valid body for every variant (zero
+    /// numbers, empty strings and lists, `None`, variant 0), so the first index that
+    /// fails to decode is one past the last variant.
+    fn variant_count<T: for<'a> Deserialize<'a>>() -> u8 {
+        let mut bytes = [0u8; 256];
+        for index in 0..128u8 {
+            bytes[0] = index;
+            if postcard::from_bytes::<T>(&bytes).is_err() {
+                return index;
+            }
+        }
+        panic!("more than 127 variants");
+    }
+
+    fn responses() -> Vec<Response> {
+        core_samples()
+            .into_iter()
+            .filter_map(|m| match m {
+                CoreMessage::Response { response, .. } => Some(response),
+                CoreMessage::Event(_) => None,
+            })
+            .collect()
+    }
+
+    fn events() -> Vec<Event> {
+        core_samples()
+            .into_iter()
+            .filter_map(|m| match m {
+                CoreMessage::Event(event) => Some(event),
+                CoreMessage::Response { .. } => None,
+            })
+            .collect()
+    }
+
+    fn assert_covers<T: Serialize + for<'a> Deserialize<'a>>(name: &str, samples: &[T]) {
+        let count = variant_count::<T>();
+        let mut seen: Vec<u8> = samples.iter().map(|s| encode(s)[0]).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        let missing: Vec<u8> = (0..count).filter(|i| !seen.contains(i)).collect();
+        assert!(
+            missing.is_empty(),
+            "{name} variants at positions {missing:?} have no sample in client_samples or core_samples"
+        );
+    }
+
+    #[test]
+    fn samples_cover_every_variant() {
+        assert_covers("Request", &client_samples());
+        assert_covers("Response", &responses());
+        assert_covers("Event", &events());
+    }
+
+    /// `Type::Variant` from a value's Debug output.
+    fn golden_key<T: std::fmt::Debug>(ty: &str, value: &T) -> String {
+        let debug = format!("{value:?}");
+        let variant: String = debug
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        format!("{ty}::{variant}")
+    }
+
+    /// The golden file's text: `Type::Variant[#n] <hex>` per sample, in sample order.
+    /// Requests are wrapped in a `ClientMessage` with a fixed id, so the lines pin the
+    /// whole frame a guest sends.
+    fn golden_text() -> String {
+        let mut lines: Vec<(String, Vec<u8>)> = Vec::new();
+        for request in client_samples() {
+            let key = golden_key("Request", &request);
+            let frame = ClientMessage::Request {
+                id: RequestId(7),
+                request,
+            };
+            lines.push((key, encode(&frame)));
+        }
+        for message in core_samples() {
+            let key = match &message {
+                CoreMessage::Response { response, .. } => golden_key("Response", response),
+                CoreMessage::Event(event) => golden_key("Event", event),
+            };
+            lines.push((key, encode(&message)));
+        }
+        let mut out = String::from(
+            "# Wire encodings of the protocol samples (castcorder-protocol tests).\n\
+             # A release freezes these lines: `task release:protocol` fails if a line\n\
+             # present at the last release changed or went away without a\n\
+             # PROTOCOL_VERSION bump. Regenerate: task protocol:golden\n",
+        );
+        let mut counts = std::collections::BTreeMap::<String, usize>::new();
+        for (key, bytes) in lines {
+            let n = counts.entry(key.clone()).or_default();
+            *n += 1;
+            let key = if *n == 1 { key } else { format!("{key}#{n}") };
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            out.push_str(&format!("{key} {hex}\n"));
+        }
+        out
+    }
+
+    #[test]
+    fn wire_encodings_match_the_golden_file() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/wire.golden");
+        let text = golden_text();
+        if std::env::var_os("CASTCORDER_BLESS").is_some() {
+            std::fs::write(path, &text).expect("write wire.golden");
+            return;
+        }
+        let golden = std::fs::read_to_string(path)
+            .expect("wire.golden is missing; run task protocol:golden")
+            .replace("\r\n", "\n");
+        assert!(
+            golden == text,
+            "the wire encoding of the protocol samples changed (wire.golden). Appending \
+             a sample is fine; changing an existing line breaks guests of the last \
+             release unless PROTOCOL_VERSION is bumped. If intended: task protocol:golden"
+        );
     }
 
     #[test]
@@ -1137,6 +1352,15 @@ mod tests {
                 current: true,
             }])),
             vec![11, 1, 0, 1, 2, 3, 1]
+        );
+        // Camera state (appended).
+        assert_eq!(encode(&Request::CameraState { on: false }), vec![14, 0]);
+        assert_eq!(
+            encode(&Event::CameraState {
+                participant: ParticipantId(4),
+                on: true
+            }),
+            vec![12, 4, 1]
         );
     }
 

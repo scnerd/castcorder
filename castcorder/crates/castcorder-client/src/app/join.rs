@@ -57,6 +57,10 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
         e.live = Some(handle(&live));
         e.capture = None;
     });
+    ui.devices
+        .set_live_mic(first_audio(&raw).map(|t| t.label()).unwrap_or_default());
+    // Now allowed, the browser names every device.
+    spawn_local(devices::refresh(ui));
     apply_mute(ui);
     // Recording capture starts beside the call and never holds up or fails
     // the join (see start_capture).
@@ -330,7 +334,9 @@ fn add_media(
             let init = object();
             set(&init, "direction", "sendonly");
             set(&init, "streams", Array::of1(live));
-            call(pc, "addTransceiver", &[&t, &init])?;
+            let tr = call(pc, "addTransceiver", &[&t, &init])?;
+            // A microphone switch swaps this sender's track (no renegotiation).
+            with_engine(|e| e.audio_sender = Some(get(&tr, "sender")));
         }
     }
     // The wire contract's first offer carries audio and video m-lines; the

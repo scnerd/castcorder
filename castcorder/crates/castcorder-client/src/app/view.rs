@@ -81,6 +81,11 @@ pub(super) fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl In
         }
         .into_any(),
         "x" => view! { <path d="M18 6L6 18M6 6l12 12"/> }.into_any(),
+        "sliders" => view! {
+            <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/>
+            <circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>
+        }
+        .into_any(),
         _ => view! {
             <path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
             <path d="M12 9v4"/><path d="M12 17h.01"/>
@@ -355,6 +360,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                         <input id="password" type="password" placeholder="Only if the call has one" prop:value=move || ui.password.get()
                             on:input=move |ev| ui.password.set(event_target_value(&ev)) />
                     </div>
+                    <devices::LobbyDevices ui=ui/>
                     <label class="check">
                         <input type="checkbox" prop:checked=move || ui.camera.get() on:change=move |_| toggle_camera(ui) />
                         "Camera on when I join"
@@ -368,6 +374,8 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                     <span class="lobby-status">{status}</span>
                     <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
                     <span class="lobby-error" hidden=move || ui.errors.get().is_empty()>{last_error}</span>
+                    // Below Join: it can appear after the lobby is drawn.
+                    <devices::LobbyAllowNames ui=ui/>
                     <details class="advanced">
                         <summary>"Connection settings"</summary>
                         <div class="field">
@@ -376,7 +384,10 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                                 on:input=move |ev| ui.signal_url.set(event_target_value(&ev)) />
                         </div>
                     </details>
-                    <native::NativeMic room=ui.room_name.get_untracked()/>
+                    // In a call it is in the Devices dialog (one copy of its ids).
+                    <Show when=move || !ui.joined.get()>
+                        <native::NativeMic room=ui.room_name.get_untracked()/>
+                    </Show>
                 </div>
             </div>
             <rejoin::MyRooms ui=ui/>
@@ -640,6 +651,17 @@ fn Call(ui: Ui) -> impl IntoView {
                         </button>
                         <span class="dock-label">{move || if ui.self_view.get() { "Hide me" } else { "Show me" }}</span>
                     </div>
+                    <div class="dock-item">
+                        <Show when=move || ui.devices.open.get()>
+                            <devices::DevicesDialog ui=ui/>
+                        </Show>
+                        <button id="devices" class="dock-btn" aria-pressed=move || if ui.devices.open.get() { "true" } else { "false" }
+                            aria-label="Devices: microphone, camera, speakers and backup microphones"
+                            on:click=move |_| devices::toggle_dialog(ui)>
+                            <Icon name="sliders"/>
+                        </button>
+                        <span class="dock-label">"Devices"</span>
+                    </div>
                     <Show when=producer>
                         <span class="dock-sep" aria-hidden="true"></span>
                         <div class="dock-item">
@@ -729,6 +751,7 @@ pub(super) fn App() -> impl IntoView {
         panel: RwSignal::new(Panel::Auto),
         self_view: RwSignal::new(true),
         levels: RwSignal::new(VecDeque::new()),
+        devices: devices::DeviceUi::new(),
     };
     if bad_link {
         ui.warning
@@ -740,6 +763,7 @@ pub(super) fn App() -> impl IntoView {
     if let Err(e) = start_worker(ui) {
         ui.error("worker", &e);
     }
+    devices::bind(ui);
     // The default name comes from the device id, known once the key loads.
     let placeholder = RwSignal::new(String::from("Guest"));
     spawn_local(async move {

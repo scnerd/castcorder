@@ -48,3 +48,6 @@ Thumbs.db
 
 # Client build bundled into the desktop installers (task app:bundle)
 **/castcorder-app/client/
+
+# Written by release.yml only when the updater signing key exists (docs/release.md)
+**/castcorder-app/tauri.updater.conf.json

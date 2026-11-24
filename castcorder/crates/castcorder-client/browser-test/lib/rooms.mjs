@@ -199,6 +199,22 @@ export async function roomsChecks() {
     }
   }, { ...meta, name: 'foreign-take0001', file: 'foreign-take0001.wav', take: 1,
     call: meta.call.replace(/[^/]+$/, FOREIGN) });
+  // What a cut connection leaves behind (cast-22g): a track whose wav was
+  // delivered but whose sidecar and timing were not, and one whose timing
+  // alone was not. No wav beside them: they must still be offered.
+  await G.evaluate(async (m) => {
+    const d = await (await navigator.storage.getDirectory()).getDirectoryHandle('tracks', { create: true });
+    const header = (track, source) => JSON.stringify({ type: 'header', version: 1, call: m.call, device: m.device,
+      take: m.take, track, source, sample_rate: 48000, channels: 1, device_clock: 'test', host_clock: 'test' }) + '\n';
+    for (const [name, data] of [
+      ['leftover-take0003.json', JSON.stringify({ ...m, name: 'leftover-take0003', file: 'leftover-take0003.wav', source: 'leftover' })],
+      ['leftover-take0003.timing.jsonl', header('leftover-take0003', 'leftover')],
+      ['lone-take0003.timing.jsonl', header('lone-take0003', 'lone')]]) {
+      const w = await (await d.getFileHandle(name, { create: true })).createWritable();
+      await w.write(data);
+      await w.close();
+    }
+  }, meta);
   // The producer moves on to a new call (G is gone, so nothing holds it).
   await P.click('#new-call');
   await waitFor(async () => {
@@ -219,6 +235,15 @@ export async function roomsChecks() {
     return n.some((f) => f.startsWith('take0003')) ? null : n;
   }, 'G\x27s take 3 left OPFS after verified receipt', 30000);
   check(true, 'G\x27s take 3 of call ' + first + ' synced from call ' + third + ' and left the device');
+  const leftovers = await waitFor(async () => {
+    const d = join(dirs[0], 'take03');
+    const f = readdirSync(d);
+    const done = [/_leftover\.json$/, /_leftover\.timing\.jsonl$/, /_lone\.timing\.jsonl$/].every((r) => f.some((x) => r.test(x)))
+      && !f.some((x) => x.endsWith('.journal') || x.endsWith('.obao'));
+    const n = await opfsNames(G);
+    return done && !n.some((x) => x.startsWith('leftover-') || x.startsWith('lone-')) ? f : null;
+  }, 'the sidecar and timing a cut connection left behind land and leave the device (cast-22g)', 30000);
+  check(leftovers.length > 0, 'what was left of a delivered track was offered again and landed');
   await waitFor(async () => /track for another call refused/.test(ctx.host7Log), 'the host refused the foreign track', 15000);
   check(left.includes('foreign-take0001.wav') && left.includes('foreign-take0001.json'),
     'a track for a call G was never in stays on the device: ' + left.join(' '));

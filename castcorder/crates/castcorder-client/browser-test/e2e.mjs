@@ -105,7 +105,9 @@ import { namesChecks } from './lib/names.mjs';
 import { roomsChecks } from './lib/rooms.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
+import { devicesChecks } from './lib/devices.mjs';
 import { openGuest } from './lib/guest.mjs';
+import { phoneLeaveChecks } from './lib/phone.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -182,6 +184,12 @@ Object.assign(ctx, { MODE, FULL, exe, dist, RESULTS, LIBRARY, HTTP, HTTPS, host,
 
 let passed = false;
 try {
+  // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
+  // sections (security, identity, cap, names, takeinfo, rooms, rejoin,
+  // devices), each on its own host, skipping guests A and B (for iterating).
+  const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
+  const want = (s) => ONLY.length === 0 || ONLY.includes(s);
+  if (ONLY.length === 0) {
   const A = await openGuest('A', ['--use-file-for-fake-audio-capture=' + INPUT_WAV], HTTP);
   const B = await openGuest('B', [], HTTPS);
   console.log((MODE === 'firefox' ? 'firefox ' : 'chromium ') + browsers[0].version());
@@ -315,6 +323,11 @@ try {
     check(last.tracks.length === 0 && last.contexts === 0, 'guest ' + n + ' ' + what + ': ' + last.total + ' tracks all ended'
       + (last.tracks.length ? ' (still live: ' + last.tracks.join(', ') + ')' : '') + ', open audio contexts ' + last.contexts);
   };
+  // A call is always leavable on a phone (cast-abe): B, a plain guest, and
+  // A, a producer, whose side panel (People) is open by default.
+  await phoneLeaveChecks(B, 'B');
+  console.log('info A side panel open: ' + (await A.locator('aside.side').isVisible()));
+  await phoneLeaveChecks(A, 'A');
   for (const [n, p] of [['A', A], ['B', B]]) {
     await noErrors(p, n);
     await p.click('#leave');
@@ -339,13 +352,16 @@ try {
     check(bad.length === 0, 'guest ' + n + ': no page errors or unhandled rejections' + (bad.length ? ': ' + bad.slice(0, 3).join(' | ') : ''));
   }
   for (const [n, p] of [['A', A], ['B', B]]) await noErrors(p, n);
-  if (FULL) await securityChecks();
-  if (MODE !== 'fallback') await identityChecks();
-  if (MODE !== 'fallback') await capChecks();
-  if (MODE !== 'fallback') await namesChecks();
-  if (MODE !== 'fallback') await takeInfoChecks();
-  if (MODE !== 'fallback') await roomsChecks();
-  if (FULL) await rejoinChecks();
+  }
+  if (FULL && want('security')) await securityChecks();
+  if (MODE !== 'fallback' && want('identity')) await identityChecks();
+  if (MODE !== 'fallback' && want('cap')) await capChecks();
+  if (MODE !== 'fallback' && want('names')) await namesChecks();
+  if (MODE !== 'fallback' && want('takeinfo')) await takeInfoChecks();
+  if (MODE !== 'fallback' && want('rooms')) await roomsChecks();
+  if (FULL && want('rejoin')) await rejoinChecks();
+  // Every mode: in fallback the backups take the AudioWorklet path too.
+  if (want('devices')) await devicesChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -361,6 +377,7 @@ try {
   if (ctx.host7) ctx.host7.kill();
   if (ctx.host8) ctx.host8.kill();
   if (ctx.rv8) ctx.rv8.kill();
+  if (ctx.host9) ctx.host9.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
@@ -368,7 +385,14 @@ if (ctx.host3) writeFileSync(join(RESULTS, 'host-identity-' + MODE + '.log'), ct
 if (ctx.host4) writeFileSync(join(RESULTS, 'host-cap-' + MODE + '.log'), ctx.host4Log);
 if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.host7Log);
 if (ctx.host8) writeFileSync(join(RESULTS, 'host-rejoin.log'), ctx.host8Log || '');
+if (ctx.host9) writeFileSync(join(RESULTS, 'host-devices-' + MODE + '.log'), ctx.host9Log || '');
+for (const n of ['X', 'Y']) if (logs[n]) writeFileSync(join(RESULTS, 'guest-devices-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
+// Every later section's guests too (one name may serve several sections; its
+// lines accumulate in order), so a late failure leaves its pages' consoles.
+for (const n of Object.keys(logs)) if (!['A', 'B', 'X', 'Y'].includes(n)) writeFileSync(join(RESULTS, 'guest-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
+if (ctx.host5) writeFileSync(join(RESULTS, 'host-names-' + MODE + '.log'), ctx.host5Log || '');
+if (ctx.host6) writeFileSync(join(RESULTS, 'host-takeinfo-' + MODE + '.log'), ctx.host6Log || '');
 if (!passed) {
   console.log('host log tail:');
   console.log(ctx.hostLog.split('\n').slice(-30).join('\n'));

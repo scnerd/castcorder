@@ -238,9 +238,10 @@ impl Call {
                         kind: ErrorKind::NotAllowed,
                         message: "one call only in this example".into(),
                     },
-                    Request::DiskFree { .. } | Request::MicState { .. } | Request::SourceAck(_) => {
-                        Response::Done
-                    }
+                    Request::DiskFree { .. }
+                    | Request::MicState { .. }
+                    | Request::SourceAck(_)
+                    | Request::CameraState { .. } => Response::Done,
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);

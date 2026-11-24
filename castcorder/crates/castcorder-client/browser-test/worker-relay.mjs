@@ -112,11 +112,15 @@ async function startWorker(name, port, state, vars, secrets) {
   return st;
 }
 
-function startHost(name, port) {
+// bind: 127.0.0.1 keeps a host off the network; a host that must reach a
+// public TURN server binds 0.0.0.0 (a socket bound to loopback cannot send
+// beyond it) and still advertises only loopback.
+function startHost(name, port, bind = '127.0.0.1') {
   const library = join(RESULTS, 'library-' + name);
   rmSync(library, { recursive: true, force: true });
-  return start(HOST_EXE, ['--dist', DIST, '--library', library, '--room', name, '--bind', '127.0.0.1',
-    '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://127.0.0.1:' + port], name);
+  return start(HOST_EXE, ['--dist', DIST, '--library', library, '--room', name, '--bind', bind,
+    '--advertise', '127.0.0.1', '--port', '0', '--http-port', '0', '--udp-port', '0',
+    '--rendezvous', 'http://127.0.0.1:' + port], name);
 }
 
 // The host id from the call link the host prints.
@@ -206,7 +210,7 @@ try {
       { STUN_URLS: 'stun:stun.cloudflare.com:3478', RELAY: 'cloudflare', TURN_TTL: String(TTL) },
       { CF_TURN_KEY_ID: CF.id, CF_TURN_API_TOKEN: CF.token });
     console.log('worker (wrangler dev, RELAY=cloudflare) at 127.0.0.1:' + cfPort);
-    const c = startHost('host-cloudflare', cfPort);
+    const c = startHost('host-cloudflare', cfPort, '0.0.0.0');
     const C = await hostId(c);
     const g = await waitFor(() => c.err.match(/relay \(TURN\) server from the rendezvous server=(\S+) expires=Some\((\d+)\)/),
       'host Cloudflare relay credentials', 30000);
