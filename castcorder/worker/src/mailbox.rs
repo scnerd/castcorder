@@ -227,10 +227,8 @@ impl DurableObject for HostMailbox {
             && let Some(minted) = self.grant(id, host, RelayAsk::Hello, now).await
         {
             // Only for a host that is connected now (the shared decision).
-            // A hello's relay goes to a browser guest: no port 53 (the host
-            // gets it in `registered`, as a fallback).
             match minted {
-                Ok(s) => ice_servers.extend(castcorder_mailbox::turn::for_browsers(s)),
+                Ok(s) => ice_servers.push(s),
                 Err(why) => relay_error = Some(why),
             }
         }

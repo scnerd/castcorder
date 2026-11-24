@@ -598,7 +598,7 @@ fn session(
 
 /// The first server with credentials and a UDP `turn:` URL among `servers`,
 /// resolved, and when its credentials expire (if known). Its other UDP URLs
-/// (Cloudflare's port 53 beside 3478) are the alternates the transport moves
+/// (Cloudflare's UDP 443 beside 3478) are the alternates the transport moves
 /// on to when an address goes unanswered.
 fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     servers.iter().find_map(|s| {
@@ -835,7 +835,7 @@ mod tests {
                     "turn:127.0.0.1:3478?transport=tcp".into(),
                     "turn:127.0.0.1:3478?transport=udp".into(),
                     "turns:127.0.0.1:5349?transport=tcp".into(),
-                    "turn:127.0.0.1:53?transport=udp".into(),
+                    "turn:127.0.0.1:443?transport=udp".into(),
                     "turn:127.0.0.1:3478".into(),
                 ],
                 username: Some("1:h".into()),
@@ -851,7 +851,7 @@ mod tests {
                     addr: "127.0.0.1:3478".parse().unwrap(),
                     username: "1:h".into(),
                     password: "pw".into(),
-                    alternates: vec!["127.0.0.1:53".parse().unwrap()],
+                    alternates: vec!["127.0.0.1:443".parse().unwrap()],
                 },
                 Some(1)
             ))

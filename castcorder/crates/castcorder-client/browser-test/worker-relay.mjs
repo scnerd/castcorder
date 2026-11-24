@@ -217,11 +217,11 @@ try {
     check(Math.abs(Number(g[2]) - (Date.now() / 1000 + TTL)) < 60,
       'the host got Cloudflare TURN credentials with their expiry (' + g[1] + ', expires ' + g[2] + ')');
     const alt = c.err.match(/relay \(TURN\) server from the rendezvous server=\S+ alternates=\[([^\]]*)\]/);
-    check(!!alt && /:53"/.test(alt[1]),
-      'the host got port 53 as its fallback address: [' + (alt ? alt[1] : '') + ']');
+    check(!!alt && /:\d+"/.test(alt[1]),
+      'the host got a fallback UDP address: [' + (alt ? alt[1] : '') + ']');
     // Some runners' flows to Cloudflare's UDP 3478 are dropped for good
-    // (cast-wtf); the host then moves on to port 53 after ALLOCATE_TIMEOUT
-    // (15 s). Wait for both attempts.
+    // (cast-wtf); the host then moves on to its fallback address after
+    // ALLOCATE_TIMEOUT (15 s). Wait for both attempts.
     const alloc = await waitFor(() => c.err.match(/turn allocation created relayed=(\S+) server=(\S+)/), 'allocation on Cloudflare TURN', 45000);
     const fellBack = /turn allocation timed out/.test(c.err);
     check(true, 'the host allocated on Cloudflare TURN with them: relayed ' + alloc[1] + ' on ' + alloc[2]

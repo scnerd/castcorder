@@ -11,7 +11,7 @@
 //! - An allocation the server never answers moves on to the server's next
 //!   address ([`TurnServer::alternates`]) at once: a path can black-hole one
 //!   port of a server and pass another (cast-wtf: Cloudflare's UDP 3478 drops
-//!   some flows for good while its port 53 answers them).
+//!   some flows for good; its UDP 443 answers most of them).
 //! - A str0m transmit whose source is the relayed address goes out as a TURN
 //!   Send indication. Sending to a peer without a permission asks for one and
 //!   drops the datagram (ICE retransmits its checks).
@@ -52,7 +52,7 @@ pub struct TurnServer {
     /// The TURN password.
     pub password: String,
     /// Other UDP addresses of the same server (the same credentials work on
-    /// each, like Cloudflare's port 53 beside 3478), tried in order after an
+    /// each, like Cloudflare's UDP 443 beside 3478), tried in order after an
     /// allocation on the one before goes unanswered for [`ALLOCATE_TIMEOUT`].
     pub alternates: Vec<SocketAddr>,
 }

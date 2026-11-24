@@ -505,7 +505,7 @@ fn a_server_that_never_answers_times_out_and_is_retried() {
 }
 
 /// cast-wtf: from some GitHub runners, Cloudflare TURN's UDP 3478 drops every
-/// datagram of a flow while port 53 of the same server answers it. Here the
+/// datagram of a flow while another port of the same server answers it. Here the
 /// server's first port is bound and never read; its alternate is a real TURN
 /// server on another port of the same address.
 #[test]

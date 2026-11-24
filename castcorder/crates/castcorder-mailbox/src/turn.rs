@@ -45,32 +45,24 @@ pub fn coturn_rest(
 }
 
 /// The relay entry of a Cloudflare Realtime TURN `generate-ice-servers`
-/// answer (its `iceServers`): the one with credentials, marked as expiring at
-/// `expires` (Cloudflare's usernames are opaque). It keeps the URLs on port
-/// 53, which the host falls back to when port 3478 goes unanswered (cast-wtf);
-/// what goes to a browser passes through [`for_browsers`]. `None` if no entry
-/// has credentials and a URL.
+/// answer (its `iceServers`): the one with credentials, without URLs on port
+/// 53 (browsers block it; Cloudflare's docs suggest dropping it), marked as
+/// expiring at `expires` (Cloudflare's usernames are opaque). `None` if no
+/// entry has credentials and a usable URL.
 pub fn cloudflare_entry(servers: Vec<IceServer>, expires: u64) -> Option<IceServer> {
-    servers
-        .into_iter()
-        .find(|s| s.username.is_some() && s.credential.is_some())
-        .map(|mut s| {
-            s.expires = Some(expires);
-            s
-        })
-        .filter(|s| !s.urls.is_empty())
-}
-
-/// `s` without its URLs on port 53, for a browser: browsers block the port
-/// and Cloudflare's docs suggest dropping it, lest ICE gathering stall on it.
-/// `None` if no URL is left.
-pub fn for_browsers(mut s: IceServer) -> Option<IceServer> {
     let port_53 = |url: &str| {
         let hostport = url.split('?').next().unwrap_or(url);
         hostport.rsplit_once(':').is_some_and(|(_, p)| p == "53")
     };
-    s.urls.retain(|u| !port_53(u));
-    (!s.urls.is_empty()).then_some(s)
+    servers
+        .into_iter()
+        .find(|s| s.username.is_some() && s.credential.is_some())
+        .map(|mut s| {
+            s.urls.retain(|u| !port_53(u));
+            s.expires = Some(expires);
+            s
+        })
+        .filter(|s| !s.urls.is_empty())
 }
 
 /// Milliseconds in a (UTC) day.
@@ -154,21 +146,12 @@ mod tests {
         assert_eq!(s.username.as_deref(), Some("bc91"));
         assert_eq!(s.credential.as_deref(), Some("ebd7"));
         assert_eq!(s.expires, Some(99));
-        // The host keeps port 53 as a fallback; browsers do not get it.
-        assert_eq!(s.urls.len(), 7);
-        let b = for_browsers(s).unwrap();
-        assert_eq!(b.urls.len(), 6);
-        assert!(b.urls.iter().all(|u| !u.contains(":53?")));
+        assert_eq!(s.urls.len(), 6);
+        assert!(s.urls.iter().all(|u| !u.contains(":53?")));
         assert!(
-            b.urls
+            s.urls
                 .contains(&"turns:turn.cloudflare.com:443?transport=tcp".into())
         );
-        assert_eq!(b.username.as_deref(), Some("bc91"));
-        let only_53 = IceServer {
-            urls: vec!["turn:turn.cloudflare.com:53?transport=udp".into()],
-            ..Default::default()
-        };
-        assert_eq!(for_browsers(only_53), None);
         let stun_only = vec![IceServer {
             urls: vec!["stun:stun.cloudflare.com:3478".into()],
             ..Default::default()

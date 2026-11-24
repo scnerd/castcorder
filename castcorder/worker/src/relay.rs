@@ -10,9 +10,8 @@
 //!   - `cloudflare`: Cloudflare Realtime TURN. Secrets `CF_TURN_KEY_ID` and
 //!     `CF_TURN_API_TOKEN` (the TURN key's id and API token). Each mint is one
 //!     call to the Realtime API's `generate-ice-servers`; the `turn:` and
-//!     `turns:` URLs it returns are passed on (UDP, TCP, and TLS on 443);
-//!     those on port 53 only to the host (its fallback when 3478 goes
-//!     unanswered), not to browsers, which block the port.
+//!     `turns:` URLs it returns are passed on (UDP, TCP, and TLS on 443)
+//!     except any on port 53, which browsers block.
 //!   - `coturn`: a coturn with `use-auth-secret`, the same REST scheme as
 //!     castcorder-rendezvous ([`castcorder_mailbox::turn::coturn_rest`]).
 //!     `TURN_URLS` (space- or comma-separated `turn:` URLs) and the secret
