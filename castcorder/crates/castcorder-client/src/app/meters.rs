@@ -14,10 +14,10 @@
 //! Mute (cast-xe2) is call-only: a muted participant's live audio is silence,
 //! but their device reports its raw microphone's level about ten times a
 //! second ([`mic`], from `Event::MicState`). While that report is fresh the
-//! tile shows a slashed mic (class `mic-muted`) and its waveform follows the
-//! reported level, dimmed, with no speaking ring: they are not heard, and
-//! still recording. The tile carries that level as `data-mic-level` and when
-//! it arrived as `data-mic-at`.
+//! tile shows a slashed mic (class `mic-muted`) and a flat, dimmed waveform
+//! with no speaking ring (cast-d13): they are not heard; the track chip says
+//! they still record. The tile carries the reported level as `data-mic-level`
+//! (for tests) and when it arrived as `data-mic-at`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -152,6 +152,17 @@ pub(super) fn close() {
     }
 }
 
+/// Stop metering one origin (its participant left; their tile is removed).
+pub(super) fn forget(origin: &str) {
+    METERS.with(|m| {
+        let mut m = m.borrow_mut();
+        if let Some(i) = m.meters.iter().position(|x| x.origin == origin) {
+            let old = m.meters.remove(i);
+            let _ = old.source.disconnect();
+        }
+    });
+}
+
 /// A click resumes the context if the autoplay policy suspended it.
 pub(super) fn resume() {
     if let Some(c) = METERS.with(|m| m.borrow().ctx.clone())
@@ -237,8 +248,9 @@ fn frame(t: f64) {
                 .map(|(_, r)| *r)
                 .filter(|r| r.muted_at(now));
             match muted {
-                // Muted: the waveform follows their raw microphone, dimmed.
-                Some(r) => x.level.push(r.level, false, now),
+                // Muted: nobody hears them, so no level shows (cast-d13); the
+                // slashed mic says why, the track chip that they record.
+                Some(_) => x.level.push(0.0, false, now),
                 None => x.level.push(live, true, now),
             }
             draw(x, live, muted);

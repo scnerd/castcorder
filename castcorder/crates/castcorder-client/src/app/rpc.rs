@@ -88,6 +88,7 @@ pub(super) fn pump_rpc(ui: Ui) {
     let mut relabel = false;
     let mut chips = false;
     let mut refusals = false;
+    let mut left: Vec<u64> = Vec::new();
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -279,10 +280,21 @@ pub(super) fn pump_rpc(ui: Ui) {
                     });
                 }
                 Event::Participants(list) => {
-                    e.names = list
+                    let names: Vec<(u64, String)> = list
                         .into_iter()
                         .map(|p| (p.participant.0, p.name))
                         .collect();
+                    // Whoever was in the call and is no longer has left: their
+                    // tile goes (cast-8g4). Only those, so a tile whose first
+                    // track came before the list naming them stays.
+                    left.extend(
+                        e.names
+                            .iter()
+                            .map(|(p, _)| *p)
+                            .filter(|p| !names.iter().any(|(q, _)| q == p)),
+                    );
+                    e.cameras.retain(|(p, _)| !left.contains(p));
+                    e.names = names;
                     relabel = true;
                 }
                 Event::Recorders(list) => {
@@ -331,6 +343,9 @@ pub(super) fn pump_rpc(ui: Ui) {
     });
     if refusals {
         background::recount(ui);
+    }
+    if !left.is_empty() {
+        remove_tiles(&left);
     }
     if relabel {
         relabel_tiles();
@@ -781,6 +796,42 @@ fn show_camera(participant: u64, on: bool) {
                 t.class_list().add_1("camera-off")
             };
         }
+    }
+}
+
+/// Participants who left the call: remove their tiles, stop the media
+/// elements in them and their meters (cast-8g4). A rejoin comes back under a
+/// new participant id, so it gets one fresh tile.
+fn remove_tiles(left: &[u64]) {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    let gone: Vec<web_sys::Element> = (0..tiles.length())
+        .filter_map(|i| tiles.item(i))
+        .filter(|t| {
+            t.get_attribute("data-origin")
+                .as_deref()
+                .and_then(origin_participant)
+                .is_some_and(|p| left.contains(&p))
+        })
+        .collect();
+    for t in gone {
+        let origin = t.get_attribute("data-origin").unwrap_or_default();
+        info!(origin = %origin, "participant left: tile removed");
+        for class in [".remote-audio", ".remote-video"] {
+            if let Ok(Some(m)) = t.query_selector(class)
+                && let Ok(m) = m.dyn_into::<web_sys::HtmlMediaElement>()
+            {
+                m.set_src_object(None);
+            }
+        }
+        super::meters::forget(&origin);
+        with_engine(|e| e.mid_origin.retain(|(_, o)| *o != origin));
+        t.remove();
     }
 }
 

@@ -797,6 +797,11 @@ pub(super) fn App() -> impl IntoView {
     if let Some(d) = window().document() {
         listen(&d, "click", Box::new(resume_audio));
         listen(&d, "visibilitychange", Box::new(move || on_wake(ui)));
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            close_mute_tip_on(ui, &ev);
+        });
+        let _ = d.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
     }
     listen(&window(), "online", Box::new(move || on_wake(ui)));
     // Escape closes the Devices dialog (cast-3u9).
