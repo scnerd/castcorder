@@ -15,4 +15,10 @@ moves them under the new version (docs/release.md).
   frozen per release, and signed updater manifests once the signing key exists
   (docs/release.md).
 
+### Fixed
+
+- The lobby's Join button no longer moves a moment after the page loads in
+  Firefox (when the "Show device names" offer appeared), so a quick click on
+  Join is no longer lost on the space around it.
+
 [unreleased]: https://github.com/scnerd/castcorder/commits/main

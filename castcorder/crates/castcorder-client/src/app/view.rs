@@ -374,6 +374,8 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                     <span class="lobby-status">{status}</span>
                     <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
                     <span class="lobby-error" hidden=move || ui.errors.get().is_empty()>{last_error}</span>
+                    // Below Join: it can appear after the lobby is drawn.
+                    <devices::LobbyAllowNames ui=ui/>
                     <details class="advanced">
                         <summary>"Connection settings"</summary>
                         <div class="field">

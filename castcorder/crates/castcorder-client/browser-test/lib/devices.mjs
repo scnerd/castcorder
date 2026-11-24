@@ -63,10 +63,21 @@ export async function devicesChecks() {
   const options = (p, sel) => p.evaluate((s) => [...document.querySelectorAll(s + ' option')].map((o) => o.textContent), sel);
   const firefox = MODE === 'firefox';
 
+  // The Join button stays where it was drawn while the lobby learns about the
+  // devices (cast-9n7: Firefox's "Show device names" row appeared above it
+  // a moment after load and moved it from under a click, so a fresh guest's
+  // Join was sometimes lost).
+  const joinY = (p) => p.evaluate(() => Math.round(document.querySelector('#join').getBoundingClientRect().y));
+  const y0 = await joinY(X);
+  await waitFor(async () => (await options(X, '#pick-mic')).length >= 2 || (await X.locator('#devices-allow').isVisible()),
+    'X lobby lists microphones or asks to name them', 10000);
+  const y1 = await joinY(X);
+  check(y1 === y0, 'the lobby\x27s Join button stays put once the devices are known (y ' + y0 + ' then ' + y1 + ')');
+
   // The lobby's pickers, remembered across a reload. A browser that names
   // no device before one is allowed (Firefox) offers "Show device names".
   const named = async () => (await options(Y, '#pick-mic')).length >= 2;
-  await waitFor(async () => (await named()) || (await Y.locator('#devices-allow').count()) > 0, 'Y lobby lists microphones or asks to name them', 10000);
+  await waitFor(async () => (await named()) || (await Y.locator('#devices-allow').isVisible()), 'Y lobby lists microphones or asks to name them', 10000);
   if (!(await named())) {
     await Y.click('#devices-allow');
     check(true, 'the lobby asks to show device names before the browser names them');

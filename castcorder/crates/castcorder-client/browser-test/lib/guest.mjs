@@ -62,6 +62,13 @@ export async function openGuest(name, extraArgs, base, setup, display = name, qu
     window.AudioContext = class extends AC { constructor(...a) { super(...a); ctxs.push(this); } };
     const PC = window.RTCPeerConnection;
     window.RTCPeerConnection = class extends PC { constructor(...a) { super(...a); pcs.push(this); } };
+    // What each click landed on, in the guest's log: a click that missed its
+    // button (cast-9n7: the lobby moved Join from under it) shows here.
+    document.addEventListener('click', (e) => {
+      const t = e.target;
+      console.log('[click] ' + t.tagName + (t.id ? '#' + t.id : '') + (typeof t.className === 'string' && t.className ? '.' + t.className.split(' ').join('.') : '')
+        + ' at ' + e.clientX + ',' + e.clientY);
+    }, true);
   });
   if (setup) await setup(ctx);
   const page = await ctx.newPage();
