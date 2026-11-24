@@ -8,7 +8,10 @@
 //!   rooms) is opened, hashed once (one OPFS read per MiB) and held open; the
 //!   worker answers `outbox {offers: [Uint8Array], rooms, calls}`, each offer a
 //!   postcard `TrackOffer` with the room and call it was recorded in (both
-//!   empty: this call, or from before rooms). The main thread offers them to
+//!   empty: this call, or from before rooms). A track whose media file was
+//!   already delivered offers what is left of it (its sidecar, its timing
+//!   metadata: [`crate::leftover`]), so a cut upload resumes on the next
+//!   connection, from any page. The main thread offers them to
 //!   the host on "control": `OfferTrack`, or `OfferCallTrack` for another
 //!   call (the host accepts it if this device was in that call).
 //! - `xfer-in {bytes, room}`: one message from the host's "data" channel.
@@ -355,6 +358,7 @@ async fn prepare_inner(call: &str) -> Result<(), JsValue> {
             warn!(track = %track, error = %e, "track not added to outbox");
         }
     }
+    add_leftovers(&dir).await?;
     // Audio before video: while an audio track is in use elsewhere, no video
     // is offered (the host pulls what it is offered first), for a bounded
     // number of passes.
@@ -475,6 +479,111 @@ pub async fn xfer_in(msg: JsValue) -> Result<(), JsValue> {
     }
     list_locked().await?;
     drop(scan);
+    Ok(())
+}
+
+/// Add what is left of every track of this host whose media file was
+/// delivered and deleted but whose sidecar or timing metadata was not (the
+/// connection was cut between them, cast-22g): a fresh outbox (a page opened
+/// afresh) would otherwise never offer it, as the media file is what the
+/// passes above find a track by. Its metadata is the sidecar's, or, with
+/// the sidecar delivered too, the timing header's ([`crate::leftover`]).
+async fn add_leftovers(dir: &web_sys::FileSystemDirectoryHandle) -> Result<(), JsValue> {
+    use crate::leftover::{TrackMeta, items, track_files};
+    for t in track_files(&entry_names(dir).await?) {
+        if !t.media_delivered()
+            || OUTBOX.with(|o| {
+                o.borrow()
+                    .as_ref()
+                    .is_some_and(|o| t.item_names().iter().any(|n| o.contains(n)))
+            })
+        {
+            continue;
+        }
+        let (sidecar, timing) = (
+            format!("{}.json", t.track),
+            format!("{}{}", t.track, castcorder_core::timing::SUFFIX),
+        );
+        let mut opened = Vec::new();
+        let mut busy = false;
+        for (here, f) in [(t.sidecar, &sidecar), (t.timing, &timing)] {
+            if !here {
+                continue;
+            }
+            match open_existing(dir, f).await {
+                Opened::Open(h) => opened.push((f.clone(), h)),
+                Opened::Missing => {}
+                Opened::Busy(_) => {
+                    busy = true;
+                    break;
+                }
+            }
+        }
+        let close_all = |v: &[(String, FileSystemSyncAccessHandle)]| {
+            for (_, h) in v {
+                h.close();
+            }
+        };
+        if busy {
+            close_all(&opened);
+            info!(track = %t.track, "track in use elsewhere; not offered this pass");
+            continue;
+        }
+        let text = |f: &str| {
+            opened
+                .iter()
+                .find(|(n, _)| n == f)
+                .map(|(_, h)| String::from_utf8_lossy(&read_all(h).unwrap_or_default()).to_string())
+        };
+        let meta = text(&sidecar)
+            .and_then(|s| TrackMeta::from_sidecar(&s))
+            .or_else(|| text(&timing).and_then(|s| TrackMeta::from_timing(&s, &t.track)));
+        let Some(meta) = meta.filter(|m| in_scope(&m.call)) else {
+            close_all(&opened);
+            continue;
+        };
+        // Only the files actually opened (one may have gone meanwhile).
+        let present = crate::leftover::TrackFiles {
+            sidecar: opened.iter().any(|(n, _)| *n == sidecar),
+            timing: opened.iter().any(|(n, _)| *n == timing),
+            ..t.clone()
+        };
+        let list = items(&present, &meta);
+        if list.is_empty() {
+            close_all(&opened);
+            continue;
+        }
+        tag(
+            &list
+                .iter()
+                .map(|i| i.offer.name.as_str())
+                .collect::<Vec<_>>(),
+            &meta.call,
+        );
+        info!(track = %t.track, take = meta.take, items = list.len(),
+            "media already delivered; offering what is left of the track");
+        let r = OUTBOX.with(|o| {
+            let mut o = o.borrow_mut();
+            let o = o.as_mut().expect("created by prepare");
+            let mut handles = std::mem::take(&mut opened);
+            let mut r = Ok(());
+            for i in list {
+                let Some(k) = handles.iter().position(|(n, _)| *n == i.file) else {
+                    continue;
+                };
+                let (name, h) = handles.remove(k);
+                if let Err(e) = o.add(i.offer, OpfsFile::register(name, h)) {
+                    r = Err(e);
+                    break;
+                }
+            }
+            close_all(&handles);
+            r
+        });
+        if let Err(e) = r {
+            warn!(track = %t.track, error = %e, "what is left of the track not added to outbox");
+        }
+    }
     Ok(())
 }
 
