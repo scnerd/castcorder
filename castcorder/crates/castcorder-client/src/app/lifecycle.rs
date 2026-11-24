@@ -443,6 +443,7 @@ pub(super) fn leave(ui: Ui) {
     // A capture attempt still waiting for a worker gives up now.
     fail_pending_sources("left the call");
     ui.warning.set(String::new());
+    ui.notes.set(Vec::new());
     ui.joined.set(false);
     ui.connection.set("left".into());
     ui.participant.set(String::new());

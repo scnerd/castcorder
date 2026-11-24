@@ -521,6 +521,12 @@ pub enum Event {
         /// The camera is on.
         on: bool,
     },
+    /// Someone tried to join while the call is locked and was refused (sent
+    /// to producers only, so they can unlock it or let them in; appended).
+    JoinRefusedLocked {
+        /// The name the refused person asked to join as.
+        name: String,
+    },
 }
 
 /// A call of a room on a host.
@@ -938,6 +944,7 @@ mod tests {
                 takes: 2,
                 current: true,
             }])),
+            CoreMessage::Event(Event::JoinRefusedLocked { name: "Sam".into() }),
         ]
     }
 

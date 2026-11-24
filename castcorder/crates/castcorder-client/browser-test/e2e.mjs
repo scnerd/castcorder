@@ -104,6 +104,7 @@ import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
 import { roomsChecks } from './lib/rooms.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
+import { joinFailChecks } from './lib/joinfail.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { devicesChecks } from './lib/devices.mjs';
 import { inCallChecks } from './lib/incall.mjs';
@@ -187,7 +188,7 @@ let passed = false;
 try {
   // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
   // sections (security, identity, cap, names, takeinfo, rooms, rejoin,
-  // devices, incall), each on its own host, skipping guests A and B (for iterating).
+  // devices, incall, joinfail), each on its own host, skipping guests A and B (for iterating).
   const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
   const want = (s) => ONLY.length === 0 || ONLY.includes(s);
   if (ONLY.length === 0) {
@@ -361,6 +362,7 @@ try {
   if (MODE !== 'fallback' && want('takeinfo')) await takeInfoChecks();
   if (MODE !== 'fallback' && want('rooms')) await roomsChecks();
   if (FULL && want('rejoin')) await rejoinChecks();
+  if (FULL && want('joinfail')) await joinFailChecks();
   // Every mode: in fallback the backups take the AudioWorklet path too.
   if (want('devices')) await devicesChecks();
   if (MODE !== 'fallback' && want('incall')) await inCallChecks();

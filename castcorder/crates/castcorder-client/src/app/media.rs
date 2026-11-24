@@ -157,6 +157,14 @@ pub(super) async fn camera_on(ui: Ui, epoch: u32) {
         Err(e) => {
             warn!(call = %ctx.call, device = %ctx.device, error = %describe(&e), "camera unavailable; audio only");
             ui.camera.set(false);
+            // Say so beside the call, not just in a log: the guest chose
+            // camera on and is now audio only.
+            let help = super::join::camera_help(&e);
+            ui.notes.update(|v| {
+                if !v.contains(&help) {
+                    v.push(help)
+                }
+            });
             ui.camera_state
                 .set(format!("unavailable ({})", describe(&e)));
             report_camera();
