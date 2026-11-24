@@ -255,6 +255,27 @@ pub(super) fn toggle_mute(ui: Ui) {
     report_mic(ui);
     if muted && !mute_tip_seen() {
         ui.mute_tip.set(true);
+    } else if !muted {
+        // It explains being muted: unmuted, it would contradict the button
+        // (cast-5tm).
+        ui.mute_tip.set(false);
+    }
+}
+
+/// Any other action closes the first-mute explanation (cast-5tm): it covered
+/// a tile, and on a phone the track chip, until "Got it". Only hidden: the
+/// next mute explains again until it is acknowledged.
+pub(super) fn close_mute_tip_on(ui: Ui, ev: &web_sys::Event) {
+    if !ui.mute_tip.get_untracked() {
+        return;
+    }
+    let inside = ev
+        .target()
+        .and_then(|t| t.dyn_into::<web_sys::Element>().ok())
+        .and_then(|el| el.closest(".tip, #mute").ok().flatten())
+        .is_some();
+    if !inside {
+        ui.mute_tip.set(false);
     }
 }
 

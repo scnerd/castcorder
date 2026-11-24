@@ -2,8 +2,8 @@
 //! speaking ring show, kept free of the browser so it is unit tested.
 //!
 //! A tile is fed one level reading per display tick (the peak absolute sample
-//! of a short window of the participant's incoming audio, or, while they are
-//! muted, the level of their raw microphone as they report it). It keeps the
+//! of a short window of the participant's incoming audio, or silence while
+//! they are muted). It keeps the
 //! last [`WAVE_BARS`] readings for the waveform and decides whether they are
 //! speaking, with hysteresis and a hold so the ring does not flicker between
 //! syllables. A participant's reported mute state expires unless refreshed

@@ -106,6 +106,7 @@ import { roomsChecks } from './lib/rooms.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { devicesChecks } from './lib/devices.mjs';
+import { inCallChecks } from './lib/incall.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { phoneLeaveChecks } from './lib/phone.mjs';
 import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
@@ -186,7 +187,7 @@ let passed = false;
 try {
   // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
   // sections (security, identity, cap, names, takeinfo, rooms, rejoin,
-  // devices), each on its own host, skipping guests A and B (for iterating).
+  // devices, incall), each on its own host, skipping guests A and B (for iterating).
   const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
   const want = (s) => ONLY.length === 0 || ONLY.includes(s);
   if (ONLY.length === 0) {
@@ -362,6 +363,7 @@ try {
   if (FULL && want('rejoin')) await rejoinChecks();
   // Every mode: in fallback the backups take the AudioWorklet path too.
   if (want('devices')) await devicesChecks();
+  if (MODE !== 'fallback' && want('incall')) await inCallChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -378,6 +380,7 @@ try {
   if (ctx.host8) ctx.host8.kill();
   if (ctx.rv8) ctx.rv8.kill();
   if (ctx.host9) ctx.host9.kill();
+  if (ctx.host10) ctx.host10.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
@@ -386,6 +389,7 @@ if (ctx.host4) writeFileSync(join(RESULTS, 'host-cap-' + MODE + '.log'), ctx.hos
 if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.host7Log);
 if (ctx.host8) writeFileSync(join(RESULTS, 'host-rejoin.log'), ctx.host8Log || '');
 if (ctx.host9) writeFileSync(join(RESULTS, 'host-devices-' + MODE + '.log'), ctx.host9Log || '');
+if (ctx.host10) writeFileSync(join(RESULTS, 'host-incall-' + MODE + '.log'), ctx.host10Log || '');
 for (const n of ['X', 'Y']) if (logs[n]) writeFileSync(join(RESULTS, 'guest-devices-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 // Every later section's guests too (one name may serve several sections; its

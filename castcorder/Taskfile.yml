@@ -44,17 +44,6 @@ tasks:
     cmds:
       - cargo clippy --manifest-path worker/Cargo.toml --target wasm32-unknown-unknown --locked -- -D warnings
 
-  worker:lock:
-    desc: Refresh castcorder/worker/Cargo.lock after a castcorder-link or castcorder-mailbox dependency change
-    summary: |
-      The Worker is its own cargo workspace that path-depends on castcorder-link and
-      castcorder-mailbox, so its lockfile goes stale when their dependencies change
-      and `task worker:clippy --locked` fails. `cargo update --workspace` re-resolves
-      without bumping anything else. The pre-commit hook worker-lock runs
-      scripts/check_worker_lock.py and points here.
-    cmds:
-      - cargo update --workspace --manifest-path worker/Cargo.toml
-
   worker:tools:
     desc: Install the Worker's build tools inside the tree (worker-build in worker/.tools, wrangler in worker/node_modules)
     dir: worker

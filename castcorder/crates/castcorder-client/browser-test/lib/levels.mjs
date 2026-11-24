@@ -5,10 +5,11 @@
 // continuous test WAV; B's is Chromium's fake beep or Firefox's fake tone.
 //
 // Mute (cast-xe2, muteChecks, run inside take 1 so A's track is checked
-// bit-exact through it in chromium): B sees A's slashed mic and a dimmed
-// waveform that keeps moving with A's reported raw level (about 10 Hz), no
-// speaking ring, and silence arriving; after unmute, A is heard again.
-import { waitFor, check } from './helpers.mjs';
+// bit-exact through it in chromium): B sees A's slashed mic and a flat,
+// dimmed waveform (no level while muted, cast-d13) while A keeps reporting its
+// raw level (about 10 Hz), no speaking ring, and silence arriving; after
+// unmute, A is heard again.
+import { sleep, waitFor, check } from './helpers.mjs';
 
 // Above this the waveform is visibly moving (-46 dBFS).
 export const LIVE = 0.005;
@@ -81,14 +82,16 @@ export async function muteChecks(A, B) {
   }, 'B receives silence from muted A', 10000, 0)
     .catch((e) => { console.log('last sample: ' + JSON.stringify(quiet)); throw e; });
   console.log('B heard silence from muted A after ' + ((Date.now() - tMute) / 1000).toFixed(1) + ' s');
+  // The waveform keeps about 1.3 s of readings: let the unmuted ones scroll out.
+  await sleep(1500);
   const s = await sampleTile(B, 'A', 2500);
   console.log('B samples A muted: ' + JSON.stringify(s));
   check(s.n > 0 && s.muted === s.n && s.dimmed === s.n,
     'B sees A\x27s slashed mic and a dimmed waveform in every sample (' + s.muted + '/' + s.dimmed + ' of ' + s.n + ')');
   check(s.max < SILENT, 'B keeps receiving silence from muted A (live peak ' + s.max.toFixed(4) + ')');
   check(s.speaking === 0, 'no speaking ring on A\x27s tile while A is muted');
-  check(s.micMax >= LIVE && s.micUpdates >= 10 && s.tallest > 2,
-    'A\x27s dimmed waveform keeps moving with its raw microphone: ' + s.micUpdates + ' level reports in 2.5 s, peak '
+  check(s.micMax >= LIVE && s.micUpdates >= 10 && s.tallest <= 2,
+    'A\x27s waveform stays flat while A keeps reporting its raw microphone: ' + s.micUpdates + ' level reports in 2.5 s, peak '
     + s.micMax.toFixed(3) + ', tallest bar ' + s.tallest + ' px');
   await A.click('#mute');
   check((await A.getAttribute('#mute', 'aria-pressed')) === 'false', 'A unmuted');
