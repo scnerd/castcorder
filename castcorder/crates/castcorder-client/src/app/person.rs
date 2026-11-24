@@ -96,6 +96,13 @@ async fn fetch_text(path: &str, init: &JsValue) -> Result<String, String> {
     }
 }
 
+/// The name saved for the person on this host machine, if any (cast-mmo).
+pub(super) async fn host_person_name() -> Option<String> {
+    let t = person_request("/person", None).await.ok()?;
+    let v = serde_json::from_str::<PersonView>(&t).ok()?;
+    Some(v.name).filter(|n| !n.trim().is_empty())
+}
+
 /// The person on the host machine's home.
 #[component]
 pub(super) fn PersonCard() -> impl IntoView {

@@ -309,6 +309,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   /* Above the full-screen side panel (open by default for producers). */
   .dock { position: relative; z-index: 11; }
   .side { position: fixed; inset: 0; width: auto; z-index: 10; }
+  /* The Devices dialog fits the viewport, not its dock button (cast-lg7). */
+  .dialog { position: fixed; left: 12px; right: 12px; bottom: 84px; transform: none; width: auto;
+    max-width: none; box-sizing: border-box; }
 }
 
 /* Call link (lobby and top bar) */

@@ -26,5 +26,14 @@ export async function phoneLeaveChecks(page, n) {
       + ' can leave: Leave call visible ' + visible + ', enabled ' + enabled + ', on screen ' + onScreen
       + ' (' + JSON.stringify(box) + '), clickable ' + clickable);
   }
+  // The Devices dialog fits the phone (cast-lg7) and Escape closes it (cast-3u9).
+  await page.setViewportSize(PHONES[0]);
+  await page.click('#devices');
+  const dlg = await page.locator('#devices-dialog').boundingBox();
+  const close = await page.locator('#devices-close').boundingBox();
+  const inside = (b) => !!b && b.x >= 0 && b.y >= 0 && b.x + b.width <= PHONES[0].width && b.y + b.height <= PHONES[0].height;
+  check(inside(dlg) && inside(close), 'guest ' + n + ' Devices dialog fits 390x844: ' + JSON.stringify(dlg) + ' close ' + JSON.stringify(close));
+  await page.keyboard.press('Escape');
+  check((await page.locator('#devices-dialog').count()) === 0, 'guest ' + n + ' Escape closes the Devices dialog');
   if (before) await page.setViewportSize(before);
 }
