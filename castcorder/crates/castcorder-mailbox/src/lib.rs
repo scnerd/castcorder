@@ -185,6 +185,10 @@ pub enum RelayAsk {
     /// In the hello, by a connection naming a host (`?host=`): only while
     /// that host is online, so a link to a host that is gone mints nothing.
     Hello,
+    /// As [`Self::Hello`], but the caller hands back a credential it already
+    /// minted for this client and host (still well within its lifetime), so
+    /// nothing new is minted and the host key's bucket is not drawn on.
+    HelloReused,
     /// In `registered`, by a host that just proved its key.
     Registered,
 }
@@ -391,6 +395,10 @@ impl Mailbox {
         if let Some(why) = over_budget {
             info!(conn, host = %host.short(), registered, "relay credentials refused: over the relay budget");
             return Err(why);
+        }
+        if ask == RelayAsk::HelloReused {
+            debug!(conn, host = %host.short(), "relay credentials reused");
+            return Ok(());
         }
         if !self.mint_allowed(host, now) {
             return Err(format!(

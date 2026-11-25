@@ -91,6 +91,9 @@ struct Hub {
     public_host: Option<String>,
     trust_forwarded_for: bool,
     turn: Option<TurnConfig>,
+    /// The credential last minted for each (client address, host) hello, so a
+    /// client that reconnects within its lifetime reuses it and counts once.
+    minted: Mutex<HashMap<(IpAddr, HostId), IceServer>>,
     meter: Option<Arc<Meter>>,
     /// The mailbox's clock origin.
     start: Instant,
@@ -168,6 +171,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         public_host: cfg.public_host,
         trust_forwarded_for: cfg.trust_forwarded_for,
         turn: cfg.turn,
+        minted: Mutex::new(HashMap::new()),
         meter: meter.clone(),
         start: Instant::now(),
     });
@@ -318,6 +322,23 @@ async fn fetch(url: &str) -> io::Result<String> {
 }
 
 /// Why `host` gets no relay credentials because of its budget, if so.
+/// The credential already minted for `ip` and `host`, if it has more than
+/// half its lifetime left.
+fn reusable(hub: &Hub, ip: IpAddr, host: &HostId, turn: &TurnConfig) -> Option<IceServer> {
+    let cache = hub.minted.lock().expect("minted lock");
+    let s = cache.get(&(ip, *host))?;
+    let left = s.expires?.saturating_sub(unix_now());
+    (left > turn.ttl.as_secs() / 2).then(|| s.clone())
+}
+
+/// Keep `s` for the next hello of `ip` to `host`, dropping expired entries.
+fn remember(hub: &Hub, ip: IpAddr, host: HostId, s: &IceServer) {
+    let mut cache = hub.minted.lock().expect("minted lock");
+    let now = unix_now();
+    cache.retain(|_, v| v.expires.is_some_and(|e| e > now));
+    cache.insert((ip, host), s.clone());
+}
+
 fn quota_refusal(hub: &Hub, host: &HostId) -> Option<String> {
     let m = hub.meter.as_ref()?;
     m.ledger
@@ -508,8 +529,18 @@ async fn connection(
                 // that is gone (or never was) mints nothing. A host gets its
                 // own credentials once registered (see `registered`).
                 let over = quota_refusal(&hub, &host);
-                match g.0.relay(id, host, RelayAsk::Hello, over, now) {
-                    Ok(()) => ice.push(mint(turn, &host, unix_now())),
+                let reuse = reusable(&hub, ip, &host, turn);
+                let ask = if reuse.is_some() {
+                    RelayAsk::HelloReused
+                } else {
+                    RelayAsk::Hello
+                };
+                match g.0.relay(id, host, ask, over, now) {
+                    Ok(()) => ice.push(reuse.unwrap_or_else(|| {
+                        let s = mint(turn, &host, unix_now());
+                        remember(&hub, ip, host, &s);
+                        s
+                    })),
                     Err(why) => relay_error = Some(why),
                 }
             }
