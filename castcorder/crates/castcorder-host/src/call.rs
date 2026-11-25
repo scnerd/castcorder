@@ -315,6 +315,10 @@ pub struct Participant {
 pub struct Call {
     status: TakeStatus,
     last_take: u32,
+    /// Who waits for a producer, by (room, device): their name and when they
+    /// last asked (wall ms). The home says so on the room's card
+    /// (cast-n56.9); a guest that stops asking drops off.
+    waiting: BTreeMap<(String, String), (String, u64)>,
     rpc: BTreeMap<GuestId, RpcServer<GuestChannel>>,
     data: BTreeMap<GuestId, GuestChannel>,
     names: BTreeMap<GuestId, String>,
@@ -481,6 +485,7 @@ impl Call {
             safety,
             status: TakeStatus::Idle,
             last_take: 0,
+            waiting: BTreeMap::new(),
             rpc: BTreeMap::new(),
             data: BTreeMap::new(),
             names: BTreeMap::new(),
@@ -1687,6 +1692,12 @@ impl Call {
                 });
                 if matches!(admitted, Err(crate::room::Refusal::Locked)) {
                     self.tell_producers_locked(&name);
+                }
+                let key = (self.room_name.clone(), device.clone());
+                if matches!(admitted, Ok(Admission::Wait)) {
+                    self.waiting.insert(key, (name.clone(), now_ms));
+                } else {
+                    self.waiting.remove(&key);
                 }
                 let r = match admitted {
                     Err(refusal) => Err(refusal.message().to_string()),
