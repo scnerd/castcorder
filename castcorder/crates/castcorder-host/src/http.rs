@@ -108,6 +108,39 @@ pub struct App {
 }
 
 /// `GET /person`: the person as the home shows it (never the key).
+/// `GET /settings` (cast-n56.2): the recordings folder and its volume, and
+/// how this host is reachable.
+fn settings_json(app: &App) -> String {
+    use castcorder_core::diskspace;
+    let disk = castcorder_port_disk::FsStorage::new(&app.library).ok();
+    let free = disk
+        .as_ref()
+        .and_then(|d| castcorder_port_disk::Storage::free_space(d).ok());
+    let total = disk.as_ref().and_then(|d| d.volume_total_space().ok());
+    let contacts = app.contacts.view(crate::wall_ms());
+    let health = app
+        .call_links
+        .health
+        .lock()
+        .map(|h| h.clone())
+        .unwrap_or_default();
+    serde_json::json!({
+        "library": app.library.display().to_string(),
+        "free_bytes": free,
+        "total_bytes": total,
+        "audio_secs_left": free.map(|f| diskspace::seconds_left(f, false)),
+        "video_secs_left": free.map(|f| diskspace::seconds_left(f, true)),
+        "rendezvous": app.call_links.base.as_ref().map(|b| b.base.clone()),
+        "health": health,
+        "lan": app.lan_links,
+        "host": app.host_id,
+        "presence": contacts.presence,
+        "appear_offline": contacts.appear_offline,
+        "contacts": contacts.contacts.len(),
+    })
+    .to_string()
+}
+
 fn person_json(app: &App) -> String {
     serde_json::to_string(&app.persons.view(crate::wall_ms())).unwrap_or_default()
 }
@@ -309,6 +342,9 @@ struct HomeRequest {
     room: Option<String>,
     #[serde(default)]
     call: Option<String>,
+    /// `/folder/open`: the whole recordings folder (Settings).
+    #[serde(default)]
+    library: bool,
 }
 
 /// The folder `/folder/open` opens: a room's call (`room` and `call`), a
@@ -316,6 +352,9 @@ struct HomeRequest {
 /// checked to be folder names, so nothing outside the library opens.
 fn folder(app: &App, pick: &HomeRequest) -> Result<PathBuf, String> {
     let safe = |s: &str| crate::rooms::room_slug(s) == s && !s.is_empty();
+    if pick.library {
+        return Ok(app.library.clone());
+    }
     match (&pick.room, &pick.call) {
         (Some(r), Some(c)) if safe(r) && safe(c) => Ok(app.library.join(r).join(c)),
         (Some(r), None) if safe(r) => Ok(app.library.join(r)),
@@ -834,7 +873,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 None => gone(),
             }
         }
-        ("GET", "/native" | "/rooms" | "/person")
+        ("GET", "/native" | "/rooms" | "/person" | "/settings")
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
@@ -863,6 +902,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             }
         }
         ("GET", "/person") => json(200, person_json(app)),
+        ("GET", "/settings") => json(200, settings_json(app)),
         ("POST", "/person" | "/person/code" | "/person/decide" | "/person/join") => {
             let r = match serde_json::from_slice::<PersonRequest>(&req.body) {
                 Ok(r) => r,
@@ -1059,6 +1099,7 @@ mod tests {
                 version: "1".into(),
             }),
             registered: Arc::new(AtomicBool::new(true)),
+            health: Default::default(),
         }
     }
     use castcorder_link::identity;
@@ -1169,7 +1210,67 @@ mod tests {
             // open a window, so it is not exercised here).
             let (status, body) = request_method_with(addr, "POST", "/folder/open", headers);
             assert_eq!(status, 403, "{headers}: {body}");
+            // Settings (the folder's path, the host's addresses) likewise.
+            let (status, body) = request_with(addr, "/settings", headers);
+            assert_eq!(status, 403, "{headers}: {body}");
         }
+        stop.store(true, Ordering::SeqCst);
+    }
+
+    /// `GET /settings` (cast-n56.2) tells the host machine's own page the
+    /// recordings folder with its free space and how long it lasts, and how
+    /// the rendezvous connection and its relay stand.
+    #[test]
+    fn settings_tell_the_folder_its_space_and_the_connection() {
+        let (tx, _rx) = mpsc::channel();
+        let links = test_links();
+        *links.health.lock().unwrap() = crate::rendezvous::Health {
+            connected: true,
+            relay: "unavailable".into(),
+            relay_detail: "relay_quota: over budget".into(),
+        };
+        let library = std::env::temp_dir();
+        let app = Arc::new(App {
+            tx: Mutex::new(tx.clone()),
+            dist: std::env::temp_dir(),
+            host_id: "h".into(),
+            native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+            library: library.clone(),
+            call_links: links,
+            lan_links: vec!["https://10.0.0.2:1/".into()],
+            persons: test_persons(),
+            contacts: test_contacts(),
+            contact_links: None,
+        });
+        let local = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = local.local_addr().unwrap();
+        let stop: Arc<AtomicBool> = Default::default();
+        serve(local, app, None, true, stop.clone());
+        let (status, body) = request_with(
+            addr,
+            "/settings",
+            "Host: localhost:1\r\nX-Castcorder-Native: 1\r\n",
+        );
+        assert_eq!(status, 200, "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["library"], library.display().to_string(), "{body}");
+        let (free, total) = (
+            v["free_bytes"].as_u64().unwrap(),
+            v["total_bytes"].as_u64().unwrap(),
+        );
+        assert!(free > 0 && free <= total, "{body}");
+        let (audio, video) = (
+            v["audio_secs_left"].as_u64().unwrap(),
+            v["video_secs_left"].as_u64().unwrap(),
+        );
+        assert!(video < audio, "video fills the disk sooner: {body}");
+        assert_eq!(v["health"]["connected"], true, "{body}");
+        assert_eq!(v["health"]["relay"], "unavailable", "{body}");
+        assert_eq!(
+            v["health"]["relay_detail"], "relay_quota: over budget",
+            "{body}"
+        );
+        assert_eq!(v["lan"][0], "https://10.0.0.2:1/", "{body}");
         stop.store(true, Ordering::SeqCst);
     }
 

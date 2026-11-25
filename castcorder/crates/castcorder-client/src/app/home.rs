@@ -12,7 +12,7 @@
 use serde::Deserialize;
 
 use super::native::NATIVE_HEADER;
-use super::view::{Icon, Mark, ThemeToggle};
+use super::view::{Icon, Mark};
 use super::*;
 
 /// One call of a room, as `GET /rooms` says.
@@ -49,7 +49,11 @@ struct HomeData {
 
 /// One `/rooms` or `/folder/open` request; the answer's text, or the host's
 /// reason.
-async fn home_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
+pub(super) async fn home_request(
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> Result<String, String> {
     let init = object();
     set(&init, "method", method);
     let headers = object();
@@ -339,6 +343,19 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     {nav(Place::Rooms, "nav-rooms", "Rooms", "folder")}
                     {nav(Place::Contacts, "nav-contacts", "Contacts", "people")}
                     {nav(Place::Settings, "nav-settings", "Settings", "sliders")}
+                    <Show when=move || place.get() == Place::Settings>
+                        <div class="home-subnav" aria-label="Settings sections">
+                            {[("person", "You and your devices"), ("settings-appearance", "Appearance"),
+                              ("settings-storage", "Recordings folder"), ("settings-connection", "Connection")]
+                                .into_iter().map(|(id, label)| view! {
+                                    <button class="home-subnav-item" data-section=id on:click=move |_| {
+                                        if let Some(e) = window().document().and_then(|d| d.get_element_by_id(id)) {
+                                            e.scroll_into_view();
+                                        }
+                                    }>{label}</button>
+                                }).collect_view()}
+                        </div>
+                    </Show>
                     <div class="home-nav-foot">
                         <span id="home-who" class="home-who">{move || {
                             let w = who.get();
@@ -402,10 +419,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     </section>
                     <section id="home-settings" class="home-place" hidden=move || place.get() != Place::Settings>
                         <div class="home-head"><h1>"Settings"</h1></div>
-                        <super::person::PersonCard/>
-                        <div class="room-card">
-                            <div class="room-head"><h2>"Appearance"</h2><ThemeToggle ui=ui/></div>
-                        </div>
+                        <super::settings::SettingsPage ui=ui/>
                     </section>
                 </div>
             </div>

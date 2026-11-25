@@ -47,7 +47,7 @@ export async function homeLinkChecks() {
   await P.fill('#person-name', 'Pat Person');
   await P.click('#save-person');
   await waitFor(async () => (await text(P, '#person-message')) === 'Saved.', 'the You card says it saved the name', 10000);
-  check((await text(P, '#person .small.muted:has-text("This device:")')).replace('This device:', '').trim().length > 0,
+  check((await text(P, '#linked-devices .this-device .small')).split('fingerprint ')[1]?.trim().length > 0,
     'the You card shows this device\x27s fingerprint');
 
   // "Link a device": a link to open on the other browser, shown in view.

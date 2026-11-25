@@ -62,6 +62,7 @@ mod recordings;
 mod recvideo;
 mod rejoin;
 mod rpc;
+mod settings;
 mod view;
 
 use std::cell::{Cell, RefCell};

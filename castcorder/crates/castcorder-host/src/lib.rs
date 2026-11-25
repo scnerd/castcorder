@@ -836,6 +836,7 @@ pub fn start(
         }
     }
     let (tx, rx) = mpsc::channel();
+    let health = rendezvous::SharedHealth::default();
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
         base: base.clone(),
         key: host_key,
@@ -843,11 +844,13 @@ pub fn start(
         version: env!("CARGO_PKG_VERSION").to_string(),
         persons: persons.clone(),
         contacts: contacts.clone(),
+        health: health.clone(),
     });
     let call_links = rendezvous::Links {
         secrets: secrets.clone(),
         base: rendezvous.as_ref().map(rendezvous::Config::link_base),
         registered: Arc::new(AtomicBool::new(false)),
+        health,
     };
     if args.open {
         room.set_open(true);
