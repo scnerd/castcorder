@@ -34,6 +34,8 @@
 pub mod delivery;
 pub mod leftover;
 pub mod levels;
+pub mod notes;
+pub mod pagelink;
 pub mod recorders;
 pub mod scope;
 pub mod session;

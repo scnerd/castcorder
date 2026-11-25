@@ -90,7 +90,31 @@ pub(super) fn target() -> Option<String> {
 }
 
 fn set_target(call: Option<String>) {
+    if call.is_none() {
+        drop_call_from_url();
+    }
     TARGET.with(|t| *t.borrow_mut() = call);
+}
+
+/// The target is spent (the host named the call, or refused it): take
+/// `?call=` out of the address too, so a reload does not aim at it again
+/// (cast-qz2).
+fn drop_call_from_url() {
+    let loc = window().location();
+    let (Ok(search), Ok(path), Ok(hash)) = (loc.search(), loc.pathname(), loc.hash()) else {
+        return;
+    };
+    let kept = crate::pagelink::without_param(&search, "call");
+    if kept == search {
+        return;
+    }
+    if let Ok(history) = window().history() {
+        let _ = history.replace_state_with_url(
+            &JsValue::NULL,
+            "",
+            Some(&format!("{path}{kept}{hash}")),
+        );
+    }
 }
 
 /// The remembered rooms, most recent first.

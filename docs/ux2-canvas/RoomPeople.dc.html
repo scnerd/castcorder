@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>New room and room people</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:#15181d;background:#e9ebef}
+a{color:#1d4ed8}a:hover{color:#1e3a8a}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 16px;border-radius:10px;border:1px solid #cfd4dc;background:#fff;color:#15181d;font:600 14px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+.btn.primary{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.btn.ghost{border-color:transparent;background:transparent}
+.btn.sm{height:32px;padding:0 12px;font-size:13px}
+.muted{color:#555c66}
+.cap{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#555c66}
+.panel{background:#fff;border:1px solid #dde1e7;border-radius:16px;box-shadow:0 16px 40px rgba(15,17,21,.14)}
+.av{position:relative;width:34px;height:34px;border-radius:50%;background:#3a4150;color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+.pres{position:absolute;right:-1px;bottom:-1px;width:10px;height:10px;border-radius:50%;border:2px solid #fff}
+.field{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:600}
+.field input{height:42px;padding:0 12px;border:1px solid #cfd4dc;border-radius:10px;font:400 15px Inter,system-ui,sans-serif}
+.pr{display:flex;align-items:center;gap:12px;padding:8px 0}
+.tok{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 6px 0 4px;border-radius:999px;background:#e3e9fb;color:#1e3a8a;font-size:13px;font-weight:600}
+.tabs{display:flex;gap:4px;border-bottom:1px solid #eef0f3}
+.tabs a{padding:10px 12px;font-size:14px;font-weight:500;color:#555c66;text-decoration:none;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tabs a.on{color:#15181d;font-weight:600;border-bottom-color:#1d4ed8}
+select{height:32px;border:1px solid #cfd4dc;border-radius:8px;padding:0 8px;font:500 13px Inter,system-ui,sans-serif;background:#fff}
+</style>
+</helmet>
+<div style="width: 1280px; height: 800px; box-sizing: border-box; padding: 40px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px; align-content: start">
+
+  <section aria-labelledby="c1" style="display: flex; flex-direction: column; gap: 12px">
+    <div id="c1" class="cap">Home &gt; New room</div>
+    <div class="panel" role="dialog" aria-label="New room" style="padding: 24px; display: flex; flex-direction: column; gap: 18px">
+      <div style="font-size: 20px; font-weight: 700">New room</div>
+      <label class="field">Name<input type="text" value="Interviews"></label>
+      <div style="display: flex; flex-direction: column; gap: 8px">
+        <div style="font-size: 13px; font-weight: 600">Trusted people <span class="muted" style="font-weight: 400">(optional)</span></div>
+        <div class="muted" style="font-size: 13px; line-height: 1.5">Contacts you add can always get in and see this room in their list. Anyone else joins with the link.</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid #1d4ed8; border-radius: 10px; box-shadow: 0 0 0 3px #dbe5fb">
+          <span class="tok"><span class="av" style="width: 22px; height: 22px; font-size: 9px">AM</span>Alex Morgan<button class="btn ghost" type="button" aria-label="Remove Alex Morgan" style="width: 22px; height: 22px; padding: 0"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></span>
+          <input type="text" value="Ch" aria-label="Add a contact" style="flex: 1; min-width: 80px; height: 30px; border: 0; outline: 0; font: 400 14px Inter,system-ui,sans-serif">
+        </div>
+        <div role="listbox" aria-label="Matching contacts" style="border: 1px solid #dde1e7; border-radius: 10px; padding: 4px">
+          <div role="option" aria-selected="true" class="pr" style="padding: 8px; border-radius: 8px; background: #f3f4f6"><div class="av" style="background: #7a8494">CP<span class="pres" style="background: #c3c8d0"></span></div><span style="font-weight: 600; font-size: 14px">Chris Park</span></div>
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end"><button class="btn" type="button">Cancel</button><button class="btn primary" type="button">Create room</button></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="c2" style="display: flex; flex-direction: column; gap: 12px">
+    <div id="c2" class="cap">Room ... &gt; Room settings &gt; People</div>
+    <div class="panel" role="dialog" aria-label="Weekly show settings" style="padding: 24px; display: flex; flex-direction: column; gap: 16px">
+      <div style="font-size: 20px; font-weight: 700">Weekly show</div>
+      <nav class="tabs" aria-label="Room settings"><a class="on" href="#people">People</a><a href="#access">Joining</a><a href="#link">Link</a></nav>
+      <div style="display: flex; gap: 8px"><button class="btn sm" type="button"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add contacts</button></div>
+      <div>
+        <div class="cap" style="font-size: 11px; padding-bottom: 4px">Trusted people</div>
+        <div class="pr"><div class="av" style="background: #5b4a8a">PS<span class="pres" style="background: #2563eb"></span></div><div style="flex: 1; min-width: 0"><div style="font-weight: 600; font-size: 14px">Priya Shah</div><div class="muted" style="font-size: 12px">All her devices</div></div><select aria-label="Role for Priya"><option>Producer</option><option>Guest</option></select><button class="btn ghost sm" type="button" aria-label="Remove Priya from room" style="width: 32px; padding: 0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+        <div class="pr"><div class="av">AM<span class="pres" style="background: #16a34a"></span></div><div style="flex: 1; min-width: 0"><div style="font-weight: 600; font-size: 14px">Alex Morgan</div><div class="muted" style="font-size: 12px">All their devices</div></div><select aria-label="Role for Alex"><option>Guest</option><option>Producer</option></select><button class="btn ghost sm" type="button" aria-label="Remove Alex from room" style="width: 32px; padding: 0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+      </div>
+      <div>
+        <div class="cap" style="font-size: 11px; padding-bottom: 4px">Joined with the link</div>
+        <div class="pr"><div class="av" style="background: #2f6f4f">G</div><div style="flex: 1; min-width: 0"><div style="font-weight: 600; font-size: 14px">Gary</div><div class="muted" style="font-size: 12px">Browser &middot; last in Nov 24</div></div><button class="btn sm" type="button">Trust</button></div>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
