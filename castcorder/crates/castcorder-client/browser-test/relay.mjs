@@ -264,8 +264,11 @@ try {
   const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
   const same = [];
   for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);
-  check(lost.length === 0 && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
-    + (lost.length ? ' (lost: ' + lost.join(', ') + ')' : ''));
+  // On a degraded network (the nightly's netem run, DEGRADED=1) a guest's connection may
+  // flicker through "disconnected" and recover by itself; it must still not rejoin.
+  const degraded = !!process.env.DEGRADED;
+  check((lost.length === 0 || degraded) && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
+    + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : ''));
   const started2 = await post('/take/start');
   check(started2[0] === 200, 'take 2 started after the renewal: ' + started2.join(' '));
   await sleep(4000);
