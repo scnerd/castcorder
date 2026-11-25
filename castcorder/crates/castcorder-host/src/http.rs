@@ -892,9 +892,9 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/native" | "/rooms" | "/person" | "/settings" | "/joined-rooms")
         | (
             "POST",
-            "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
-            | "/rooms/call" | "/rooms/archive" | "/person" | "/person/code" | "/person/decide"
-            | "/person/join" | "/person/revoke",
+            "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/rooms"
+            | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/person" | "/person/code"
+            | "/person/decide" | "/person/join" | "/person/revoke",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -1004,6 +1004,21 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                     serde_json::to_string(&app.native.state()).unwrap_or_default(),
                 ),
                 Err(e) => text(409, e),
+            }
+        }
+        ("POST", "/native/switch") => {
+            let device = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .map(|v| v["device"].as_str().map(str::to_string));
+            match device {
+                None => text(400, "send {\"device\": name or null}"),
+                Some(d) => match app.native.switch(d) {
+                    Ok(()) => json(
+                        200,
+                        serde_json::to_string(&app.native.state()).unwrap_or_default(),
+                    ),
+                    Err(e) => text(409, e),
+                },
             }
         }
         ("POST", "/native/mute") => {

@@ -134,6 +134,23 @@ pub(super) fn NativeMic(
             }
         });
     };
+    // Changing the input while in the call switches it mid-take.
+    let pick = move |name: String| {
+        device.set(name.clone());
+        if !state.get_untracked().joined.is_some() {
+            return;
+        }
+        busy.set(true);
+        message.set(String::new());
+        spawn_local(async move {
+            let body = serde_json::json!({ "device": (!name.is_empty()).then_some(name) });
+            match native_request("POST", "/native/switch", Some(body.to_string())).await {
+                Ok(s) => state.set(s),
+                Err(e) => message.set(e),
+            }
+            busy.set(false);
+        });
+    };
     view! {
         <Show when=move || state.get().available>
             <div class="native">
@@ -141,8 +158,8 @@ pub(super) fn NativeMic(
             <span class="small muted">"The host records it directly, at full quality."</span>
             <div class="native-row">
                 <label class="sr-only" for="native-device">"Microphone on this machine"</label>
-                <select id="native-device" disabled=move || joined() || busy.get()
-                    on:change=move |ev| device.set(event_target_value(&ev))>
+                <select id="native-device" disabled=move || busy.get()
+                    on:change=move |ev| pick(event_target_value(&ev))>
                     <option value="">"Default input"</option>
                     <For each=move || state.get().devices key=|d| d.0.clone() let:d>
                         <option value=d.0.clone()>{format!("{}{}", d.0, if d.1 { " (default)" } else { "" })}</option>
