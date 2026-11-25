@@ -28,7 +28,9 @@ use tracing::{info, warn};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Engine {
     /// whisper.cpp with the ggml model at this path (a build with the
-    /// `whisper` feature).
+    /// `whisper` feature), or, for a folder of bundled models, the one that
+    /// suits this machine (`castcorder_transcribe::load_best`: the GPU model
+    /// when it runs on a GPU).
     Whisper(PathBuf),
     /// The behavioural simulation (`castcorder_port_transcribe::sim`): it
     /// hears only its tone code. For tests.
@@ -41,6 +43,11 @@ impl Engine {
     fn open(&self) -> Result<Box<dyn Transcriber>, String> {
         match self {
             Engine::Simulated => Ok(Box::new(castcorder_port_transcribe::sim::Simulated::new())),
+            #[cfg(feature = "whisper")]
+            Engine::Whisper(path) if path.is_dir() => {
+                info!(models = %path.display(), "loading the transcription model");
+                Ok(Box::new(castcorder_transcribe::load_best(path)?))
+            }
             #[cfg(feature = "whisper")]
             Engine::Whisper(path) => Ok(Box::new(castcorder_transcribe::Whisper::load(
                 path,

@@ -28,6 +28,68 @@ pub enum Device {
     Cpu,
 }
 
+/// The model installers bundle for machines with a usable GPU (cast-7hm.4):
+/// about 190 MB, word error rate 5.0 in the spike at 0.11 s per 5 s.
+pub const GPU_MODEL: &str = "ggml-small.en-q5_1.bin";
+/// The model installers bundle for the CPU: about 80 MB, word error rate
+/// 7.9 in the spike at 0.39 s per 5 s on a desktop CPU.
+pub const CPU_MODEL: &str = "ggml-base.en-q8_0.bin";
+
+/// The bundled model (in `dir`) to load first: the GPU model if it is
+/// there, else the CPU model.
+fn first_choice(dir: &Path) -> Option<std::path::PathBuf> {
+    [GPU_MODEL, CPU_MODEL]
+        .iter()
+        .map(|m| dir.join(m))
+        .find(|p| p.is_file())
+}
+
+/// Five seconds of the GPU model slower than this means it is not on a GPU
+/// (the spike: 0.11 s on a GPU, over a second on a desktop CPU).
+const GPU_SECONDS: f64 = 0.6;
+
+/// Load the model that suits this machine from the folder of bundled models
+/// `dir` (cast-7hm.4), warmed up: the GPU model, unless it turns out to run
+/// on the CPU (no usable GPU, or no GPU in this build) and the CPU model is
+/// there, which is then loaded instead. Trying is the safe way to find out:
+/// asking ggml for its Vulkan devices aborts the process on a machine with
+/// no Vulkan driver, while loading falls back to the CPU.
+pub fn load_best(dir: &Path) -> Result<Whisper, String> {
+    let first =
+        first_choice(dir).ok_or_else(|| format!("no transcription model in {}", dir.display()))?;
+    let mut w = Whisper::load(&first, Device::Auto)?;
+    w.warm_up()?;
+    let cpu = dir.join(CPU_MODEL);
+    if first != cpu && cpu.is_file() {
+        let secs = w.time(5.0)?;
+        if secs > GPU_SECONDS {
+            tracing::info!(
+                secs,
+                "the GPU model runs on the CPU here; loading the CPU model"
+            );
+            let mut c = Whisper::load(&cpu, Device::Cpu)?;
+            c.warm_up()?;
+            return Ok(c);
+        }
+        tracing::info!(secs, "the GPU model runs fast enough here");
+    }
+    Ok(w)
+}
+
+/// `secs` of a quiet, speech-band hiss (above [`QUIET_RMS`], so the model
+/// runs on it).
+fn hiss(secs: f32) -> Vec<f32> {
+    let mut x: u32 = 0x9e37_79b9;
+    (0..(secs * SAMPLE_RATE as f32) as usize)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 / u32::MAX as f32 - 0.5) * 0.05
+        })
+        .collect()
+}
+
 /// A segment whisper rates at least this likely to be non-speech is dropped.
 const NO_SPEECH: f32 = 0.6;
 /// Audio quieter than this (RMS, about -50 dBFS) is not given to the model:
@@ -36,19 +98,39 @@ const QUIET_RMS: f32 = 0.003;
 
 /// whisper.cpp with one loaded model; see the crate docs.
 pub struct Whisper {
-    // The state borrows nothing from the context in whisper-rs 0.16 (it
-    // holds its own reference), but keep the context alive beside it.
-    _ctx: WhisperContext,
-    state: WhisperState,
+    /// The state, then its context (dropped in that order, under [`ENGINE`]).
+    inner: Option<(WhisperState, WhisperContext)>,
     threads: i32,
+    model: std::path::PathBuf,
+}
+
+/// whisper.cpp is used by one thread at a time in this process: two models
+/// running at once on the Vulkan backend crash it (an access violation, seen
+/// on Windows with an RTX 3090). Loading, transcribing and freeing all hold
+/// this. The host runs one transcriber anyway; this keeps tests and any
+/// later second one safe.
+static ENGINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn engine() -> std::sync::MutexGuard<'static, ()> {
+    ENGINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Drop for Whisper {
+    fn drop(&mut self) {
+        let _one = engine();
+        drop(self.inner.take());
+    }
 }
 
 impl Whisper {
     /// Load the ggml model at `path`.
     pub fn load(path: &Path, device: Device) -> Result<Self, String> {
+        let _one = engine();
         whisper_rs::install_logging_hooks();
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(device == Device::Auto && cfg!(feature = "vulkan"));
+        params.use_gpu(device == Device::Auto && cfg!(any(feature = "vulkan", feature = "metal")));
         let path_str = path
             .to_str()
             .ok_or_else(|| format!("model path is not UTF-8: {}", path.display()))?;
@@ -61,10 +143,15 @@ impl Whisper {
             .map(|n| n.get().clamp(1, 8) as i32)
             .unwrap_or(4);
         Ok(Whisper {
-            _ctx: ctx,
-            state,
+            inner: Some((state, ctx)),
             threads,
+            model: path.to_path_buf(),
         })
+    }
+
+    /// The model file this runs.
+    pub fn model(&self) -> &Path {
+        &self.model
     }
 }
 
@@ -78,8 +165,35 @@ fn is_marker(text: &str) -> bool {
             .any(|&(a, b)| t.starts_with(a) && t.ends_with(b))
 }
 
+impl Whisper {
+    /// How long transcribing `secs` of hiss takes, in seconds. The clock
+    /// starts once [`ENGINE`] is held, so time spent waiting for another
+    /// transcriber does not make the GPU look slow.
+    fn time(&mut self, secs: f32) -> Result<f64, String> {
+        let audio = hiss(secs);
+        let _one = engine();
+        let start = std::time::Instant::now();
+        self.run(&audio)?;
+        Ok(start.elapsed().as_secs_f64())
+    }
+}
+
 impl Transcriber for Whisper {
     fn transcribe(&mut self, pcm: &[f32]) -> Result<Vec<Segment>, String> {
+        let _one = engine();
+        self.run(pcm)
+    }
+
+    /// Run the model once on real input (silence is never given to it), so
+    /// weights are loaded and GPU shaders compiled before the call needs it.
+    fn warm_up(&mut self) -> Result<(), String> {
+        self.transcribe(&hiss(2.0)).map(|_| ())
+    }
+}
+
+impl Whisper {
+    /// [`Transcriber::transcribe`], with [`ENGINE`] already held.
+    fn run(&mut self, pcm: &[f32]) -> Result<Vec<Segment>, String> {
         let rms = (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
         if pcm.is_empty() || rms < QUIET_RMS {
             return Ok(Vec::new());
@@ -110,12 +224,13 @@ impl Transcriber for Whisper {
         // for a short utterance (much faster; a little padding for safety).
         let secs = audio.len() as f32 / SAMPLE_RATE as f32;
         p.set_audio_ctx(((secs * 50.0) as i32 + 64).min(1500));
-        self.state
+        let state = &mut self.inner.as_mut().ok_or("the model is closed")?.0;
+        state
             .full(p, audio)
             .map_err(|e| format!("transcription failed: {e}"))?;
         let len_ms = pcm.len() as u64 * 1000 / u64::from(SAMPLE_RATE);
         let mut out = Vec::new();
-        for seg in self.state.as_iter() {
+        for seg in state.as_iter() {
             if seg.no_speech_probability() >= NO_SPEECH {
                 continue;
             }
@@ -143,6 +258,28 @@ impl Transcriber for Whisper {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_gpu_model_is_tried_first_and_either_rather_than_none() {
+        let dir = std::env::temp_dir().join(format!("castcorder-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::first_choice(&dir), None);
+        assert!(super::load_best(&dir).is_err());
+        std::fs::write(dir.join(super::CPU_MODEL), b"x").unwrap();
+        assert_eq!(super::first_choice(&dir), Some(dir.join(super::CPU_MODEL)));
+        std::fs::write(dir.join(super::GPU_MODEL), b"x").unwrap();
+        assert_eq!(super::first_choice(&dir), Some(dir.join(super::GPU_MODEL)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hiss_is_loud_enough_to_reach_the_model() {
+        let h = super::hiss(1.0);
+        let rms = (h.iter().map(|s| s * s).sum::<f32>() / h.len() as f32).sqrt();
+        assert!(rms > super::QUIET_RMS * 3.0, "{rms}");
+        assert_eq!(h.len(), 16_000);
+    }
+
     #[test]
     fn markers_are_not_words() {
         for m in ["[BLANK_AUDIO]", " (music) ", "*laughs*", "", "  "] {

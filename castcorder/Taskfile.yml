@@ -252,6 +252,29 @@ tasks:
       - cd crates/castcorder-client && trunk build --release --dist ../castcorder-app/client
       - cd crates/castcorder-app && cargo tauri build --config tauri.bundle.conf.json {{.EXTRA_CONFIG}} --features {{.FEATURES}} {{.CLI_ARGS}}
 
+  app:models:
+    desc: Fetch the transcription models the installers bundle into crates/castcorder-app/models (checked by size and SHA-256)
+    summary: |
+      ggml-small.en-q5_1 (GPU machines) and ggml-base.en-q8_0 (the CPU), from
+      whisper.cpp's Hugging Face repository; see scripts/fetch_models.py. Bundle
+      them with EXTRA_CONFIG="--config tauri.models.conf.json" and a FEATURES
+      list with transcribe, vulkan or metal (what release.yml does). The app
+      never downloads anything at runtime.
+    cmds:
+      - uv run ../scripts/fetch_models.py
+
+  app:licenses:
+    desc: Gather the licences of every Rust crate the desktop app links into crates/castcorder-app/licenses/third-party/rust-crates.html (cargo-about)
+    summary: |
+      The installers ship crates/castcorder-app/licenses/third-party (this file
+      plus the notices for whisper.cpp and ggml, libopus and the Whisper
+      models). Fails on a crate whose licence about.toml does not accept.
+      Needs cargo-about (cargo binstall cargo-about). Pass the build's FEATURES.
+    vars:
+      FEATURES: '{{.FEATURES | default "desktop,native-capture,project-rendezvous,vulkan"}}'
+    cmds:
+      - cd crates/castcorder-app && cargo about generate --locked --features {{.FEATURES}} --fail -o licenses/third-party/rust-crates.html about.hbs
+
   app:icons:
     desc: Render the app icons (crates/castcorder-app/icons) from their SVG sources in icons/src
     summary: |

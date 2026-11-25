@@ -36,6 +36,12 @@ native-capture = ["castcorder-host/native-capture"]
 # Register with the project's public rendezvous by default (release builds;
 # see castcorder-host's feature of the same name).
 project-rendezvous = ["castcorder-host/project-rendezvous"]
+# The live transcript with whisper.cpp and the models bundled beside the app
+# (cast-7hm.4; task app:models fetches them for the installers), on the CPU...
+transcribe = ["castcorder-host/whisper"]
+# ... or on the GPU: Vulkan (Windows, Linux) or Metal (macOS).
+vulkan = ["transcribe", "castcorder-host/whisper-vulkan"]
+metal = ["transcribe", "castcorder-host/whisper-metal"]
 
 [dependencies]
 castcorder-host = { path = "../castcorder-host" }
