@@ -52,6 +52,10 @@ pub struct CallMeta {
     /// Made by [`migrate`] from a folder from before rooms.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub migrated: bool,
+    /// Hidden from the lists (cast-bc4): nothing is deleted and routing does
+    /// not look at it; choosing the call brings it back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
 }
 
 /// One call of a room, as listed.
@@ -207,10 +211,20 @@ pub fn create_call(room_dir: &Path, now_ms: u64) -> io::Result<CallInfo> {
         started_ms: now_ms,
         last_active_ms: now_ms,
         migrated: false,
+        archived: false,
     };
     write_meta(&dir, &meta)?;
     info!(room = %room_dir.display(), call = %id, "new call");
     Ok(CallInfo { id, meta, takes: 0 })
+}
+
+/// Hide a call from the lists, or bring it back (`archived` false). The
+/// recordings stay where they are.
+pub fn set_archived(call_dir: &Path, archived: bool) -> io::Result<()> {
+    let mut meta = read_meta(call_dir)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such call"))?;
+    meta.archived = archived;
+    write_meta(call_dir, &meta)
 }
 
 /// Mark a call active at `now_ms` (never earlier than it was).
@@ -219,6 +233,7 @@ pub fn touch(call_dir: &Path, now_ms: u64) -> io::Result<()> {
         started_ms: now_ms,
         last_active_ms: now_ms,
         migrated: false,
+        archived: false,
     });
     meta.last_active_ms = meta.last_active_ms.max(now_ms);
     write_meta(call_dir, &meta)
@@ -277,6 +292,7 @@ pub fn migrate(room_dir: &Path, now_ms: u64) -> io::Result<Option<String>> {
                     started_ms: started,
                     last_active_ms: last,
                     migrated: true,
+                    archived: false,
                 },
             )?;
             id
@@ -337,6 +353,7 @@ mod tests {
                 started_ms: started,
                 last_active_ms: last,
                 migrated: false,
+                archived: false,
             },
             takes: 0,
         }

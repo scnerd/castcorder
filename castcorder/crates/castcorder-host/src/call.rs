@@ -164,6 +164,18 @@ pub enum Command {
         /// The call's id, or why not.
         reply: mpsc::Sender<Result<String, String>>,
     },
+    /// Hide a call from the lists, or bring it back (the host machine's
+    /// home; cast-bc4).
+    ArchiveCall {
+        /// The room.
+        room: String,
+        /// The call.
+        call: String,
+        /// Hide it (else bring it back).
+        archived: bool,
+        /// Whether it was done, or why not.
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     /// Trust (or stop trusting) a whole person in a room (the host
     /// machine's home; ADR 0005).
     TrustPerson {
@@ -1915,6 +1927,14 @@ impl Call {
             }
             Command::ChooseCall { room, call, reply } => {
                 let _ = reply.send(self.choose_call(&room, call));
+            }
+            Command::ArchiveCall {
+                room,
+                call,
+                archived,
+                reply,
+            } => {
+                let _ = reply.send(self.archive_call(&room, &call, archived));
             }
             Command::TrustPerson {
                 room,

@@ -43,6 +43,10 @@ pub(super) struct Call {
     pub started_ms: u64,
     #[serde(default)]
     pub takes: u32,
+    /// Hidden from this browser's list (cast-bc4); the recordings and the
+    /// host's own list are untouched.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// One remembered room.
@@ -145,6 +149,21 @@ fn save(list: &[Room]) {
                 }
             });
         }
+    }
+}
+
+/// Hide `call` of the remembered `room` of `host` from this browser's list, or
+/// bring it back (cast-bc4).
+fn set_call_archived(host: &str, room: &str, call: &str, archived: bool) {
+    let mut list = load();
+    if let Some(c) = list
+        .iter_mut()
+        .filter(|r| r.host == host && r.room == room)
+        .flat_map(|r| r.calls.iter_mut())
+        .find(|c| c.id == call)
+    {
+        c.archived = archived;
+        save(&list);
     }
 }
 
@@ -293,6 +312,7 @@ fn merge(host: &str, st: &HostStatus) {
                     id: c.id.clone(),
                     started_ms: c.started_ms,
                     takes: c.takes,
+                    ..Default::default()
                 }),
             }
         }
@@ -517,7 +537,7 @@ pub(super) fn MyRooms(ui: Ui) -> impl IntoView {
             </div>
             <ul id="my-rooms-list" class="list">
                 <For each=move || list.get() key=|r| format!("{r:?}") let:r>
-                    <RoomCard ui=ui r=r seen=seen/>
+                    <RoomCard ui=ui r=r seen=seen list=list/>
                 </For>
             </ul>
         </section>
@@ -564,7 +584,12 @@ fn chip(state: &(Seen, Option<RoomStatus>), removed: bool) -> (&'static str, &'s
 
 /// One remembered room.
 #[component]
-fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoView {
+fn RoomCard(
+    ui: Ui,
+    r: Room,
+    seen: RwSignal<Vec<(String, Seen)>>,
+    list: RwSignal<Vec<Room>>,
+) -> impl IntoView {
     let card = StoredValue::new(r.clone());
     let state = Memo::new(move |_| card.with_value(|c| room_seen(&seen.get(), c)));
     let flagged = r.removed;
@@ -592,6 +617,9 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
     let live = move || state.with(|s| s.1.as_ref().is_some_and(|s| s.live));
     let mut calls = r.calls.clone();
     calls.reverse();
+    let hidden = calls.iter().filter(|c| c.archived).count();
+    let show_archived = RwSignal::new(false);
+    let (host, room_name) = (r.host.clone(), r.room.clone());
     let rows = calls
         .into_iter()
         .map(|c| {
@@ -602,13 +630,20 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
             };
             let go = move |_| rejoin(ui, &card.get_value(), Some(id.get_value()));
             let takes = c.takes;
+            let is_archived = c.archived;
+            let ids = StoredValue::new((host.clone(), room_name.clone(), c.id.clone()));
+            let flip_archived = move |_| {
+                ids.with_value(|(h, r, i)| set_call_archived(h, r, i, !is_archived));
+                list.set(load());
+            };
             let when = if c.started_ms > 0 {
                 home::when(c.started_ms)
             } else {
                 c.id.clone()
             };
             view! {
-                <li class="call-row" data-call=c.id.clone() class:next=move || action() == CallAction::Current>
+                <li class="call-row" data-call=c.id.clone() class:next=move || action() == CallAction::Current
+                    hidden=move || is_archived && !show_archived.get()>
                     <span class="call-when">{when}</span>
                     <span class="small muted call-id">{c.id.clone()}</span>
                     <Show when=move || { takes > 0 }>
@@ -623,6 +658,13 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
                         </Show>
                         <Show when=move || action() == CallAction::Needs>
                             <span class="small muted needs-producer">"A producer can continue it"</span>
+                        </Show>
+                        <Show when=move || is_archived><span class="chip">"Archived"</span></Show>
+                        <Show when=move || action() != CallAction::Current>
+                            <button class="btn tiny outline archive-call" on:click=flip_archived
+                                title="Hide this call from this list only; nothing is deleted">
+                                {if is_archived { "Unarchive" } else { "Archive" }}
+                            </button>
                         </Show>
                     </span>
                 </li>
@@ -644,6 +686,11 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
             </div>
             <span class="small muted link-changed-note" hidden=move || removed() || !changed()>"This room's link has changed - ask the host for the new link."</span>
             <span class="small muted removed-note" hidden=move || !removed()>"A producer removed you from this room."</span>
+            <Show when=move || hidden != 0>
+                <button class="btn tiny outline toggle-archived" on:click=move |_| show_archived.update(|s| *s = !*s)>
+                    {move || if show_archived.get() { format!("Hide archived ({hidden})") } else { format!("Show archived ({hidden})") }}
+                </button>
+            </Show>
             <ul class="list calls">{rows}</ul>
         </li>
     }
