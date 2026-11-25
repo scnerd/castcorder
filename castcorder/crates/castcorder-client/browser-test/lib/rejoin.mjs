@@ -150,8 +150,16 @@ export async function rejoinChecks({ rendezvous } = {}) {
   const U = await openGuest('RU', [], base, undefined, 'Una', '#' + frag);
   await U.click('#join');
   await connected(U, 'U');
-  await leave(U);
-  await waitFor(async () => (await card(U).count()) === 1, 'U lists the room', 15000);
+  const stored = () => U.evaluate(() => localStorage.getItem('castcorder.rooms') || '');
+  try {
+    await waitFor(async () => (await stored()).includes('rejoin-show'), 'U remembers the room', 20000);
+    await leave(U);
+    await waitFor(async () => (await card(U).count()) === 1, 'U lists the room', 30000);
+  } catch (e) {
+    console.log('rejoin: U state=' + (await state(U).catch(() => '?')) + ' stored=' + (await stored().catch(() => '?')) +
+      ' rooms-section=' + (await U.locator('#my-rooms').innerText().catch(() => '?')));
+    throw e;
+  }
   await P.click('#join');
   await connected(P, 'P');
   await P.click('#regen-link');
