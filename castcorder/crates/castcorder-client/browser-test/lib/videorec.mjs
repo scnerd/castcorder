@@ -17,7 +17,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseWav, deinterleave, analyzeRecording } from '../analyze.mjs';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, buttons, check, opfsNames, parseTiming, inputZeroHostUs, loopDiffUs, callDir } from './helpers.mjs';
+import { sleep, waitFor, text, buttons, check, opfsNames, parseTiming, inputZeroHostUs, loopDiffUs, callDir, unfold } from './helpers.mjs';
 import { INPUT_RATE, INPUT_SECONDS } from '../gen-wav.mjs';
 
 // How far two takes' timing metadata may disagree about the same input
@@ -68,7 +68,7 @@ export async function videoRecChecks(A, B) {
 
   // The producer turns video recording on (default off: takes 1 and 2 had none).
   check((await text(A, '#room-record-video')) === 'audio only', 'the recording profile records no video by default');
-  await A.click('#record-video');
+  await unfold(A); await A.click('#record-video');
   await waitFor(async () => (await text(A, '#room-record-video')) === 'audio and video', 'producer turned video recording on', 10000);
   const roomJson = join(LIBRARY, 'browser-test', 'room.json');
   if (existsSync(roomJson)) {
@@ -209,6 +209,6 @@ export async function videoRecChecks(A, B) {
     check(disc.length === 0, 'A\x27s take 3 timing metadata lists no discontinuity: ' + JSON.stringify(disc));
   }
   // Back to audio only for what follows.
-  await A.click('#record-video');
+  await unfold(A); await A.click('#record-video');
   await waitFor(async () => (await text(A, '#room-record-video')) === 'audio only', 'producer turned video recording off', 10000);
 }

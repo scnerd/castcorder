@@ -38,7 +38,7 @@ export async function namesChecks() {
   check(true, 'another guest\x27s tile shows the name with its space and non-ASCII letter');
   const tileOrigin = await Y.evaluate(() => [...document.querySelectorAll('#remote .tile')].map((e) => e.dataset.origin));
   check(tileOrigin.every((o) => /^[A-Za-z0-9-]+$/.test(o)), 'stream ids stay plain ASCII: ' + JSON.stringify(tileOrigin));
-  await waitFor(async () => (await text(X, '#guests')).includes(NAME + ' (guest'), 'producer list shows the real name', 10000);
+  await waitFor(async () => (await text(X, '#guests-detail')).includes(NAME + ' (guest'), 'producer list shows the real name', 10000);
   check(await X.evaluate(() => [...document.querySelectorAll('#guests li')].some((e) => e.dataset.name === 'Zo\u00eb Lee')),
     'the producer\x27s guest list shows the real name');
   check(/name=Zo%C3%AB%20Lee/.test(await X.evaluate(() => performance.getEntriesByType('resource').map((r) => r.name).join('\n'))),

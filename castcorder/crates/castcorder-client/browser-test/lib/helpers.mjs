@@ -155,3 +155,14 @@ export function loopDiffUs(a, b, loopUs) {
   const d = ((a - b) % loopUs + loopUs) % loopUs;
   return d >= loopUs / 2 ? d - loopUs : d;
 }
+
+// The People panel (cast-n56.6): a person's action sits in their row's menu.
+export async function personAction(page, name, cls) {
+  const row = page.locator('#guests li[data-name="' + name + '"]');
+  await row.locator('.row-menu').click();
+  await row.locator('button.' + cls).click();
+}
+
+// Open the People panel's folded sections (Room settings, Calls in this
+// room, Connection details) before using a control inside them.
+export const unfold = (page) => page.evaluate(() => { for (const d of document.querySelectorAll('details.fold')) d.open = true; });

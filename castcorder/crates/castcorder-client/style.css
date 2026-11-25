@@ -533,3 +533,21 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .left-card .row { flex-wrap: wrap; }
 .left-sync .disk-bar { background: var(--surface); }
 .left-sync .disk-bar > span { background: var(--accent); }
+
+/* People panel in plain language (cast-n56.6) */
+.person-head { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.person-state { display: flex; gap: 8px; flex-wrap: wrap; }
+.pstate[data-state="recording"] { color: var(--rec-text); font-weight: 600; }
+.row-pop { min-width: 180px; padding: 6px; gap: 2px; }
+.row-pop .btn { justify-content: flex-start; width: 100%; padding-left: 10px; color: var(--text); }
+.row-pop .btn.danger { color: var(--rec-text); }
+.row-menu.btn.ghost { padding: 0 8px; }
+.btn.danger { color: var(--rec-text); }
+details.fold { border-top: 1px solid var(--border); padding: 10px 0; }
+details.fold > summary { cursor: pointer; display: flex; justify-content: space-between; gap: 8px;
+  align-items: baseline; font-weight: 600; list-style: none; }
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before { content: "+"; width: 14px; color: var(--muted); }
+details.fold[open] > summary::before { content: "-"; }
+details.fold > summary > span:first-of-type { margin-right: auto; }
+.fold-body { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; }

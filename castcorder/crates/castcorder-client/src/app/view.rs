@@ -180,9 +180,12 @@ pub(super) fn Mark() -> impl IntoView {
 }
 
 /// The producer controls, shown only while the host says this connection is
-/// a producer (`Event::Role`): people (kick, grant, revoke), the call (lock,
-/// password, gating, link) and the recording profile. Every control is a
-/// protocol request the host authorizes per device role.
+/// a producer (`Event::Role`), in plain language (cast-n56.6): one row per
+/// person (avatar, name, Host/Producer/Guest, whether their machine records
+/// and its free space) with a menu (Make producer, Remove from call); then
+/// Room settings, Calls in this room and Connection details folded, the
+/// last holding the developer detail (guest numbers, trust, take state).
+/// Every control is a protocol request the host authorizes per device role.
 #[component]
 pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let take = ui.take;
@@ -191,104 +194,145 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let record_video = move || room().is_some_and(|r| r.record_video);
     let open = move || room().is_some_and(|r| r.open);
     let new_password = RwSignal::new(String::new());
+    let menu = RwSignal::new(None::<u64>);
     let act = move |a: RoomAction| producer_request(ui, Request::Room(a), false);
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
+    let me = move || ui.participant.get().parse::<u64>().ok();
+    // A row's second line: is their machine recording, and its room left.
+    let state_of = move |id: u64| {
+        ui.recorders
+            .get()
+            .into_iter()
+            .find(|r| r.participant.0 == id)
+            .map(|r| crate::recorders::chip(&r))
+    };
     view! {
         <Show when=move || ui.role.get().producer>
             <div class="section">
-                <h2>"People (" <span id="guest-count">{move || rows().len()}</span> ")"</h2>
-                <ul id="guests" class="list">
+                <h2>"People \u{b7} " <span id="guest-count">{move || rows().len()}</span></h2>
+                <ul id="guests" class="list people-list">
                     <For each=rows key=|p| format!("{}{}{}", p.participant.0, p.producer, p.trusted) let:p>
-                        <li class="person" data-name=p.name.clone() data-participant=p.participant.0.to_string()>
-                            // Initials via CSS, so the row's text stays "NAME (guest N) [...]".
+                        <li class="person" data-name=p.name.clone() data-participant=p.participant.0.to_string()
+                            data-trusted=p.trusted.to_string() data-producer=p.producer.to_string()>
                             <span class="avatar" aria-hidden="true" data-initials=initials(&p.name)></span>
                             <span class="person-text">
-                                <span><span class="pname">{p.name.clone()}</span>
-                                <span class="pmeta">{format!(" (guest {}){}{}{}", p.participant.0,
-                                    if p.host_machine { " [host machine]" } else { "" },
-                                    if p.producer && !p.host_machine { " [producer]" } else { "" },
-                                    if p.trusted { " [trusted]" } else { " [untrusted]" })}</span></span>
-                                {move || ui.disk.get().into_iter().find(|d| d.participant == Some(p.participant)).map(|d| view! {
-                                    <span class="pdisk" class:low=d.low>{format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))}</span>
-                                })}
+                                <span class="person-head">
+                                    <span class="pname">{p.name.clone()}</span>
+                                    {move || (me() == Some(p.participant.0)).then(|| view! { <span class="muted">" (you)"</span> })}
+                                    <span class="chip role-chip">{if p.host_machine { "Host" } else if p.producer { "Producer" } else { "Guest" }}</span>
+                                </span>
+                                <span class="person-state small muted">
+                                    {move || state_of(p.participant.0).map(|(words, state)| view! {
+                                        <span class="pstate" data-state=state>{words}</span>
+                                    })}
+                                    {move || ui.disk.get().into_iter().find(|d| d.participant == Some(p.participant)).map(|d| view! {
+                                        <span class="pdisk" class:low=d.low>{format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))}</span>
+                                    })}
+                                </span>
                             </span>
-                            <Show when=move || ui.role.get().host_machine && !p.host_machine && p.trusted>
-                                <button class="grant btn tiny" on:click=move |_| act(RoomAction::SetProducer { participant: p.participant, producer: !p.producer })>
-                                    {if p.producer { "Revoke producer" } else { "Make producer" }}</button>
-                            </Show>
                             <Show when=move || !p.host_machine>
-                                <button class="kick btn tiny outline" on:click=move |_| act(RoomAction::Kick { participant: p.participant })>"Remove"</button>
+                                <div class="menu-wrap">
+                                    <button class="row-menu btn tiny ghost" aria-label="More actions for this person"
+                                        aria-expanded=move || if menu.get() == Some(p.participant.0) { "true" } else { "false" }
+                                        on:click=move |_| menu.update(|m| *m = if *m == Some(p.participant.0) { None } else { Some(p.participant.0) })>"..."</button>
+                                    <div class="popover row-pop" hidden=move || menu.get() != Some(p.participant.0)>
+                                        <Show when=move || ui.role.get().host_machine && p.trusted>
+                                            <button class="grant btn ghost" on:click=move |_| { menu.set(None); act(RoomAction::SetProducer { participant: p.participant, producer: !p.producer }) }>
+                                                {if p.producer { "Revoke producer" } else { "Make producer" }}</button>
+                                        </Show>
+                                        <button class="kick btn ghost danger" on:click=move |_| { menu.set(None); act(RoomAction::Kick { participant: p.participant }) }>"Remove from call"</button>
+                                    </div>
+                                </div>
                             </Show>
                         </li>
                     </For>
                 </ul>
             </div>
-            <div class="section">
-                <span class="section-title">"Call"</span>
-                <span class="small muted">
-                    <span id="room-locked">{move || if locked() { "locked" } else { "unlocked" }}</span>
-                    ", " <span id="room-password">{move || if room().is_some_and(|r| r.password) { "password set" } else { "no password" }}</span>
-                    ", " <span id="room-open">{move || if open() { "always open" } else { "producer-gated" }}</span>
-                </span>
-                <code id="call-link">{move || room().and_then(|r| r.link).unwrap_or_else(|| "(LAN only)".into())}</code>
-                <div class="row">
-                    <button id="lock" class="btn" on:click=move |_| act(RoomAction::Lock(!locked()))>
-                        {move || if locked() { "Unlock call" } else { "Lock call" }}</button>
-                    // Only the host machine may change whether the call is gated.
-                    <Show when=move || ui.role.get().host_machine>
-                        <button id="open-toggle" class="btn" on:click=move |_| act(RoomAction::SetOpen(!open()))>
-                            {move || if open() { "Require a producer" } else { "Always open" }}</button>
-                    </Show>
-                    <button id="regen-link" class="btn outline" on:click=move |_| act(RoomAction::RegenerateLink)>"New call link"</button>
+            <details class="fold" id="room-settings">
+                <summary><span>"Room settings"</span>
+                    <span class="small muted">{move || format!("{}{}{}",
+                        if locked() { "Locked" } else { "Unlocked" },
+                        if room().is_some_and(|r| r.password) { ", password" } else { "" },
+                        if open() { ", always open" } else { ", opens when a producer joins" })}</span></summary>
+                <div class="fold-body">
+                    <span class="small muted">
+                        <span id="room-locked">{move || if locked() { "locked" } else { "unlocked" }}</span>
+                        ", " <span id="room-password">{move || if room().is_some_and(|r| r.password) { "password set" } else { "no password" }}</span>
+                        ", " <span id="room-open">{move || if open() { "always open" } else { "producer-gated" }}</span>
+                    </span>
+                    <div class="row">
+                        <button id="lock" class="btn" on:click=move |_| act(RoomAction::Lock(!locked()))>
+                            {move || if locked() { "Unlock call" } else { "Lock call" }}</button>
+                        // Only the host machine may change whether the call is gated.
+                        <Show when=move || ui.role.get().host_machine>
+                            <button id="open-toggle" class="btn" on:click=move |_| act(RoomAction::SetOpen(!open()))>
+                                {move || if open() { "Require a producer" } else { "Always open" }}</button>
+                        </Show>
+                        <button id="regen-link" class="btn outline" on:click=move |_| act(RoomAction::RegenerateLink)>"New call link"</button>
+                    </div>
+                    <div class="row">
+                        <label class="sr-only" for="new-password">"New call password"</label>
+                        <input id="new-password" type="password" placeholder="Call password" prop:value=move || new_password.get()
+                            on:input=move |ev| new_password.set(event_target_value(&ev)) />
+                        <button id="set-password" class="btn" on:click=move |_| act(RoomAction::SetPassword(Some(new_password.get_untracked())))>"Set"</button>
+                        <button id="clear-password" class="btn outline" on:click=move |_| act(RoomAction::SetPassword(None))>"Clear"</button>
+                    </div>
+                    <span class="small">"Recording: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
+                        <span class="muted">" (changes apply from the next take)"</span></span>
+                    <div class="row">
+                        <button id="record-video" class="btn" on:click=move |_| act(RoomAction::SetRecordVideo(!record_video()))>
+                            {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
+                    </div>
+                    <ul id="profile-warnings" class="list">
+                        <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
+                            <li class="warn-text">{w}</li>
+                        </For>
+                    </ul>
                 </div>
-                <div class="row">
-                    <label class="sr-only" for="new-password">"New call password"</label>
-                    <input id="new-password" type="password" placeholder="Call password" prop:value=move || new_password.get()
-                        on:input=move |ev| new_password.set(event_target_value(&ev)) />
-                    <button id="set-password" class="btn" on:click=move |_| act(RoomAction::SetPassword(Some(new_password.get_untracked())))>"Set"</button>
-                    <button id="clear-password" class="btn outline" on:click=move |_| act(RoomAction::SetPassword(None))>"Clear"</button>
+            </details>
+            <details class="fold" id="calls-section">
+                <summary><span>"Calls in this room"</span>
+                    <span class="small muted">{move || ui.calls.get().into_iter().find(|c| c.current).map(|c| format!("{}, {} take{}", home::when(c.started_ms), c.takes, if c.takes == 1 { "" } else { "s" })).unwrap_or_default()}</span></summary>
+                <div class="fold-body">
+                    <span class="small muted">"A call is one folder; rejoining continues it."</span>
+                    <div class="row">
+                        <button id="new-call" class="btn" title="Everyone moves into a new call: a new folder, takes from 1"
+                            on:click=move |_| act(RoomAction::NewCall)>"Start new call"</button>
+                    </div>
+                    <ul id="calls" class="list">
+                        <For each=move || { let mut v = ui.calls.get(); v.reverse(); v } key=|c| format!("{c:?}") let:c>
+                            <li class="call-row" data-call=c.id.clone() class:next=c.current>
+                                <span class="call-when">{home::when(c.started_ms)}</span>
+                                <span class="small call-takes">{format!("{} take{}", c.takes, if c.takes == 1 { "" } else { "s" })}</span>
+                                {if c.current {
+                                    view! { <span class="chip ok">"This call"</span> }.into_any()
+                                } else {
+                                    let id = c.id.clone();
+                                    view! { <button class="btn tiny continue-call" on:click=move |_| act(RoomAction::ContinueCall(id.clone()))>"Continue this call"</button> }.into_any()
+                                }}
+                            </li>
+                        </For>
+                    </ul>
                 </div>
-            </div>
-            <div class="section" id="calls-section">
-                <span class="section-title">"Calls in this room"</span>
-                <span class="small muted">"This call: " <code id="current-call">{move || ui.call_ref.get().map(|c| c.call).unwrap_or_default()}</code>
-                    " (a call is one folder; rejoining continues it)"</span>
-                <div class="row">
-                    <button id="new-call" class="btn" title="Everyone moves into a new call: a new folder, takes from 1"
-                        on:click=move |_| act(RoomAction::NewCall)>"Start new call"</button>
+            </details>
+            <details class="fold" id="connection-details">
+                <summary><span>"Connection details"</span></summary>
+                <div class="fold-body small">
+                    <ul id="guests-detail" class="list">
+                        <For each=rows key=|p| format!("{}{}{}", p.participant.0, p.producer, p.trusted) let:p>
+                            <li>{format!("{} (guest {}){}{}{}", p.name, p.participant.0,
+                                if p.host_machine { " [host machine]" } else { "" },
+                                if p.producer && !p.host_machine { " [producer]" } else { "" },
+                                if p.trusted { " [trusted]" } else { " [untrusted]" })}</li>
+                        </For>
+                    </ul>
+                    <span class="muted">"This call: " <code id="current-call">{move || ui.call_ref.get().map(|c| c.call).unwrap_or_default()}</code></span>
+                    <span class="muted">"Call link: " <code id="call-link">{move || room().and_then(|r| r.link).unwrap_or_else(|| "(LAN only)".into())}</code></span>
+                    <span class="muted">"Take: " <span id="take-status">{move || take.get()}</span>
+                        " " <code id="take-result" hidden=move || { let t = ui.producer_result.get(); t.starts_with('{') || t == "done" }>{move || ui.producer_result.get()}</code></span>
+                    <span class="muted">"Host library: " <span id="library-disk">{move || ui.disk.get().into_iter().find(|d| d.participant.is_none()).map(|d| format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))).unwrap_or_else(|| "not known".into())}</span></span>
                 </div>
-                <ul id="calls" class="list">
-                    <For each=move || { let mut v = ui.calls.get(); v.reverse(); v } key=|c| format!("{c:?}") let:c>
-                        <li class="call-row" data-call=c.id.clone() class:next=c.current>
-                            <span class="call-when">{home::when(c.started_ms)}</span>
-                            <span class="small call-takes">{format!("{} take{}", c.takes, if c.takes == 1 { "" } else { "s" })}</span>
-                            {if c.current {
-                                view! { <span class="chip ok">"This call"</span> }.into_any()
-                            } else {
-                                let id = c.id.clone();
-                                view! { <button class="btn tiny continue-call" on:click=move |_| act(RoomAction::ContinueCall(id.clone()))>"Continue this call"</button> }.into_any()
-                            }}
-                        </li>
-                    </For>
-                </ul>
-            </div>
-            <div class="section">
-                <span class="section-title">"Recording"</span>
-                <span class="small">"Profile: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
-                    <span class="muted">" (changes apply from the next take)"</span></span>
-                <div class="row">
-                    <button id="record-video" class="btn" on:click=move |_| act(RoomAction::SetRecordVideo(!record_video()))>
-                        {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
-                </div>
-                <span class="small muted">"Take: " <span id="take-status">{move || take.get()}</span>
-                    " " <code id="take-result" hidden=move || { let t = ui.producer_result.get(); t.starts_with('{') || t == "done" }>{move || ui.producer_result.get()}</code></span>
-                <span class="small muted">"Host library: " <span id="library-disk">{move || ui.disk.get().into_iter().find(|d| d.participant.is_none()).map(|d| format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))).unwrap_or_else(|| "not known".into())}</span></span>
-                <ul id="profile-warnings" class="list">
-                    <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
-                        <li class="warn-text">{w}</li>
-                    </For>
-                </ul>
-            </div>
+            </details>
         </Show>
     }
 }
