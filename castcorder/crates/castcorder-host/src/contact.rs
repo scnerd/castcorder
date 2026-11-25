@@ -738,6 +738,7 @@ pub fn request_contact(
                 code: code.secret_text(),
                 name: name.to_string(),
             }),
+            contact_link: false,
             presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;

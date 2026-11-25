@@ -1432,6 +1432,11 @@ impl Call {
                         self.offer_call_track(id, &call, &offer)
                     }
                     Request::ClockPing { .. } => unreachable!("answered above"),
+                    // Only a contact link asks this (`sync`).
+                    Request::SharedRooms => Response::Error {
+                        kind: ErrorKind::NotAllowed,
+                        message: "shared rooms are only told over a contact link".into(),
+                    },
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => {

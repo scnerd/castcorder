@@ -228,6 +228,15 @@ pub struct OfferPlain {
     /// anyone else gets no answer at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence: Option<PresencePing>,
+    /// A contact link (ADR 0005, docs/design.md "Contact links"): the
+    /// sync-only connection's offer (data channels only) from one app
+    /// install to a contact's, admitted by the contact relationship instead
+    /// of a call secret (`secret` is ignored). `cert` must be the asking app
+    /// install's certificate and the proof signs `sdp`. Only a contact's
+    /// install is answered ([`AnswerPlain::Sdp`]); anyone else gets no answer
+    /// at all, as for a presence ping.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub contact_link: bool,
 }
 
 /// A presence ping from one of a contact's app installs.

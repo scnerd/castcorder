@@ -186,6 +186,28 @@ pub enum Request {
         /// The camera is on.
         on: bool,
     },
+    /// On a contact link only (ADR 0005): the status of this install's rooms
+    /// the asking contact shares (the asking install was in the room, or the
+    /// room trusts its person). Answered with [`Response::SharedRooms`]
+    /// (appended).
+    SharedRooms,
+}
+
+/// One room a contact shares, as the answering install sees it (answer to
+/// [`Request::SharedRooms`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedRoom {
+    /// The room's name.
+    pub room: String,
+    /// Its call is live (someone is in it or a take records).
+    pub live: bool,
+    /// Another room of that install is live: a join waits until it ends.
+    pub busy: bool,
+    /// Who is in the live call, by display name.
+    pub in_call: Vec<String>,
+    /// The room's call link, when the asking contact is trusted in it (its
+    /// install, or its whole person) and the install is reachable.
+    pub link: Option<String>,
 }
 
 /// One recorded source's state on its device, as the device reports it.
@@ -446,6 +468,9 @@ pub enum Response {
         /// Host timeline, microseconds.
         host_us: i64,
     },
+    /// The rooms a contact shares (answer to [`Request::SharedRooms`];
+    /// appended).
+    SharedRooms(Vec<SharedRoom>),
 }
 
 /// The level of one source over the last metering interval.
@@ -758,6 +783,7 @@ mod tests {
                 },
             },
             Request::CameraState { on: true },
+            Request::SharedRooms,
         ]
     }
 
@@ -945,6 +971,16 @@ mod tests {
                 current: true,
             }])),
             CoreMessage::Event(Event::JoinRefusedLocked { name: "Sam".into() }),
+            CoreMessage::Response {
+                id: RequestId(15),
+                response: Response::SharedRooms(vec![SharedRoom {
+                    room: "show".into(),
+                    live: true,
+                    busy: false,
+                    in_call: vec!["Ann".into()],
+                    link: Some("https://example.test/v/1.2.3/#k".into()),
+                }]),
+            },
         ]
     }
 

@@ -952,6 +952,7 @@ mod tests {
                 cert: None,
                 link: None,
                 contact: None,
+                contact_link: false,
                 presence: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
@@ -1162,6 +1163,7 @@ mod tests {
             cert: None,
             link: None,
             contact: None,
+            contact_link: false,
             presence: None,
         };
         let (sealed, guest) =

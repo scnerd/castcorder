@@ -246,6 +246,7 @@ pub fn ping(
         cert: Some(me.cert.clone()),
         link: None,
         contact: None,
+        contact_link: false,
         presence: Some(PresencePing {
             device: me.device.clone(),
         }),

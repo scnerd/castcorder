@@ -156,6 +156,7 @@ impl Mailbox {
             cert: crate::identity::cert(),
             link: None,
             contact: None,
+            contact_link: false,
             presence: None,
         };
         match self.ask(link, &plain).await? {
@@ -194,6 +195,7 @@ impl Mailbox {
             cert: crate::identity::cert(),
             link: None,
             contact: None,
+            contact_link: false,
             presence: None,
         };
         match self.ask(link, &plain).await? {

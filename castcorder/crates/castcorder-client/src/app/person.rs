@@ -678,6 +678,7 @@ async fn link_this(code: LinkCode, name: String) -> Result<LinkGrant, String> {
                 kind: DeviceKind::Browser,
             }),
             contact: None,
+            contact_link: false,
             presence: None,
         };
         match ask(&code, &plain).await? {

@@ -74,6 +74,7 @@ fn ask(code: &ContactCode, me: &HostKey, cert: Option<DeviceCert>, now: u64) -> 
             code: code.secret_text(),
             name: "Bob".into(),
         }),
+        contact_link: false,
         presence: None,
     }
 }
