@@ -1,0 +1,220 @@
+name: Nightly
+
+# Heavy and cross-platform tests that are too slow or too wide for every pull request
+# (cast-1t7). A failing scheduled run opens a GitHub issue (once per day it fails).
+# Changes to this file run it on their pull request, so it is tested where it changes.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/nightly.yml"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CASTCORDER_CI: 1
+
+jobs:
+  # The #[ignore]d long runs: 200 MB transfer with cuts, crashes and bit flips, and the
+  # two-hour takes (2 GB and 4 GB WAVs) for the aligner and the FLAC converter, in release.
+  heavy:
+    name: heavy
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Ensure toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-heavy
+
+      - name: Transfer, 200 MB
+        working-directory: castcorder
+        run: cargo test --release --locked -p castcorder-transfer -- --ignored --nocapture
+
+      - name: Aligner, two-hour take
+        working-directory: castcorder
+        run: cargo test --release --locked -p castcorder-align --test long -- --ignored --nocapture
+
+      - name: FLAC conversion, two-hour take
+        working-directory: castcorder
+        run: cargo test --release --locked -p castcorder-recorder --test streaming -- --ignored --nocapture
+
+  # Camera toggles and a storage-worker stall against a recording guest (not in CI's browser job).
+  camtoggle:
+    name: camtoggle
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-camtoggle
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install browser system libraries
+        working-directory: castcorder/crates/castcorder-client/browser-test
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install-deps chromium
+
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+
+      - name: Camera toggle stress
+        working-directory: castcorder
+        run: task test:browser:camtoggle
+
+  # The workspace's formatting, clippy and tests on the other desktop platforms.
+  platforms:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-${{ matrix.os }}
+
+      - name: Check (format, clippy, tests)
+        working-directory: castcorder
+        run: task check
+
+  # Tier 3 relay run on a degraded network: Linux tc netem on the loopback adds latency,
+  # jitter and loss under the forced-relay test (coturn in Docker, two relay-only guests).
+  degraded:
+    name: degraded network
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-degraded
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install browser system libraries
+        working-directory: castcorder/crates/castcorder-client/browser-test
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install-deps chromium
+
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+
+      - name: Pull coturn
+        run: docker pull coturn/coturn:4.6
+
+      # Build first, so the slow compile does not run on a lossy loopback.
+      - name: Build the host and the client
+        working-directory: castcorder
+        run: |
+          cargo build --release --locked -p castcorder-host
+          cd crates/castcorder-client && trunk build --release
+
+      - name: Degrade the loopback (40 ms +- 10 ms, 2 % loss)
+        run: |
+          sudo tc qdisc add dev lo root netem delay 40ms 10ms loss 2%
+          tc qdisc show dev lo
+
+      - name: Relay test on the degraded network
+        working-directory: castcorder
+        run: task test:relay
+
+  # A failing scheduled run files an issue pointing at it.
+  report:
+    name: report
+    needs: [heavy, camtoggle, platforms, degraded]
+    if: ${{ failure() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Nightly failed $(date -u +%F)" \
+            --body "The nightly workflow failed: $RUN"
