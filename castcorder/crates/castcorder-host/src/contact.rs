@@ -47,8 +47,8 @@ use castcorder_link::person::{
     verify_revocation,
 };
 use castcorder_link::wire::{
-    AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, PresenceAnswer, b64,
-    from_json, to_json, unb64,
+    AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, OwnSync, PresenceAnswer,
+    Removed, SyncedContact, b64, from_json, to_json, unb64,
 };
 use castcorder_link::{GuestSeal, HostKey};
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,17 @@ pub struct Contact {
     /// Their devices their person revoked (cast-40e.6), by device id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<String>,
+    /// When their name or nickname last changed here (0: when added), ms
+    /// since the Unix epoch: syncing with the person's other installs keeps
+    /// the later change (cast-40e.9).
+    #[serde(default)]
+    pub updated_ms: u64,
+}
+
+impl Contact {
+    fn changed_ms(&self) -> u64 {
+        self.updated_ms.max(self.added_ms)
+    }
 }
 
 /// Keep the revocations in `list` that `c`'s person key signed: record them
@@ -109,6 +120,10 @@ fn learn_revoked(c: &mut Contact, list: &[Revocation]) -> Vec<String> {
 struct Saved {
     #[serde(default)]
     contacts: Vec<Contact>,
+    /// Contacts removed here or on another install of the person, and when
+    /// (cast-40e.9): an older copy elsewhere does not bring them back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<Removed>,
     /// Appear offline: send no presence pings and answer none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     appear_offline: bool,
@@ -504,6 +519,7 @@ impl Contacts {
             .find(|c| c.id == id)
             .ok_or("no such contact")?;
         c.nickname = crate::http::clean_label(nickname);
+        c.updated_ms = crate::wall_ms();
         g.save().map_err(|e| e.to_string())
     }
 
@@ -517,6 +533,11 @@ impl Contacts {
         }
         g.board.forget(id);
         g.invites.forget(id);
+        g.saved.removed.retain(|r| r.person != id);
+        g.saved.removed.push(Removed {
+            person: id.to_string(),
+            removed_ms: crate::wall_ms(),
+        });
         info!(person = %id, "removed a contact");
         g.save().map_err(|e| e.to_string())
     }
@@ -569,29 +590,38 @@ impl Contacts {
             name,
             device,
             revoked: self.persons.revocations(),
+            sync: None,
         }
     }
 
     /// The contact installs to ping at `now_ms` (their key, their person
     /// id), marked as pinged; none while appearing offline.
     pub fn presence_due(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, String)> {
+        let own = self.persons.installs();
+        let me = self.persons.id();
         let mut g = self.lock();
-        if g.saved.appear_offline {
-            return Vec::new();
-        }
         let mut keys = std::collections::HashMap::new();
-        let installs: Vec<(String, String)> = g
-            .saved
-            .contacts
-            .iter()
-            .flat_map(|c| c.devices.iter().map(move |d| (c.id.clone(), d)))
-            .filter_map(|(person, d)| {
-                let key: [u8; 32] = unb64(&d.device)?.try_into().ok()?;
-                let id = device_id(&key);
-                keys.insert(id.clone(), key);
-                Some((id, person))
-            })
-            .collect();
+        let mut installs: Vec<(String, String)> = Vec::new();
+        if !g.saved.appear_offline {
+            installs = g
+                .saved
+                .contacts
+                .iter()
+                .flat_map(|c| c.devices.iter().map(move |d| (c.id.clone(), d)))
+                .filter_map(|(person, d)| {
+                    let key: [u8; 32] = unb64(&d.device)?.try_into().ok()?;
+                    let id = device_id(&key);
+                    keys.insert(id.clone(), key);
+                    Some((id, person))
+                })
+                .collect();
+        }
+        // The person's other app installs, to sync with (cast-40e.9).
+        for key in own {
+            let id = device_id(&key);
+            keys.insert(id.clone(), key);
+            installs.push((id, me.clone()));
+        }
         let due = g.board.due(&installs, now_ms, &self.timing);
         due.into_iter()
             .filter_map(|d| {
@@ -609,6 +639,15 @@ impl Contacts {
         r: Result<PresenceAnswer, String>,
         now_ms: u64,
     ) {
+        if person == self.persons.id() {
+            if let Ok(a) = r {
+                self.persons.learn_own_revoked(&a.revoked);
+                if let Some(sync) = &a.sync {
+                    self.merge(sync);
+                }
+            }
+            return;
+        }
         let mut g = self.lock();
         if !g.saved.contacts.iter().any(|c| c.id == person) {
             return;
@@ -653,6 +692,26 @@ impl Contacts {
         };
         let id = person_id(&person);
         let me = self.me();
+        // Another app install of this person (cast-40e.9): keep it, merge
+        // what it knows, and answer with what this one knows. Appearing
+        // offline is to contacts only.
+        if person == self.persons.public() {
+            self.persons.learn_own_revoked(&ping.revoked);
+            if self.persons.is_revoked(&device_id(&key)) {
+                debug!("presence ping from a revoked install of this person not answered");
+                return None;
+            }
+            self.persons.note_installs([key]);
+            if let Some(sync) = &ping.sync {
+                self.merge(sync);
+            }
+            return Some(PresenceAnswer {
+                name: me.name,
+                device: me.device,
+                revoked: me.revoked,
+                sync: Some(self.snapshot()),
+            });
+        }
         let mut g = self.lock();
         if g.saved.appear_offline {
             return None;
@@ -685,6 +744,7 @@ impl Contacts {
             name: me.name,
             device: me.device,
             revoked: me.revoked,
+            sync: None,
         })
     }
 
@@ -871,6 +931,165 @@ impl Contacts {
         Ok(grant.name.clone())
     }
 
+    /// This install's person id.
+    pub fn own_person(&self) -> String {
+        self.persons.id()
+    }
+
+    /// What this install knows, for the person's other app installs
+    /// (cast-40e.9).
+    pub fn snapshot(&self) -> OwnSync {
+        let installs = self.persons.installs().iter().map(|k| b64(k)).collect();
+        let g = self.lock();
+        OwnSync {
+            contacts: g
+                .saved
+                .contacts
+                .iter()
+                .map(|c| SyncedContact {
+                    id: c.id.clone(),
+                    key: c.key.clone(),
+                    name: c.name.clone(),
+                    nickname: c.nickname.clone(),
+                    devices: c.devices.clone(),
+                    added_ms: c.added_ms,
+                    updated_ms: c.changed_ms(),
+                    revoked: c.revoked.clone(),
+                })
+                .collect(),
+            removed: g.saved.removed.clone(),
+            installs,
+        }
+    }
+
+    /// Merge what another app install of this person knows (cast-40e.9):
+    /// contacts it has that this one does not are added; for one both
+    /// have, its installs are joined and the later change of name and
+    /// nickname wins; a removal wins over a contact not changed since.
+    /// Only contacts whose installs' certificates their key signed.
+    pub fn merge(&self, sync: &OwnSync) {
+        let installs: Vec<[u8; 32]> = sync
+            .installs
+            .iter()
+            .filter_map(|k| unb64(k)?.try_into().ok())
+            .collect();
+        self.persons.note_installs(installs);
+        let mine = self.persons.id();
+        let mut revoked = Vec::new();
+        let mut g = self.lock();
+        let mut changed = false;
+        for r in &sync.removed {
+            let gone = g
+                .saved
+                .contacts
+                .iter()
+                .any(|c| c.id == r.person && c.changed_ms() <= r.removed_ms);
+            if gone {
+                g.saved.contacts.retain(|c| c.id != r.person);
+                g.board.forget(&r.person);
+                g.invites.forget(&r.person);
+                info!(person = %r.person, "a contact removed on another install of this person");
+                changed = true;
+            }
+            match g.saved.removed.iter_mut().find(|m| m.person == r.person) {
+                Some(m) if m.removed_ms >= r.removed_ms => {}
+                Some(m) => {
+                    m.removed_ms = r.removed_ms;
+                    changed = true;
+                }
+                None => {
+                    g.saved.removed.push(r.clone());
+                    changed = true;
+                }
+            }
+        }
+        for s in &sync.contacts {
+            let Some(key) = unb64(&s.key).and_then(|k| <[u8; 32]>::try_from(k).ok()) else {
+                continue;
+            };
+            if person_id(&key) != s.id || s.id == mine {
+                continue;
+            }
+            let at = s.updated_ms.max(s.added_ms);
+            if g.saved
+                .removed
+                .iter()
+                .any(|r| r.person == s.id && r.removed_ms >= at)
+            {
+                continue;
+            }
+            let devices: Vec<DeviceCert> = s
+                .devices
+                .iter()
+                .filter(|d| {
+                    d.kind == DeviceKind::App
+                        && !s.revoked.iter().any(|r| {
+                            unb64(&d.device)
+                                .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                                .is_some_and(|k| &device_id(&k) == r)
+                        })
+                        && unb64(&d.device)
+                            .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                            .is_some_and(|k| verify_cert(d, &k).ok() == Some(key))
+                })
+                .cloned()
+                .collect();
+            match g.saved.contacts.iter_mut().find(|c| c.id == s.id) {
+                None => {
+                    g.saved.contacts.push(Contact {
+                        id: s.id.clone(),
+                        key: s.key.clone(),
+                        name: crate::http::clean_label(&s.name),
+                        nickname: crate::http::clean_label(&s.nickname),
+                        devices,
+                        added_ms: s.added_ms,
+                        revoked: s.revoked.clone(),
+                        updated_ms: at,
+                    });
+                    revoked.extend(s.revoked.iter().cloned());
+                    info!(person = %s.id, "a contact added on another install of this person");
+                    changed = true;
+                }
+                Some(c) => {
+                    for r in &s.revoked {
+                        if !c.revoked.contains(r) {
+                            c.revoked.push(r.clone());
+                            revoked.push(r.clone());
+                            changed = true;
+                        }
+                    }
+                    let gone = c.revoked.clone();
+                    let before = c.devices.len();
+                    c.devices.retain(|d| {
+                        d.device_key()
+                            .is_none_or(|k| !gone.contains(&device_id(&k)))
+                    });
+                    changed |= c.devices.len() != before;
+                    for d in devices {
+                        if !c.devices.iter().any(|e| e.device == d.device) {
+                            c.devices.push(d);
+                            changed = true;
+                        }
+                    }
+                    if at > c.changed_ms() {
+                        c.name = crate::http::clean_label(&s.name);
+                        c.nickname = crate::http::clean_label(&s.nickname);
+                        c.updated_ms = at;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            g.board.sweep();
+            if let Err(e) = g.save() {
+                warn!(error = %e, "could not save the merged contacts");
+            }
+        }
+        drop(g);
+        self.persons.note_revoked(revoked);
+    }
+
     /// Link this install to another person ([`Persons::join`]), unless it has
     /// contacts: they paired with this install's current person, and would
     /// not know the new one.
@@ -902,17 +1121,20 @@ impl Inner {
                 c.name = name;
                 c.devices.retain(|d| d.device != cert.device);
                 c.devices.push(cert.clone());
+                c.updated_ms = now_ms;
             }
             None => self.saved.contacts.push(Contact {
-                id,
+                id: id.clone(),
                 key: b64(&person),
                 name,
                 nickname: String::new(),
                 devices: vec![cert.clone()],
                 added_ms: now_ms,
                 revoked: Vec::new(),
+                updated_ms: now_ms,
             }),
         }
+        self.saved.removed.retain(|r| r.person != id);
     }
 
     #[allow(clippy::too_many_arguments)]

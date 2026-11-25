@@ -338,6 +338,7 @@ fn ping_with(
         name: "Bob".into(),
         device: "Laptop".into(),
         revoked,
+        sync: None,
     };
     // A proof signed `skew` ms before the answering clock's now.
     let signed = now - to.skew.get();
@@ -449,6 +450,7 @@ fn link_as(to: &Install, key: &HostKey, cert: DeviceCert, now: u64) -> Result<Li
         name: "Bob".into(),
         device: "Laptop".into(),
         revoked: Vec::new(),
+        sync: None,
     };
     let mut admitted = None;
     let sdp = "v=0\r\nfake offer";
@@ -496,6 +498,7 @@ fn only_a_contacts_install_gets_a_contact_link_and_never_while_appearing_offline
         name: "Bob".into(),
         device: "Laptop".into(),
         revoked: Vec::new(),
+        sync: None,
     };
     let _ = crate::presence::ping(&me, &a.host.id(), now, &mut |sealed: &[u8]| {
         let (plain, _) = a.host.open_offer(sealed).map_err(|e| e.to_string())?;
@@ -643,4 +646,137 @@ fn a_presence_answer_carries_the_answering_person_s_revocations() {
     assert_eq!(kept.devices.len(), 1);
     assert!(b.persons.is_revoked(&oid));
     assert!(ping_as(&b, &other, cert, now).is_err());
+}
+
+/// A second app install of `a`'s person, linked by `a`.
+fn second_install(a: &Install, n: u8) -> Install {
+    let two = install("Ann2", n);
+    let now = crate::wall_ms();
+    let grant = castcorder_link::wire::LinkGrant {
+        cert: person_key(a).certify(&two.host.id().0, DeviceKind::App, now),
+        person_name: a.persons.name(),
+        person_secret: Some(b64(&person_key(a).secret())),
+        revoked: a.persons.revocations(),
+    };
+    two.persons.adopt(&grant).unwrap();
+    two.persons.note_installs([a.host.id().0]);
+    two
+}
+
+/// `from` (an install of `to`'s person) pings `to` with what it knows,
+/// through the real seal and both sides' real code, and keeps the answer.
+fn own_ping(from: &Install, to: &Install) {
+    let now = crate::wall_ms();
+    let mut me = from.contacts.me();
+    me.sync = Some(from.contacts.snapshot());
+    let r = crate::presence::ping(&me, &to.host.id(), now, &mut |sealed: &[u8]| {
+        let (plain, reply) = to.host.open_offer(sealed).map_err(|e| e.to_string())?;
+        let o: OfferPlain = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        let a = to.contacts.answer_presence(&o, now).ok_or("no answer")?;
+        Ok(reply.seal(to_json(&AnswerPlain::Presence(a)).as_bytes()))
+    });
+    assert!(r.is_ok(), "{r:?}");
+    from.contacts
+        .presence_result(&device_id(&to.host.id().0), &from.persons.id(), r, now);
+}
+
+/// A person's app installs share contacts (cast-40e.9): one learns the
+/// other's, the later nickname wins, a removal travels, and so do the
+/// person's revocations and its other installs.
+#[test]
+fn a_person_s_installs_share_contacts_removals_and_revocations() {
+    let (a, b) = paired(60);
+    let a2 = second_install(&a, 62);
+    assert_eq!(a2.persons.id(), a.persons.id());
+    let bob = b.persons.id();
+    // a2 pings a: both now know each other, and a2 learns Bob.
+    own_ping(&a2, &a);
+    let kept = a2.contacts.get(&bob).expect("Bob learned from a");
+    assert_eq!(kept.devices, a.contacts.get(&bob).unwrap().devices);
+    assert_eq!(a.persons.installs(), vec![a2.host.id().0]);
+    a2.contacts.presence_registered();
+    assert_eq!(
+        a2.contacts.presence_due(crate::wall_ms()).len(),
+        2,
+        "a2 pings a and Bob now"
+    );
+    // The later nickname wins, whichever install sends first.
+    std::thread::sleep(Duration::from_millis(2));
+    a2.contacts.set_nickname(&bob, "Old").unwrap();
+    std::thread::sleep(Duration::from_millis(2));
+    a.contacts.set_nickname(&bob, "Bobby").unwrap();
+    own_ping(&a2, &a);
+    assert_eq!(
+        a.contacts.get(&bob).unwrap().nickname,
+        "Bobby",
+        "the older one lost"
+    );
+    assert_eq!(a2.contacts.get(&bob).unwrap().nickname, "Bobby");
+    // a2 removes Bob; a learns it and Bob stays removed both ways.
+    std::thread::sleep(Duration::from_millis(2));
+    let stale = a.contacts.snapshot();
+    a2.contacts.remove(&bob).unwrap();
+    own_ping(&a2, &a);
+    assert!(a.contacts.get(&bob).is_none(), "the removal travelled");
+    // A copy from before the removal (an install that had not heard yet)
+    // does not bring Bob back.
+    a2.contacts.merge(&stale);
+    a.contacts.merge(&stale);
+    assert!(a2.contacts.get(&bob).is_none(), "not brought back");
+    assert!(a.contacts.get(&bob).is_none(), "not brought back");
+    // A third install linked from a: a2 learns it, and its revocation.
+    let a3 = HostKey::from_secret([63; 32]);
+    a.persons.note_installs([a3.id().0]);
+    own_ping(&a2, &a);
+    assert!(a2.persons.installs().contains(&a3.id().0));
+    a.persons
+        .revoke(&device_id(&a3.id().0), crate::wall_ms())
+        .unwrap();
+    own_ping(&a2, &a);
+    assert!(a2.persons.is_revoked(&device_id(&a3.id().0)));
+    assert!(!a2.persons.installs().contains(&a3.id().0));
+}
+
+/// Only an install of the same person syncs: a contact's ping carrying
+/// contacts adds none, and a synced contact whose key does not match its
+/// id, or whose installs another key certified, is not kept.
+#[test]
+fn only_the_person_s_own_installs_sync_and_only_well_formed_contacts() {
+    let (a, b) = paired(64);
+    let c = install("Cy", 66);
+    let cy_cert = c.persons.cert();
+    let forged = OwnSync {
+        contacts: vec![SyncedContact {
+            id: c.persons.id(),
+            key: b64(&c.persons.public()),
+            name: "Cy".into(),
+            devices: vec![cy_cert.clone()],
+            added_ms: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    // Bob (a contact, not Ann) sends contacts: ignored.
+    let now = crate::wall_ms();
+    let mut me = b.contacts.me();
+    me.sync = Some(forged.clone());
+    let r = crate::presence::ping(&me, &a.host.id(), now, &mut |sealed: &[u8]| {
+        let (plain, reply) = a.host.open_offer(sealed).map_err(|e| e.to_string())?;
+        let o: OfferPlain = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        let ans = a.contacts.answer_presence(&o, now).ok_or("no answer")?;
+        assert!(ans.sync.is_none(), "a contact is not sent Ann's contacts");
+        Ok(reply.seal(to_json(&AnswerPlain::Presence(ans)).as_bytes()))
+    });
+    assert!(r.is_ok());
+    assert!(a.contacts.get(&c.persons.id()).is_none());
+    // A contact whose id is not its key's; one whose install Bob's key
+    // certified: neither kept, nor that install.
+    let mut bad = forged.clone();
+    bad.contacts[0].id = b.persons.id();
+    a.contacts.merge(&bad);
+    assert_eq!(a.contacts.get(&b.persons.id()).unwrap().devices.len(), 1);
+    let mut wrong = forged.clone();
+    wrong.contacts[0].devices = vec![b.persons.cert()];
+    a.contacts.merge(&wrong);
+    assert!(a.contacts.get(&c.persons.id()).unwrap().devices.is_empty());
 }

@@ -233,6 +233,9 @@ pub struct Me {
     pub device: String,
     /// The person's device revocations, sent with each ping (cast-40e.6).
     pub revoked: Vec<castcorder_link::person::Revocation>,
+    /// To another app install of the person only: this one's contacts
+    /// (cast-40e.9).
+    pub sync: Option<castcorder_link::wire::OwnSync>,
 }
 
 /// Ping the contact install `to` once through `exchange`: its answer, or why
@@ -267,6 +270,7 @@ pub fn ping(
         presence: Some(PresencePing {
             device: me.device.clone(),
             revoked: me.revoked.clone(),
+            sync: me.sync.clone(),
         }),
     };
     let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
@@ -320,7 +324,12 @@ pub fn spawn(
                     let spawned = thread::Builder::new().name("presence-ping".into()).spawn(
                         move || {
                             let wait = contacts.timing().wait;
-                            let me = contacts.me();
+                            let mut me = contacts.me();
+                            // Another install of this person: send what
+                            // this one knows (cast-40e.9).
+                            if person == contacts.own_person() {
+                                me.sync = Some(contacts.snapshot());
+                            }
                             let r = ping(&me, &to, crate::wall_ms(), &mut |sealed| {
                                 crate::rendezvous::exchange_within(&base, &to, sealed, wait)
                             });

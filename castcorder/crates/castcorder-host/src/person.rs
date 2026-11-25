@@ -79,6 +79,11 @@ struct Saved {
     /// This person's device revocations (cast-40e.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     revoked: Vec<Revocation>,
+    /// The person's other app installs this one knows, by host key
+    /// (base64url): those linked from here, the one this install was
+    /// linked by, and those they told about (cast-40e.9).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    installs: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -223,6 +228,7 @@ impl Persons {
                     cert: person.certify(&host_pub, DeviceKind::App, now_ms),
                     devices: Vec::new(),
                     revoked: Vec::new(),
+                    installs: Vec::new(),
                 };
                 write_atomic(&path, &serde_json::to_string_pretty(&saved)?)?;
                 info!(person = %person.id(), "made a person key");
@@ -294,6 +300,67 @@ impl Persons {
         (!self.is_revoked(&device_id(device?))).then_some(p)
     }
 
+    /// The person's other app installs this one knows (cast-40e.9), not
+    /// revoked.
+    pub fn installs(&self) -> Vec<[u8; 32]> {
+        let g = self.lock();
+        g.saved
+            .installs
+            .iter()
+            .filter_map(|k| unb64(k)?.try_into().ok())
+            .filter(|k: &[u8; 32]| !g.own_revoked(&device_id(k)))
+            .collect()
+    }
+
+    /// Keep `keys` as more of the person's app installs (cast-40e.9): never
+    /// this one, never a revoked one.
+    pub fn note_installs(&self, keys: impl IntoIterator<Item = [u8; 32]>) {
+        let mut g = self.lock();
+        let me = g.host.id().0;
+        let mut changed = false;
+        for k in keys {
+            let k64 = b64(&k);
+            if k == me || g.own_revoked(&device_id(&k)) || g.saved.installs.contains(&k64) {
+                continue;
+            }
+            g.saved.installs.push(k64);
+            changed = true;
+        }
+        if changed && let Err(e) = g.save() {
+            warn!(error = %e, "could not save the person's installs");
+        }
+    }
+
+    /// Keep the revocations in `list` this person's key signed, which
+    /// another install of the person made (cast-40e.9): the device ids
+    /// newly revoked here.
+    pub fn learn_own_revoked(&self, list: &[Revocation]) -> Vec<String> {
+        let mut g = self.lock();
+        let me = g.person.public();
+        let mut new = Vec::new();
+        for r in list {
+            if verify_revocation(r).ok() != Some(me) || g.own_revoked(&r.device) {
+                continue;
+            }
+            g.saved.devices.retain(|d| d.id != r.device);
+            g.saved.revoked.push(r.clone());
+            new.push(r.device.clone());
+        }
+        if !new.is_empty() {
+            let revoked = new.clone();
+            g.saved.installs.retain(|k| {
+                unb64(k)
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .is_none_or(|b| !revoked.contains(&device_id(&b)))
+            });
+            info!(devices = ?new, "learned revocations from another install of the person");
+            if let Err(e) = g.save() {
+                warn!(error = %e, "could not save the learned revocations");
+            }
+        }
+        new
+    }
+
     /// Revoke one of this person's devices (cast-40e.6), by device id: it is
     /// no longer the owner's anywhere this install decides, it leaves the
     /// devices linked from here, and the revocation goes to contacts with
@@ -307,6 +374,11 @@ impl Persons {
             return Err("not a device id".into());
         }
         g.saved.devices.retain(|d| d.id != device);
+        g.saved.installs.retain(|k| {
+            unb64(k)
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .is_none_or(|b| device_id(&b) != device)
+        });
         if !g.own_revoked(device) {
             let r = g.person.revoke(device, now_ms);
             g.saved.revoked.push(r);
@@ -513,6 +585,7 @@ impl Persons {
             .filter(|r| verify_revocation(r).ok() == Some(person.public()))
             .cloned()
             .collect();
+        g.saved.installs.clear();
         g.person = person;
         g.codes.clear();
         g.save().map_err(|e| e.to_string())
@@ -552,7 +625,8 @@ impl Persons {
                     &mut exchange,
                     Instant::now() + WAIT,
                 )
-                .and_then(|grant| me.adopt(&grant));
+                .and_then(|grant| me.adopt(&grant))
+                .map(|()| me.note_installs([parsed.host.0]));
                 let state = match r {
                     Ok(()) => Joining::Linked,
                     Err(e) => {
@@ -640,6 +714,9 @@ impl Inner {
                     kind: claim.kind,
                     linked_ms: now_ms,
                 });
+                if claim.kind == DeviceKind::App && !self.saved.installs.contains(&b64(&key)) {
+                    self.saved.installs.push(b64(&key));
+                }
                 if let Err(e) = self.save() {
                     warn!(error = %e, "could not save the linked device");
                 }
