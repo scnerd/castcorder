@@ -397,7 +397,7 @@ impl Mailbox {
             return Err(why);
         }
         if ask == RelayAsk::HelloReused {
-            debug!(conn, host = %host.short(), "relay credentials reused");
+            info!(conn, host = %host.short(), "relay credentials reused");
             return Ok(());
         }
         if !self.mint_allowed(host, now) {
