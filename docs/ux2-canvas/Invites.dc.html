@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Invites and contact requests</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:#15181d;background:#e9ebef}
+a{color:#1d4ed8}a:hover{color:#1e3a8a}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 14px;border-radius:9px;border:1px solid #cfd4dc;background:#fff;color:#15181d;font:600 13px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+.btn.primary{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.btn.done{background:#f0fdf4;border-color:#bbf7d0;color:#166534}
+.muted{color:#555c66}
+.cap{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:#555c66}
+.av{position:relative;width:36px;height:36px;border-radius:50%;background:#3a4150;color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+.pres{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;border:2px solid #fff}
+.panel{background:#fff;border:1px solid #dde1e7;border-radius:14px;box-shadow:0 12px 32px rgba(15,17,21,.12)}
+</style>
+</helmet>
+<div style="width: 900px; height: 844px; box-sizing: border-box; padding: 40px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; align-content: start">
+
+  <section aria-labelledby="c1" style="display: flex; flex-direction: column; gap: 12px">
+    <div id="c1" class="cap">1 &middot; Invite arrives (tray / desktop)</div>
+    <div class="panel" role="alert" style="padding: 16px; display: flex; flex-direction: column; gap: 14px">
+      <div style="display: flex; gap: 12px; align-items: center">
+        <div class="av">AM<span class="pres" style="background: #16a34a"></span></div>
+        <div style="min-width: 0"><div style="font-weight: 700; font-size: 14px">Alex invites you to Book club</div><div class="muted" style="font-size: 13px">Alex and 2 others are in the call</div></div>
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end"><button class="btn" type="button">Dismiss</button><button class="btn primary" type="button">Join</button></div>
+    </div>
+    <div class="muted" style="font-size: 13px; line-height: 1.5">Join opens the lobby for that room, devices already picked. A missed invite stays on the contact as Join their call while the call is live.</div>
+  </section>
+
+  <section aria-labelledby="c2" style="display: flex; flex-direction: column; gap: 12px">
+    <div id="c2" class="cap">2 &middot; Someone in the call adds you</div>
+    <div class="panel" role="alert" style="padding: 16px; display: flex; flex-direction: column; gap: 14px">
+      <div style="display: flex; gap: 12px; align-items: center">
+        <div class="av">SR</div>
+        <div style="min-width: 0"><div style="font-weight: 700; font-size: 14px">Sam wants to add you as a contact</div><div class="muted" style="font-size: 13px">You will see when each other is online and can invite each other to rooms.</div></div>
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end"><button class="btn" type="button">Not now</button><button class="btn primary" type="button">Accept</button></div>
+    </div>
+    <div class="muted" style="font-size: 13px; line-height: 1.5">Shown as a toast in the call, below the top bar, never over the REC pill. Browser guests without the app see: Get the app to keep in touch.</div>
+  </section>
+
+  <section aria-labelledby="c3" style="grid-column: 1 / -1; display: flex; flex-direction: column; gap: 12px">
+    <div id="c3" class="cap">3 &middot; Invite from a call (top bar Invite) or from a room's menu</div>
+    <div class="panel" role="dialog" aria-label="Invite to Weekly show" style="padding: 20px; display: flex; flex-direction: column; gap: 16px; max-width: 520px">
+      <div style="display: flex; align-items: center; justify-content: space-between"><span style="font-weight: 700; font-size: 16px">Invite to Weekly show</span><button class="btn" type="button" aria-label="Close" style="width: 32px; height: 32px; padding: 0; border-color: transparent"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+      <div style="display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-radius: 10px; background: #f3f4f6">
+        <code style="flex: 1; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">castcorder.app/v/1/#c.k3f9...</code>
+        <button class="btn" type="button">Copy link</button>
+      </div>
+      <div class="cap" style="font-size: 11px">Contacts</div>
+      <div style="display: flex; flex-direction: column; gap: 4px">
+        <div style="display: flex; align-items: center; gap: 12px; padding: 6px 0"><div class="av">AM<span class="pres" style="background: #16a34a"></span></div><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Alex Morgan</div><div class="muted" style="font-size: 12px">Online</div></div><button class="btn done" type="button" disabled>Invited</button></div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 6px 0"><div class="av" style="background: #7a8494">CP<span class="pres" style="background: #c3c8d0"></span></div><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Chris Park</div><div class="muted" style="font-size: 12px">Offline &middot; gets it when back online</div></div><button class="btn" type="button">Invite</button></div>
+        <div style="display: flex; align-items: center; gap: 12px; padding: 6px 0"><div class="av" style="background: #7a8494">MO<span class="pres" style="background: #c3c8d0"></span></div><div style="flex: 1"><div style="font-weight: 600; font-size: 14px">Mo (co-host)</div><div class="muted" style="font-size: 12px">Offline</div></div><button class="btn" type="button">Invite</button></div>
+      </div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":900,"height":844}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

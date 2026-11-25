@@ -18,6 +18,12 @@ pub fn without_param(search: &str, key: &str) -> String {
     }
 }
 
+/// A remote tile whose tracks have all ended (and which has at least one) is
+/// orphaned: its owner is gone. `live` holds one flag per track in the tile.
+pub fn tile_is_orphaned(live: &[bool]) -> bool {
+    !live.is_empty() && live.iter().all(|l| !l)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -38,5 +44,14 @@ mod tests {
             without_param("?recall=1&call2=2", "call"),
             "?recall=1&call2=2"
         );
+    }
+
+    #[test]
+    fn a_tile_goes_only_when_every_track_has_ended() {
+        assert!(tile_is_orphaned(&[false]));
+        assert!(tile_is_orphaned(&[false, false]));
+        assert!(!tile_is_orphaned(&[false, true]), "a replacement is live");
+        assert!(!tile_is_orphaned(&[true]));
+        assert!(!tile_is_orphaned(&[]), "no track yet: leave it");
     }
 }

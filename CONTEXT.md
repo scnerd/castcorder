@@ -41,6 +41,10 @@ _Avoid_: Contact link, invite, friend code
 A device that joined a room while a producer was present, or a device of a person the room trusts. Only trusted devices may enter a locked room or be granted the producer role, and a trusted device is told a room's current call link, so it can rejoin from its list of rooms after the link is regenerated.
 _Avoid_: Paired device, known device
 
+**Trusted Person**:
+A contact the room's owner has added to a room, when creating it or later. Every device of that person is trusted in the room, sees it in its list of rooms with live status, and is told its call link; the owner may also make the person a producer there. Trusting is lasting room membership, unlike an invite.
+_Avoid_: Regular, member, room contact
+
 **App Guest**:
 A guest who joins using the desktop app.
 

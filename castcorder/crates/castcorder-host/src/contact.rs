@@ -136,6 +136,18 @@ pub enum Adding {
     Failed(String),
 }
 
+/// The other end of an admitted contact link: one of a contact's app
+/// installs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkPeer {
+    /// The install's device id (its key).
+    pub device: String,
+    /// Its person's id.
+    pub person: String,
+    /// The person's name, as the offer gave it.
+    pub name: String,
+}
+
 /// One contact as the home shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ContactView {
@@ -488,6 +500,73 @@ impl Contacts {
         })
     }
 
+    /// Admit a contact link offer (an opened offer with `contact_link` set,
+    /// its proof signing the SDP): only from an app install of a current
+    /// contact's person, and only while not appearing offline; `None` means
+    /// no answer at all, as for a presence ping. The asking install is
+    /// online; one not known yet is kept as the contact's.
+    pub fn answer_link(&self, o: &OfferPlain, now_ms: u64) -> Option<LinkPeer> {
+        if !o.contact_link {
+            return None;
+        }
+        let (key, person) = match crate::presence::verify_ping(o, &self.host.id().encode(), now_ms)
+        {
+            Ok(k) => k,
+            Err(why) => {
+                debug!(why = %why, "contact link not answered");
+                return None;
+            }
+        };
+        let id = person_id(&person);
+        let mut g = self.lock();
+        if g.saved.appear_offline {
+            debug!(person = %id, "contact link not answered: appearing offline");
+            return None;
+        }
+        let Some(c) = g.saved.contacts.iter_mut().find(|c| c.id == id) else {
+            debug!(person = %id, "contact link not answered: not a contact");
+            return None;
+        };
+        let cert = o.cert.clone()?;
+        if !c.devices.iter().any(|d| d.device == cert.device) {
+            c.devices.push(cert);
+            info!(person = %id, device = %device_id(&key), "learned another install of a contact");
+            if let Err(e) = g.save() {
+                warn!(error = %e, "could not save the contact's new install");
+            }
+        }
+        let device = device_id(&key);
+        g.board.heard(&device, &id, "", now_ms);
+        Some(LinkPeer {
+            device,
+            person: id,
+            name: crate::http::clean_name(&o.name),
+        })
+    }
+
+    /// The installs of contact `person` shown online at `now_ms` (their
+    /// keys and device names): where a contact link to them can go. None
+    /// while appearing offline (they would not answer us either).
+    pub fn online_installs(
+        &self,
+        person: &str,
+        now_ms: u64,
+    ) -> Vec<(castcorder_link::HostId, String)> {
+        let g = self.lock();
+        if g.saved.appear_offline {
+            return Vec::new();
+        }
+        let Some(c) = g.saved.contacts.iter().find(|c| c.id == person) else {
+            return Vec::new();
+        };
+        c.devices
+            .iter()
+            .filter_map(|d| unb64(&d.device)?.try_into().ok())
+            .filter(|k: &[u8; 32]| g.board.is_online(&device_id(k), now_ms, &self.timing))
+            .map(|k| (castcorder_link::HostId(k), g.board.name(&device_id(&k))))
+            .collect()
+    }
+
     /// Open a sealed contact request (`POST /contact`) and seal the answer;
     /// `None` if it cannot be opened (nothing can be sealed back either).
     pub fn answer_sealed(&self, sealed: &str, now_ms: u64) -> Option<String> {
@@ -738,6 +817,7 @@ pub fn request_contact(
                 code: code.secret_text(),
                 name: name.to_string(),
             }),
+            contact_link: false,
             presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;

@@ -1,0 +1,25 @@
+{"v":3,"createdOnFiles":{"v":1,"at":"2026-11-24T12:00:00Z"},"title":"Castcorder UX 2: home, call, contacts","launch":{"view":"canvas"},"pages":[],
+"boards":{
+"Main.dc.html":{"x":0,"y":0,"w":1280,"h":860,"title":"Home - Rooms (desktop app)","expand":"fill"},
+"Contacts.dc.html":{"x":1360,"y":0,"w":1280,"h":860,"title":"Home - Contacts (cast-40e end state)","expand":"fill"},
+"Settings.dc.html":{"x":2720,"y":0,"w":1280,"h":1180,"title":"Settings","expand":"fill"},
+"Lobby.dc.html":{"x":0,"y":1600,"w":1280,"h":800,"title":"Lobby (browser guest)","expand":"fill"},
+"Left.dc.html":{"x":1360,"y":1600,"w":1280,"h":800,"title":"After Leave","expand":"fill"},
+"Call.dc.html":{"x":0,"y":2820,"w":1280,"h":800,"title":"In call - producer","expand":"fill"},
+"CallPhone.dc.html":{"x":1360,"y":2820,"w":390,"h":844,"title":"In call - phone"},
+"Invites.dc.html":{"x":1830,"y":2820,"w":900,"h":844,"title":"Invites and contact requests"},
+"RoomPeople.dc.html":{"x":0,"y":4084,"w":1280,"h":800,"title":"New room and room people (cast-40e.11)"}
+},
+"order":["Main.dc.html","Contacts.dc.html","Settings.dc.html","Lobby.dc.html","Left.dc.html","Call.dc.html","CallPhone.dc.html","Invites.dc.html","RoomPeople.dc.html"],
+"notes":{
+"t1":{"x":0,"y":-300,"text":"Desktop app: one home, three places","kind":"title1","maxW":4000},
+"t2":{"x":0,"y":1300,"text":"Joining and leaving","kind":"title1","maxW":2640},
+"t3":{"x":0,"y":2520,"text":"In the call, and contacts reaching in","kind":"title1","maxW":2730},
+"t4":{"x":0,"y":3784,"text":"A room's people","kind":"title1","maxW":1280},
+"s1":{"x":4080,"y":0,"w":380,"fill":"blue","text":"IA (cast-d2o)\n\nHome gets a left nav: Rooms, Contacts, Settings. Account/person stuff leaves the rooms list and moves to Settings > You and your devices.\n\nRooms: one primary action per room (Join), link copy as an icon, everything else in a ... menu. Past calls fold under a disclosure. Rooms you joined on other hosts sit below your own, with live status.\n\nTheme moves into Settings > Appearance (and the in-call ... menu) as a standard segmented control."},
+"s2":{"x":4080,"y":560,"w":380,"fill":"green","text":"Contacts epic finished (cast-40e)\n\n.2 pairing: Add contact (code) + requests inbox\n.3 presence: dot + 'In a call' / 'Last seen'\n.4 contact link: invisible plumbing; surfaces only as 'Files waiting' on a contact\n.5 invites: Invite button here and in call; tray toast\n.6 revocation: Settings > Your devices > Remove\n.7 auto-link: no UI at all (call window just is you)\n.9 sync contacts: no UI; same list on every install\n.10 add from call: People row menu + incoming prompt\n.11 room trust: a room's People (New room step + Room settings > People)"},
+"s3":{"x":2720,"y":1600,"w":420,"fill":"orange","text":"Lobby / leave (walkthrough 3, 6, 9)\n\nCamera preview and a live mic meter before joining. Password field only when the room has one. Empty name is required, never GuestE048.\n\nLeave gets a real 'You left' moment: delivery progress up front, Rejoin and Back to your calls. No more landing in the waiting room."},
+"s4":{"x":2810,"y":2820,"w":420,"fill":"orange","text":"Call (walkthrough 1, 4, 5, 7)\n\nTop bar is one row and never reflows when a take starts: the REC pill has a fixed slot.\n\nPeople panel speaks plainly: Host / Producer / Guest chips, icons for recording, space left and connection. Developer detail (guest #, dBFS, LAN only, take state) goes under Connection details.\n\nRoom settings collapsed; sync shows as progress bars.\n\nPhone: labelled dock, Leave always visible, panels open as sheets that never cover the REC pill."},
+"s5":{"x":1360,"y":4084,"w":420,"fill":"green","text":"A room's people = trust, not an invite\n\nContacts added to a room (when creating it, or later from the room's ... > Room settings > People) are trusted persons of that room (room.json persons, cast-40e.11): every device of theirs gets in even when the room is locked, sees the room in its list with live status, and is told the call link.\n\nOptional per person: Producer.\n\nInviting to a live call stays a separate one-off action (Invite)."}
+},
+"designSystems":[]}

@@ -13,6 +13,7 @@
 mod args;
 mod call;
 pub mod contact;
+pub mod contact_link;
 mod http;
 mod local;
 #[cfg(feature = "native-capture")]
@@ -318,6 +319,7 @@ pub struct Running {
     native: Arc<participant::NativeCtl>,
     persons: person::Persons,
     contacts: contact::Contacts,
+    contact_links: Option<contact_link::Links>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -371,6 +373,16 @@ impl Running {
     pub fn contacts_looked(&self) -> contact::View {
         self.contacts.look(wall_ms());
         self.contacts.view(wall_ms())
+    }
+
+    /// The rooms contact `person` shares with this install, asked over
+    /// contact links to each of their installs shown online.
+    pub fn shared_rooms(&self, person: &str) -> Result<contact_link::SharedView, String> {
+        let links = self
+            .contact_links
+            .as_ref()
+            .ok_or("contact links need a rendezvous")?;
+        Ok(links.shared_rooms(&self.contacts, person))
     }
 
     /// Appear offline to contacts (or stop): no presence pings out, none
@@ -868,6 +880,18 @@ pub fn start(
     .map(|ip| format!("https://{ip}:{https_port}/"))
     .collect();
 
+    // Contact links go through the same rendezvous as presence pings.
+    let contact_links = args.rendezvous.as_ref().map(|base| {
+        let (links, handle) = contact_link::spawn(
+            contacts.clone(),
+            base.clone(),
+            args.bind,
+            advertise_ips.clone(),
+            stop.clone(),
+        );
+        threads.push(handle);
+        links
+    });
     let app = Arc::new(http::App {
         tx: Mutex::new(tx),
         dist: args.dist.clone(),
@@ -878,6 +902,7 @@ pub fn start(
         lan_links: links.clone(),
         persons: persons.clone(),
         contacts: contacts.clone(),
+        contact_links: contact_links.clone(),
     });
     threads.push(http::serve(
         https,
@@ -927,6 +952,7 @@ pub fn start(
         native,
         persons,
         contacts,
+        contact_links,
         stop,
         threads,
     })

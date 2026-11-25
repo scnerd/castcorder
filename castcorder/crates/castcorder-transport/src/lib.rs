@@ -129,6 +129,7 @@ use tracing::{debug, info, info_span, trace, warn};
 
 mod alloc;
 mod channel;
+pub mod dial;
 mod guest;
 mod relay;
 pub mod signal;

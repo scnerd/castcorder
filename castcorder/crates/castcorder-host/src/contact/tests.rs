@@ -74,6 +74,7 @@ fn ask(code: &ContactCode, me: &HostKey, cert: Option<DeviceCert>, now: u64) -> 
             code: code.secret_text(),
             name: "Bob".into(),
         }),
+        contact_link: false,
         presence: None,
     }
 }
@@ -424,4 +425,72 @@ fn another_install_of_a_contacts_person_is_answered_and_kept() {
     // Pings go to both of his installs now.
     a.contacts.presence_registered();
     assert_eq!(a.contacts.presence_due(now).len(), 2);
+}
+
+/// `key` offers a contact link to `to` through the real seal and `to`'s
+/// real admission code (as the rendezvous thread does, minus the host
+/// thread): the admitted peer, or `Err` for no answer at all.
+fn link_as(to: &Install, key: &HostKey, cert: DeviceCert, now: u64) -> Result<LinkPeer, String> {
+    let me = crate::presence::Me {
+        key: HostKey::from_secret(key.secret()),
+        cert,
+        name: "Bob".into(),
+        device: "Laptop".into(),
+    };
+    let mut admitted = None;
+    let sdp = "v=0\r\nfake offer";
+    crate::contact_link::offer(&me, &to.host.id(), sdp, now, &mut |sealed: &[u8]| {
+        let (plain, reply) = to.host.open_offer(sealed).map_err(|e| e.to_string())?;
+        let o: OfferPlain = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        assert_eq!(o.sdp, sdp, "the offer carries the SDP its proof signs");
+        let peer = to.contacts.answer_link(&o, now).ok_or("no answer")?;
+        admitted = Some(peer);
+        Ok(reply.seal(to_json(&AnswerPlain::Sdp("answer".into())).as_bytes()))
+    })?;
+    admitted.ok_or_else(|| "no answer".into())
+}
+
+#[test]
+fn only_a_contacts_install_gets_a_contact_link_and_never_while_appearing_offline() {
+    let (a, b) = paired(40);
+    let c = install("Cy", 42);
+    let now = crate::wall_ms();
+    let peer = link_as(&a, &b.host, b.persons.cert(), now).unwrap();
+    assert_eq!(peer.person, b.persons.id());
+    assert_eq!(peer.device, device_id(&b.host.id().0));
+    assert_eq!(peer.name, "Bob");
+    // The offer is evidence: Bob's install shows online, and Ann would
+    // open a link of her own to it.
+    let online = a.contacts.online_installs(&b.persons.id(), now);
+    assert_eq!(online.len(), 1);
+    assert_eq!(online[0].0, b.host.id());
+    // A stranger; a contact's key with another person's certificate.
+    assert!(link_as(&a, &c.host, c.persons.cert(), now).is_err());
+    assert!(link_as(&a, &b.host, c.persons.cert(), now).is_err());
+    // A browser profile of Bob's person is not an app install.
+    let browser = HostKey::from_secret([43; 32]);
+    let bcert = person_key(&b).certify(&browser.id().0, DeviceKind::Browser, now);
+    assert!(link_as(&a, &browser, bcert, now).is_err());
+    // Appearing offline: no answer, and no install of Bob's to ask.
+    a.contacts.set_appear_offline(true).unwrap();
+    assert!(link_as(&a, &b.host, b.persons.cert(), now).is_err());
+    assert!(a.contacts.online_installs(&b.persons.id(), now).is_empty());
+    a.contacts.set_appear_offline(false).unwrap();
+    // A presence ping is not a contact link offer.
+    let me = crate::presence::Me {
+        key: HostKey::from_secret(b.host.secret()),
+        cert: b.persons.cert(),
+        name: "Bob".into(),
+        device: "Laptop".into(),
+    };
+    let _ = crate::presence::ping(&me, &a.host.id(), now, &mut |sealed: &[u8]| {
+        let (plain, _) = a.host.open_offer(sealed).map_err(|e| e.to_string())?;
+        let o: OfferPlain = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        assert!(a.contacts.answer_link(&o, now).is_none());
+        Err("done".into())
+    });
+    // Removed: no answer.
+    a.contacts.remove(&b.persons.id()).unwrap();
+    assert!(link_as(&a, &b.host, b.persons.cert(), now).is_err());
+    assert!(a.contacts.online_installs(&b.persons.id(), now).is_empty());
 }
