@@ -332,17 +332,42 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .dev-row .small { flex: 1; }
 .dev-row.warn { border: 1px solid var(--warn-line); background: var(--warn-bg); }
 
+/* Phone-only dock items (cast-n56.7). */
+.dock-item.phone-only { display: none; }
+.more-sheet { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
+.more-sheet .btn { justify-content: flex-start; width: 100%; padding-left: 10px; color: var(--text); }
 @media (max-width: 760px) {
-  .stage { grid-template-columns: minmax(0, 1fr); }
-  /* The end side holds Leave call: a call must always be leavable (cast-abe). */
-  .dock-label, .dock-side:not(.end) { display: none; }
+  /* Stacked tiles; with anyone else in, the own tile is a small inset. */
+  .stage { grid-template-columns: minmax(0, 1fr); position: relative; }
+  .stage:has(#remote .tile) > .tile:first-child { position: absolute; right: 12px; bottom: 12px; width: 96px;
+    min-height: 0; height: 128px; z-index: 4; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4); }
+  .stage:has(#remote .tile) > .tile:first-child .tile-name,
+  .stage:has(#remote .tile) > .tile:first-child .tile-track,
+  .stage:has(#remote .tile) > .tile:first-child .tile-note,
+  .stage:has(#remote .tile) > .tile:first-child .self-hidden-note { display: none; }
+  .stage:has(#remote .tile) > .tile:first-child .tile-level { right: 4px; bottom: 4px; padding: 0 4px; }
+  .stage:has(#remote .tile) > .tile:first-child .tile-avatar::before { width: 48px; height: 48px; }
+  .stage:has(#remote .tile) > .tile:first-child .tile-avatar span { font-size: 18px; }
+  /* A labelled dock of five: Mute, Camera, People, More, Leave (cast-abe: always leavable). */
+  .dock { position: relative; z-index: 11; padding: 8px; justify-content: center; }
+  .dock-side:not(.end), .dock-sep { display: none; }
+  .dock-item.phone-only { display: flex; }
+  .dock-item.desk-only { display: contents; }
+  .dock-item.desk-only > .dock-btn, .dock-item.desk-only > .dock-label { display: none; }
+  .dock-center { gap: 6px; }
+  .dock-btn { width: 56px; height: 44px; }
+  .take-btn + .dock-label { display: none; }
   .dock-side.end { width: auto; }
-  /* Above the full-screen side panel (open by default for producers). */
-  .dock { position: relative; z-index: 11; }
-  .side { position: fixed; inset: 0; width: auto; z-index: 10; }
-  .topbar { grid-template-columns: minmax(0, 1fr) auto; }
-  .topbar .right { grid-column: 1 / -1; justify-content: flex-start; }
+  #leave { flex-direction: column; min-height: 0; height: auto; padding: 4px 8px; gap: 2px; font-size: 12px;
+    border-color: var(--rec); color: var(--rec-text); }
+  /* One-row header: room and REC pill; the panel buttons move to the dock. */
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; position: relative; z-index: 12; height: 52px;
+    box-sizing: border-box; padding: 6px 12px; }
+  .topbar .right, .topbar .role-chip { display: none; }
   .rec-slot { min-width: 0; }
+  /* Panels open as sheets below the header, so they never cover the REC pill. */
+  .side { position: fixed; top: 52px; left: 0; right: 0; bottom: 0; width: auto; z-index: 10;
+    border-left: 0; border-top: 1px solid var(--border); }
   /* The Devices dialog fits the viewport, not its dock button (cast-lg7). */
   .dialog { position: fixed; left: 12px; right: 12px; bottom: 84px; transform: none; width: auto;
     max-width: none; box-sizing: border-box; }
