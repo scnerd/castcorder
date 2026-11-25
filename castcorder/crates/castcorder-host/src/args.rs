@@ -10,7 +10,7 @@ use crate::Config;
 pub const USAGE: &str = "--dist DIR [--library DIR] [--room NAME] [--idle-gap MINUTES] [--bind IP] \
 [--port N] [--http-port N] [--udp-port N] [--advertise IP]... [--rendezvous URL|off] [--relay-only] [--bandwidth-cap KBPS] \
 [--participate [DEVICE]] [--name NAME] [--keep-wav true|false] [--align resample|offset-only|off] [--aligned-format flac|wav] [--open] \
-[--record-video true|false]";
+[--record-video true|false] [--transcribe MODEL|off]";
 
 impl Config {
     /// Apply the host flags in `args` (see [`USAGE`]) to this config, in
@@ -107,6 +107,11 @@ impl Config {
                     });
                 }
                 "--keep-wav" => a.keep_wav = flag_bool(value()?, "--keep-wav")?,
+                "--transcribe" => {
+                    let v = value()?;
+                    a.transcribe =
+                        (v != "off").then(|| crate::transcript::Engine::Whisper(v.into()));
+                }
                 "--aligned-format" => {
                     let format = match value()?.as_str() {
                         "flac" => castcorder_align::OutputFormat::Flac,

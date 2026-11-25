@@ -589,6 +589,27 @@ pub enum Event {
         /// Their install's contact code, made for this participant's person.
         code: String,
     },
+    /// Lines of the call's live transcript (cast-7hm; appended): on joining,
+    /// every line of the open call so far; then each new line as it is
+    /// heard. Lines come in the order they were transcribed, which may
+    /// differ from the order they were spoken (`host_us` says that).
+    Transcript(Vec<TranscriptLine>),
+}
+
+/// One line of the live transcript: what one participant said in one
+/// utterance, while a take recorded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptLine {
+    /// Who said it.
+    pub participant: ParticipantId,
+    /// Their display name then.
+    pub name: String,
+    /// The take it was said in.
+    pub take: TakeId,
+    /// When they started saying it, on the host timeline (microseconds).
+    pub host_us: i64,
+    /// What was said.
+    pub text: String,
 }
 
 /// A call of a room on a host.
@@ -927,6 +948,13 @@ mod tests {
                 name: "Bea Smith".into(),
                 code: "contact.h.s".into(),
             }),
+            CoreMessage::Event(Event::Transcript(vec![TranscriptLine {
+                participant: ParticipantId(2),
+                name: "Bea Smith".into(),
+                take: TakeId(3),
+                host_us: 12_345_678,
+                text: "Welcome back to the show.".into(),
+            }])),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,

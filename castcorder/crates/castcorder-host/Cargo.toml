@@ -19,6 +19,11 @@ castcorder-port-clock.workspace = true
 castcorder-port-disk.workspace = true
 castcorder-port-net.workspace = true
 castcorder-protocol.workspace = true
+castcorder-port-transcribe.workspace = true
+castcorder-transcribe = { path = "../castcorder-transcribe", optional = true }
+# The live transcript decodes each participant's Opus (libopus, built from
+# source when the system has none).
+opus = "0.4"
 castcorder-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -58,3 +63,6 @@ native-capture = ["dep:castcorder-capture-gst"]
 # src/lib.rs) unless --rendezvous says otherwise. The release builds use it;
 # local and test builds leave it off.
 project-rendezvous = []
+# The live transcript with whisper.cpp (cast-7hm). Without it, --transcribe
+# with a model reports that this build cannot transcribe.
+whisper = ["dep:castcorder-transcribe"]

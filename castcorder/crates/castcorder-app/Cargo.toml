@@ -64,6 +64,9 @@ castcorder-transfer.workspace = true
 castcorder-port-clock.workspace = true
 castcorder-port-net.workspace = true
 castcorder-transport.workspace = true
+# The transcript test speaks the simulation's tone code as Opus.
+castcorder-port-transcribe.workspace = true
+opus = "0.4"
 # The presence test reaches contacts through the real Rust rendezvous.
 castcorder-rendezvous = { path = "../castcorder-rendezvous" }
 tokio = { version = "1", features = ["rt-multi-thread"] }

@@ -809,10 +809,12 @@ dependencies = [
  "castcorder-port-clock",
  "castcorder-port-disk",
  "castcorder-port-net",
+ "castcorder-port-transcribe",
  "castcorder-protocol",
  "castcorder-rendezvous",
  "castcorder-transfer",
  "castcorder-transport",
+ "opus",
  "serde_json",
  "str0m",
  "tauri",
@@ -886,11 +888,14 @@ dependencies = [
  "castcorder-port-clock",
  "castcorder-port-disk",
  "castcorder-port-net",
+ "castcorder-port-transcribe",
  "castcorder-protocol",
  "castcorder-recorder",
+ "castcorder-transcribe",
  "castcorder-transport",
  "ctrlc",
  "getrandom 0.4.3",
+ "opus",
  "rcgen",
  "rustls",
  "serde",
@@ -4550,6 +4555,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aca39cf52b03268400c16eeb9b56382ea3c3353409309b63f5c8f0b1faf42754"
 dependencies = [
  "pastey",
+]
+
+[[package]]
+name = "opus"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
+dependencies = [
+ "opusic-sys",
+]
+
+[[package]]
+name = "opusic-sys"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "986d749e9dc12035f11bf3ecc83a2a696ff7534d4143be9469a4a0faa25b9fd1"
+dependencies = [
+ "cmake",
 ]
 
 [[package]]
