@@ -255,6 +255,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         people: RwSignal::new(Default::default()),
         past: RwSignal::new(Default::default()),
         invite: RwSignal::new(Default::default()),
+        replace: RwSignal::new(Default::default()),
     };
     let refresh = move || {
         spawn_local(async move {
@@ -566,6 +567,8 @@ struct Opened {
     people: RwSignal<std::collections::BTreeSet<String>>,
     past: RwSignal<std::collections::BTreeSet<String>>,
     invite: RwSignal<std::collections::BTreeSet<String>>,
+    /// Rooms asking "replace the link?" (cast-7jv).
+    replace: RwSignal<std::collections::BTreeSet<String>>,
 }
 
 /// Show or hide `room` in `set`.
@@ -621,6 +624,8 @@ fn room_card(
     let (p1, p2, p3, p4) = (name.clone(), name.clone(), name.clone(), name.clone());
     let (i1, i2, i3) = (name.clone(), name.clone(), name.clone());
     let inviting = move || open.invite.with(|s| s.contains(&i1));
+    let (r1, r2, r3) = (name.clone(), name.clone(), name.clone());
+    let replacing = move || open.replace.with(|s| s.contains(&r1));
     let people = move || open.people.with(|s| s.contains(&p1));
     let menu = NodeRef::<leptos::html::Details>::new();
     let close_menu = move || {
@@ -653,7 +658,7 @@ fn room_card(
                             <button class="menu-item room-people-toggle" on:click=move |_| { close_menu(); flip(open.people, &p2, !open.people.with_untracked(|s| s.contains(&p2))); }>"People and settings..."</button>
                             <button class="menu-item open-room-folder" on:click=move |_| { close_menu(); act("/folder/open", serde_json::json!({ "room": n3.clone() }), "Folder opened."); }>"Open recordings folder"</button>
                             <button class="menu-item regen-room-link" title="The old link stops working; people in the call stay"
-                                on:click=move |_| { close_menu(); act("/rooms/link", serde_json::json!({ "room": n4.clone() }), "New call link made; the old one no longer works."); }>"Replace link (old one stops working)"</button>
+                                on:click=move |_| { close_menu(); flip(open.replace, &r2, true); }>"Replace link..."</button>
                         </div>
                     </details>
                 </span>
@@ -663,6 +668,17 @@ fn room_card(
                 Some(c) => format!("Joining continues the call of {c}"),
                 None => "Joining starts a new call".to_string(),
             }}</span>
+            <div class="room-people room-replace" role="alertdialog" hidden=move || !replacing()>
+                <span class="small">"Replace this room's call link? The old link stops working for everyone, including copies pasted into invites or calendars. People already in the call stay."</span>
+                <span class="room-actions">
+                    <button class="btn cancel-replace" on:click=move |_| flip(open.replace, &r3, false)>"Cancel"</button>
+                    <button class="btn primary confirm-replace" on:click={
+                        let n = n4.clone();
+                        let r = name.clone();
+                        move |_| { flip(open.replace, &r, false); act("/rooms/link", serde_json::json!({ "room": n.clone() }), "New call link made; the old one no longer works."); }
+                    }>"Replace link"</button>
+                </span>
+            </div>
             <div class="room-people room-invite" hidden=move || !inviting()>
                 <span class="small muted">"Invite contacts to this room's call. Someone offline gets it when back online."</span>
                 <ul class="list invite-list">
