@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>In call - phone</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:#15181d;background:#f3f4f6}
+a{color:#1d4ed8}a:hover{color:#1e3a8a}
+.d{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px;font-weight:600;color:#3b424c;flex:1;min-width:0}
+.d button{width:48px;height:48px;border-radius:14px;border:1px solid #cfd4dc;background:#fff;color:#15181d;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.tile{position:relative;flex:1;min-height:0;border-radius:14px;background:#1c2027;display:flex;align-items:center;justify-content:center}
+.nm{position:absolute;left:10px;bottom:10px;padding:3px 9px;border-radius:7px;background:rgba(0,0,0,.6);color:#fff;font-size:12px;font-weight:600}
+.rb{position:absolute;left:10px;top:10px;display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:7px;background:rgba(0,0,0,.6);color:#fca5a5;font-size:11px;font-weight:700}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; display: flex; flex-direction: column; background: #f3f4f6">
+  <header style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: #fff; border-bottom: 3px solid #c81e1e">
+    <span style="flex: 1; min-width: 0; font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Weekly show</span>
+    <span role="status" style="display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 999px; background: #c81e1e; color: #fff; font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums"><span style="width: 8px; height: 8px; border-radius: 50%; background: #fff"></span>REC 07:12</span>
+  </header>
+  <section aria-label="Stage" style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px">
+    <div class="tile" style="box-shadow: 0 0 0 3px #4ade80">
+      <div style="width: 84px; height: 84px; border-radius: 50%; background: #3a4150; color: #fff; font-size: 28px; font-weight: 700; display: flex; align-items: center; justify-content: center">SR</div>
+      <span class="rb"><span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444"></span>Recording</span>
+      <span class="nm">Sam</span>
+    </div>
+    <div class="tile">
+      <div style="width: 84px; height: 84px; border-radius: 50%; background: #5b4a8a; color: #fff; font-size: 28px; font-weight: 700; display: flex; align-items: center; justify-content: center">PS</div>
+      <span class="rb"><span style="width: 6px; height: 6px; border-radius: 50%; background: #ef4444"></span>Recording</span>
+      <span class="nm">Priya</span>
+      <div style="position: absolute; right: 10px; bottom: 10px; width: 96px; height: 128px; border-radius: 10px; background: #2f6f4f; border: 2px solid #1c2027; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700">You</div>
+    </div>
+  </section>
+  <footer style="display: flex; align-items: flex-start; gap: 4px; padding: 10px 10px 18px; background: #fff; border-top: 1px solid #dde1e7">
+    <div class="d"><button type="button" aria-label="Mute"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></button>Mute</div>
+    <div class="d"><button type="button" aria-label="Camera"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="6" width="14" height="12" rx="2"></rect><path d="M16 10l6-3v10l-6-3z"></path></svg></button>Camera</div>
+    <div class="d"><button type="button" aria-label="People"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="9" cy="8" r="4"></circle><path d="M2 21a7 7 0 0 1 14 0M17 4a4 4 0 0 1 0 8"></path></svg></button>People</div>
+    <div class="d"><button type="button" aria-label="More"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg></button>More</div>
+    <div class="d"><button type="button" aria-label="Leave"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"></path></svg></button>Leave</div>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
