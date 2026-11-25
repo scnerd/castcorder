@@ -33,6 +33,14 @@
 //! files are final (`Command::LocalTracksDone`). A take left unfinalised by a
 //! crash is recovered at the next start (`local::recover_takes`); Ctrl+C
 //! finalises the take in progress first.
+//!
+//! Backup microphones (`TakeCtl::AddBackup`): each extra input is recorded
+//! by a `participant-backup` thread of its own, recorder only (no live
+//! stream, no playback), as source `mic-N` like a browser guest's backups:
+//! `takeNN_<name>_mic-N.wav` (segments `mic-N-segK`) with its own timing
+//! file and manifest items. The main recorder hands each take start and stop
+//! on to its backups, and a take's files count as final (the stop's `done`,
+//! `Command::LocalTracksDone`) only once every backup's are too.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -61,6 +69,8 @@ use crate::local;
 const ECHO_PROBE: &str = "castcorder_far_end";
 /// Wait between attempts to open (or reopen) the microphone.
 const REOPEN: Duration = Duration::from_secs(1);
+/// How long a take's stop waits for each backup's files to be final.
+const BACKUP_FINISH: Duration = Duration::from_secs(60);
 
 /// What the host's own participant captures and how it is recorded.
 #[derive(Clone, Debug)]
@@ -203,9 +213,27 @@ impl Timing {
     }
 }
 
+/// A backup microphone's recorder thread.
+struct Backup {
+    source: String,
+    takes: mpsc::Sender<TakeCtl>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
 /// The recorder's take state.
 struct Rec {
     name: String,
+    /// The source id: `mic`, or a backup's `mic-N`.
+    source: String,
+    /// The main microphone (else a backup): tells the call where its track
+    /// stands, and owns the backups.
+    main: bool,
+    /// Backup recorders (main only).
+    backups: Vec<Backup>,
+    /// Removed backups' "files final" answers for the take recording now.
+    pending: Vec<mpsc::Receiver<Vec<String>>>,
+    /// Removed backups' threads, joined when this recorder ends.
+    retired: Vec<thread::JoinHandle<()>>,
     call: String,
     device_id: String,
     keep_wav: bool,
@@ -220,13 +248,40 @@ struct Rec {
 }
 
 impl Rec {
+    fn new(cfg: &Config, source: &str, main: bool, commands: mpsc::Sender<Command>) -> Self {
+        Rec {
+            name: cfg.name.clone(),
+            source: source.to_string(),
+            main,
+            backups: vec![],
+            pending: vec![],
+            retired: vec![],
+            call: cfg.call.clone(),
+            device_id: cfg.device_id.clone(),
+            keep_wav: cfg.keep_wav,
+            commands,
+            timeline: cfg.timeline.clone(),
+            timing: None,
+            take: None,
+            segment: 0,
+            writer: None,
+            files: vec![],
+        }
+    }
+
     /// Apply a take command; true for [`TakeCtl::Quit`] (the take, if any,
     /// is finished first).
-    fn control(&mut self, c: TakeCtl) -> bool {
+    fn control(&mut self, c: TakeCtl, cfg: &Config) -> bool {
         match c {
             TakeCtl::Start { take, dir } => {
                 self.stop(None);
-                info!(take = take.0, "host microphone: take started");
+                info!(take = take.0, source = %self.source, "host microphone: take started");
+                for b in &self.backups {
+                    let _ = b.takes.send(TakeCtl::Start {
+                        take,
+                        dir: dir.clone(),
+                    });
+                }
                 self.take = Some((take, dir));
                 self.segment = 0;
             }
@@ -235,16 +290,73 @@ impl Rec {
                 self.stop(None);
                 return true;
             }
+            TakeCtl::AddBackup { input, source } => self.add_backup(cfg, input, source),
+            TakeCtl::RemoveBackup { source } => self.remove_backup(&source),
         }
         false
     }
 
-    /// End the take: finalise, then convert to FLAC off this thread.
+    /// Start recording `input` as backup `source`, from the take recording now.
+    fn add_backup(&mut self, cfg: &Config, input: NativeInput, source: String) {
+        if !self.main || self.backups.iter().any(|b| b.source == source) {
+            warn!(source = %source, "backup microphone not added: not the main recorder, or already recording");
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        if let Some((take, dir)) = &self.take {
+            let _ = tx.send(TakeCtl::Start {
+                take: *take,
+                dir: dir.clone(),
+            });
+        }
+        let rec = Rec::new(cfg, &source, false, self.commands.clone());
+        info!(source = %source, input = ?input, "backup microphone added");
+        let thread = thread::Builder::new()
+            .name("participant-backup".into())
+            .spawn(move || run_backup(input, rx, rec))
+            .map_err(|e| error!(error = %e, "backup microphone thread not started"))
+            .ok();
+        self.backups.push(Backup {
+            source,
+            takes: tx,
+            thread,
+        });
+    }
+
+    /// Stop recording backup `source`: its files of the take recording now
+    /// are finished, and the take's stop waits for them.
+    fn remove_backup(&mut self, source: &str) {
+        let Some(i) = self.backups.iter().position(|b| b.source == source) else {
+            return;
+        };
+        let b = self.backups.remove(i);
+        let (done, rx) = mpsc::channel();
+        if self.take.is_some() && b.takes.send(TakeCtl::Stop { done: Some(done) }).is_ok() {
+            self.pending.push(rx);
+        }
+        let _ = b.takes.send(TakeCtl::Quit);
+        self.retired.extend(b.thread);
+        info!(source = %source, "backup microphone removed");
+    }
+
+    /// End the take: finalise, then convert to FLAC off this thread. The
+    /// main recorder's take is final once its backups' are too.
     fn stop(&mut self, done: Option<mpsc::Sender<Vec<String>>>) {
         self.end_segment();
+        let mut waits = std::mem::take(&mut self.pending);
+        for b in &self.backups {
+            let (tx, rx) = mpsc::channel();
+            if b.takes.send(TakeCtl::Stop { done: Some(tx) }).is_ok() {
+                waits.push(rx);
+            }
+        }
         let Some((take, dir)) = self.take.take() else {
             if let Some(d) = done {
-                let _ = d.send(vec![]);
+                let mut out = vec![];
+                for w in waits {
+                    out.extend(w.recv_timeout(BACKUP_FINISH).unwrap_or_default());
+                }
+                let _ = d.send(out);
             }
             return;
         };
@@ -261,12 +373,14 @@ impl Rec {
                 }
             }
         });
-        info!(take = take.0, files = ?files, timing = ?timing, "host microphone: take stopped");
-        let (device_id, keep_wav, commands, participant) = (
+        info!(take = take.0, source = %self.source, files = ?files, timing = ?timing, "host microphone: take stopped");
+        let (device_id, keep_wav, commands, participant, source, main) = (
             self.device_id.clone(),
             self.keep_wav,
             self.commands.clone(),
             self.name.clone(),
+            self.source.clone(),
+            self.main,
         );
         let spawned = thread::Builder::new()
             .name("participant-flac".into())
@@ -283,6 +397,7 @@ impl Rec {
                             take,
                             device: device_id,
                             participant,
+                            source,
                             items,
                             ack,
                         });
@@ -303,14 +418,24 @@ impl Rec {
                 } else if !keep_wav {
                     warn!(take = take.0, "--keep-wav false: WAVs kept, the manifest item was not recorded");
                 }
-                let _ = commands.send(Command::LocalTracksDone { take });
-                if let Some(d) = done {
-                    let mut out: Vec<String> = Vec::new();
-                    for f in files.iter().map(|w| castcorder_recorder::flac_name(w)).chain(files.clone()).chain(timing) {
-                        if dir.exists(&f).unwrap_or(false) && !out.contains(&f) {
-                            out.push(f);
-                        }
+                // 4. The backups' files of this take (main only): the take is
+                // final once theirs are.
+                let mut out: Vec<String> = Vec::new();
+                for f in files.iter().map(|w| castcorder_recorder::flac_name(w)).chain(files.clone()).chain(timing) {
+                    if dir.exists(&f).unwrap_or(false) && !out.contains(&f) {
+                        out.push(f);
                     }
+                }
+                for w in waits {
+                    match w.recv_timeout(BACKUP_FINISH) {
+                        Ok(f) => out.extend(f),
+                        Err(_) => warn!(take = take.0, "a backup microphone's files were not final in time"),
+                    }
+                }
+                if main {
+                    let _ = commands.send(Command::LocalTracksDone { take });
+                }
+                if let Some(d) = done {
                     let _ = d.send(out);
                 }
             });
@@ -343,7 +468,7 @@ impl Rec {
     /// Tell the call where the microphone's track stands (the tiles' track
     /// chip), while a take records.
     fn source(&self, state: castcorder_protocol::SourceState) {
-        if self.take.is_some() {
+        if self.main && self.take.is_some() {
             let _ = self.commands.send(Command::NativeSource { state });
         }
     }
@@ -363,9 +488,9 @@ impl Rec {
         if self.writer.is_none() {
             self.segment += 1;
             let src = if self.segment == 1 {
-                "mic".to_string()
+                self.source.clone()
             } else {
-                format!("mic-seg{}", self.segment)
+                format!("{}-seg{}", self.source, self.segment)
             };
             let file = (1..)
                 .map(|n| {
@@ -387,7 +512,7 @@ impl Rec {
                 .and_then(|f| WavWriter::create(f, format, opts));
             match created.and_then(|w| dir.sync_dir().map(|()| w)) {
                 Ok(w) => {
-                    info!(file = %file, segment = self.segment, ?format, "host microphone segment started");
+                    info!(file = %file, source = %self.source, segment = self.segment, ?format, "host microphone segment started");
                     self.start_timing(take, dir.clone(), &file, format);
                     self.writer = Some((file, w));
                     self.source(castcorder_protocol::SourceState::Recording);
@@ -462,7 +587,7 @@ impl Rec {
                     device: self.name.clone(),
                     take: take.0,
                     track: wav.to_string(),
-                    source: "mic".into(),
+                    source: self.source.clone(),
                     sample_rate: rate,
                     channels: format.channels,
                     device_clock: "the host timeline (this is the host)".into(),
@@ -509,19 +634,7 @@ fn run(
         ..LiveOptions::default()
     };
     let rtp_next = Arc::new(AtomicU64::new(0));
-    let mut rec = Rec {
-        name: cfg.name.clone(),
-        call: cfg.call.clone(),
-        device_id: cfg.device_id.clone(),
-        keep_wav: cfg.keep_wav,
-        commands: commands.clone(),
-        timeline: cfg.timeline.clone(),
-        timing: None,
-        take: None,
-        segment: 0,
-        writer: None,
-        files: vec![],
-    };
+    let mut rec = Rec::new(&cfg, crate::local::SOURCE, true, commands.clone());
     let mut current = cfg.input.clone();
     loop {
         // Open already muted if the host is: muting only once the live loop
@@ -539,7 +652,7 @@ fn run(
                 warn!(input = ?current, error = %e, "host microphone not available; retrying");
                 match takes.recv_timeout(REOPEN) {
                     Ok(c) => {
-                        if rec.control(c) {
+                        if rec.control(c, &cfg) {
                             return;
                         }
                     }
@@ -583,7 +696,7 @@ fn run(
             loop {
                 match takes.try_recv() {
                     Ok(c) => {
-                        if rec.control(c) {
+                        if rec.control(c, &cfg) {
                             break 'capture true;
                         }
                     }
@@ -635,7 +748,7 @@ fn run(
             loop {
                 match takes.recv() {
                     Ok(c) => {
-                        if rec.control(c) {
+                        if rec.control(c, &cfg) {
                             return;
                         }
                     }
@@ -648,6 +761,141 @@ fn run(
         }
         if !switched {
             thread::sleep(REOPEN);
+        }
+    }
+}
+
+impl Drop for Rec {
+    /// A recorder ending ends its backups (each finishes its take first).
+    fn drop(&mut self) {
+        for b in self.backups.drain(..) {
+            let _ = b.takes.send(TakeCtl::Quit);
+            self.retired.extend(b.thread);
+        }
+        for t in self.retired.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Wait up to `wait` for take commands, applying each; true once told to end.
+fn controls(
+    rec: &mut Rec,
+    cfg: &Config,
+    takes: &mpsc::Receiver<TakeCtl>,
+    wait: Option<Duration>,
+) -> bool {
+    let first = match wait {
+        Some(w) => match takes.recv_timeout(w) {
+            Ok(c) => Some(c),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => return true,
+        },
+        None => match takes.try_recv() {
+            Ok(c) => Some(c),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => return true,
+        },
+    };
+    let Some(c) = first else {
+        return false;
+    };
+    if rec.control(c, cfg) {
+        return true;
+    }
+    loop {
+        match takes.try_recv() {
+            Ok(c) => {
+                if rec.control(c, cfg) {
+                    return true;
+                }
+            }
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+/// A backup microphone's thread: open `input` recorder-only (no live stream,
+/// no playback), record each take into its own track, reopen a lost device
+/// (a new segment), until told to end.
+fn run_backup(input: NativeInput, takes: mpsc::Receiver<TakeCtl>, mut rec: Rec) {
+    let outcome = raise_current_thread_priority();
+    info!(thread = "participant-backup", source = %rec.source, outcome = %outcome, "recording thread priority");
+    // A backup records no live stream: only the take state of `cfg` is used.
+    let cfg = Config {
+        input: input.clone(),
+        name: rec.name.clone(),
+        call: rec.call.clone(),
+        timeline: rec.timeline.clone(),
+        device_id: rec.device_id.clone(),
+        keep_wav: rec.keep_wav,
+        muted: Default::default(),
+        switch: Default::default(),
+    };
+    loop {
+        let opened = match &input {
+            NativeInput::Device(device) => {
+                GstCapture::open_device(device.as_deref(), Watchdog::default())
+            }
+            NativeInput::File(path) => GstCapture::open_file(path),
+        };
+        let mut cap = match opened {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(source = %rec.source, input = ?input, error = %e, "backup microphone not available; retrying");
+                if controls(&mut rec, &cfg, &takes, Some(REOPEN)) {
+                    rec.stop(None);
+                    return;
+                }
+                continue;
+            }
+        };
+        let format = cap.format();
+        info!(source = %rec.source, ?format, "backup microphone open");
+        let quit = loop {
+            if controls(&mut rec, &cfg, &takes, None) {
+                break true;
+            }
+            match cap.next_buffer() {
+                Ok(Some(b)) => {
+                    let captured = cap.last_timing().filter(|t| t.frame == b.first_frame).map(
+                        |t: CaptureTiming| {
+                            (
+                                rec.timeline.now_us() - t.age.as_micros() as i64,
+                                t.running_time.as_micros() as i64,
+                            )
+                        },
+                    );
+                    rec.write(format, &b.data, captured);
+                }
+                Ok(None) => {
+                    warn!(source = %rec.source, reason = ?cap.end_reason(), "backup microphone lost; segment ended");
+                    break false;
+                }
+                Err(e) => {
+                    warn!(source = %rec.source, error = %e, "backup microphone failed; segment ended");
+                    break false;
+                }
+            }
+        };
+        rec.end_segment();
+        cap.stop();
+        drop(cap);
+        if quit {
+            rec.stop(None);
+            return;
+        }
+        if matches!(input, NativeInput::File(_)) {
+            // A file plays once: then only take commands, until quit.
+            info!(source = %rec.source, "backup microphone file played to its end");
+            while !controls(&mut rec, &cfg, &takes, Some(Duration::from_secs(3600))) {}
+            rec.stop(None);
+            return;
+        }
+        if controls(&mut rec, &cfg, &takes, Some(REOPEN)) {
+            rec.stop(None);
+            return;
         }
     }
 }
@@ -745,6 +993,151 @@ mod tests {
         *slot.lock().unwrap() = Some(usb);
         assert_eq!(take_switch(&slot, &file), None);
         assert!(slot.lock().unwrap().is_none());
+    }
+
+    /// Wait until `path` holds at least `len` bytes.
+    fn wait_len(path: &std::path::Path, len: u64) {
+        let end = Instant::now() + Duration::from_secs(30);
+        while std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) < len {
+            assert!(
+                Instant::now() < end,
+                "{} short of {len} bytes",
+                path.display()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A take with a backup microphone is final (its stop's `done`, and
+    /// `LocalTracksDone` for alignment) only once the backup's files are
+    /// recorded too: here the backup's manifest ack is held back, and the
+    /// take stays unfinished until it is given. Two WAV files stand in for
+    /// the microphones (GStreamer's file source, as `task test:gst` runs).
+    #[test]
+    fn a_take_is_final_only_once_its_backups_files_are() {
+        use castcorder_port_capture::{AudioFormat, Generator, SampleFormat, contract, encode_wav};
+        let root = std::env::temp_dir().join(format!("castcorder-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let format = AudioFormat {
+            sample_rate: 48_000,
+            channels: 1,
+            sample_format: SampleFormat::I16,
+        };
+        let (_, pcm) = contract::drain(Generator::new(format, 480, Some(4_800)));
+        let (main_wav, backup_wav) = (root.join("main.wav"), root.join("backup.wav"));
+        std::fs::write(&main_wav, encode_wav(format, &pcm)).unwrap();
+        std::fs::write(&backup_wav, encode_wav(format, &pcm)).unwrap();
+        let take_dir = FsStorage::new(root.join("call").join("take01")).unwrap();
+
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (take_tx, take_rx) = mpsc::channel();
+        // Queued before the recorder reads: the take, then the backup.
+        take_tx
+            .send(TakeCtl::Start {
+                take: TakeId(1),
+                dir: take_dir.clone(),
+            })
+            .unwrap();
+        take_tx
+            .send(TakeCtl::AddBackup {
+                input: NativeInput::File(backup_wav),
+                source: "mic-2".into(),
+            })
+            .unwrap();
+        let cfg = Config {
+            input: NativeInput::File(main_wav),
+            name: "host".into(),
+            call: "call".into(),
+            timeline: HostTimeline::new(SystemClock::new()),
+            device_id: "host-test".into(),
+            keep_wav: true,
+            muted: Default::default(),
+            switch: Default::default(),
+        };
+        let rec = thread::spawn(move || run(cfg, take_rx, cmd_tx, None));
+        let dir = root.join("call").join("take01");
+        wait_len(&dir.join("take01_host_mic.wav"), 44 + pcm.len() as u64);
+        wait_len(&dir.join("take01_host_mic-2.wav"), 44 + pcm.len() as u64);
+        let (done_tx, done_rx) = mpsc::channel();
+        take_tx
+            .send(TakeCtl::Stop {
+                done: Some(done_tx),
+            })
+            .unwrap();
+        // Both sources are recorded in the manifest; the backup's ack is held.
+        let mut held = None;
+        let mut sources = vec![];
+        let mut done_early = false;
+        let end = Instant::now() + Duration::from_secs(30);
+        while held.is_none() || sources.len() < 2 {
+            assert!(Instant::now() < end, "manifest items not sent: {sources:?}");
+            match cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Command::LocalTracks {
+                    source, items, ack, ..
+                }) => {
+                    let names: Vec<_> = items.iter().map(|i| i.name.clone()).collect();
+                    sources.push((source.clone(), names));
+                    if source == "mic-2" {
+                        held = Some(ack);
+                    } else {
+                        let _ = ack.send(());
+                    }
+                }
+                Ok(Command::LocalTracksDone { .. }) => done_early = true,
+                _ => {}
+            }
+        }
+        // Main's files are done; the take is not, while the backup's are not.
+        let until = Instant::now() + Duration::from_millis(300);
+        while Instant::now() < until {
+            if let Ok(Command::LocalTracksDone { .. }) =
+                cmd_rx.recv_timeout(Duration::from_millis(20))
+            {
+                done_early = true;
+            }
+        }
+        assert!(!done_early, "the take was final before its backup's files");
+        assert!(
+            done_rx.try_recv().is_err(),
+            "done before the backup's files"
+        );
+        let _ = held.take().unwrap().send(());
+        let files = done_rx.recv_timeout(Duration::from_secs(30)).expect("done");
+        let end = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < end, "no LocalTracksDone");
+            if let Ok(Command::LocalTracksDone { take }) =
+                cmd_rx.recv_timeout(Duration::from_millis(50))
+            {
+                assert_eq!(take, TakeId(1));
+                break;
+            }
+        }
+        sources.sort();
+        assert_eq!(
+            sources,
+            [
+                ("mic", vec!["take01_host_mic", "take01_host_mic-timing"]),
+                (
+                    "mic-2",
+                    vec!["take01_host_mic-2", "take01_host_mic-2-timing"]
+                ),
+            ]
+            .map(|(s, n)| (s.to_string(), n.iter().map(|x| x.to_string()).collect()))
+        );
+        for f in [
+            "take01_host_mic.flac",
+            "take01_host_mic-2.flac",
+            "take01_host_mic-2.wav",
+            "take01_host_mic-2.timing.jsonl",
+        ] {
+            assert!(files.contains(&f.to_string()), "{f} not in {files:?}");
+        }
+        drop(take_tx);
+        drop(cmd_rx);
+        rec.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Loose bound on start and stop latency (logged, not the point).

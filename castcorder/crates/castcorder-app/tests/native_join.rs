@@ -200,3 +200,180 @@ fn the_host_joins_and_leaves_natively_at_runtime_and_records_bit_exact() {
     control.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A backup microphone beside the native one (cast-q8v): a second input,
+/// recorder only, gets a track of its own in the take (source `mic-2`, as a
+/// browser guest's backup), byte for byte, with its timing file and manifest
+/// items; leaving mid-take waits for its FLAC too, and the take still aligns.
+#[test]
+fn a_backup_microphone_records_its_own_track_beside_the_native_one() {
+    let root = scratch("native-backup");
+    let main_format = AudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+        sample_format: SampleFormat::I24,
+    };
+    let backup_format = AudioFormat {
+        sample_rate: 48_000,
+        channels: 2,
+        sample_format: SampleFormat::I24,
+    };
+    let (_, main_pcm) = contract::drain(Generator::new(main_format, 480, Some(48_000 / 2)));
+    let (_, backup_pcm) = contract::drain(Generator::new(backup_format, 480, Some(48_000 * 8)));
+    let main_wav = root.join("main.wav");
+    let backup_wav = root.join("backup.wav");
+    std::fs::write(&main_wav, encode_wav(main_format, &main_pcm)).unwrap();
+    std::fs::write(&backup_wav, encode_wav(backup_format, &backup_pcm)).unwrap();
+
+    let mut c = config(&root);
+    c.align = Some(Default::default());
+    let control = HostControl::new(c);
+    let status = control.start().unwrap();
+    let http = status.http_addr;
+    let native = "X-Castcorder-Native: 1\r\n";
+    // Not joined: no backup.
+    let e = control
+        .add_native_backup(NativeInput::File(backup_wav.clone()))
+        .unwrap_err();
+    assert!(e.contains("not in the call"), "{e}");
+
+    take(http, "start");
+    let take_dir = control.recordings_folder().join("take01");
+    control
+        .join_native(NativeInput::File(main_wav.clone()))
+        .unwrap();
+    // The native input itself is no backup; the backup is added once.
+    let e = control
+        .add_native_backup(NativeInput::File(main_wav.clone()))
+        .unwrap_err();
+    assert!(e.contains("itself"), "{e}");
+    let source = control
+        .add_native_backup(NativeInput::File(backup_wav.clone()))
+        .unwrap();
+    assert_eq!(source, "mic-2");
+    let e = control
+        .add_native_backup(NativeInput::File(backup_wav.clone()))
+        .unwrap_err();
+    assert!(e.contains("already"), "{e}");
+    let label = format!("file {}", backup_wav.display());
+    let (code, body) = request(http, "GET", "/native", native);
+    assert_eq!(code, 200, "{body}");
+    let seen: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seen["backups"], serde_json::json!([label]), "{body}");
+
+    let mic = take_dir.join("take01_host_mic.wav");
+    let backup = take_dir.join("take01_host_mic-2.wav");
+    wait_for_track(&mic, main_pcm.len() as u64);
+    wait_for_track(&backup, backup_pcm.len() as u64);
+    take(http, "stop");
+    // The take aligns once both tracks' files are final (and recorded).
+    let summary = take_dir.join("aligned").join("take01_alignment.json");
+    let end = Instant::now() + Duration::from_secs(60);
+    while !summary.exists() {
+        assert!(Instant::now() < end, "take 1 was not aligned");
+        sleep(Duration::from_millis(100));
+    }
+    for f in ["take01_host_mic.flac", "take01_host_mic-2.flac"] {
+        assert!(take_dir.join(f).exists(), "{f}");
+        assert!(take_dir.join("aligned").join(f).exists(), "aligned/{f}");
+    }
+
+    let bytes = std::fs::read(&backup).unwrap();
+    assert!(
+        wav_data(&bytes) == backup_pcm.as_slice(),
+        "the backup track differs from its input"
+    );
+    let bytes = std::fs::read(&mic).unwrap();
+    assert!(
+        wav_data(&bytes) == main_pcm.as_slice(),
+        "the native track differs from its input"
+    );
+    let timing = std::fs::read_to_string(take_dir.join("take01_host_mic-2.timing.jsonl")).unwrap();
+    assert!(timing.contains("\"source\":\"mic-2\""), "{timing}");
+    let manifest = std::fs::read_to_string(take_dir.join("manifest.jsonl")).unwrap();
+    for name in [
+        "take01_host_mic-2",
+        "take01_host_mic-2-timing",
+        "take01_host_mic",
+    ] {
+        assert!(
+            manifest.contains(&format!("\"name\":\"{name}\"")),
+            "{name} not in the manifest: {manifest}"
+        );
+    }
+    assert!(manifest.contains("\"mic-2\""), "{manifest}");
+
+    // Take 2: leaving mid-take finishes both tracks' files before it returns.
+    take(http, "start");
+    let take2 = control.recordings_folder().join("take02");
+    control
+        .leave_native()
+        .unwrap()
+        .then_some(())
+        .expect("was joined");
+    control
+        .join_native(NativeInput::File(main_wav.clone()))
+        .unwrap();
+    control
+        .add_native_backup(NativeInput::File(backup_wav.clone()))
+        .unwrap();
+    wait_for_track(
+        &take2.join("take02_host_mic-2.wav"),
+        backup_pcm.len() as u64,
+    );
+    assert!(control.leave_native().unwrap());
+    assert!(
+        take2.join("take02_host_mic.flac").exists(),
+        "the native track's FLAC"
+    );
+    assert!(
+        take2.join("take02_host_mic-2.flac").exists(),
+        "leaving waits for the backup's FLAC too"
+    );
+    assert!(
+        control.native_state().unwrap().backups.is_empty(),
+        "backups end with the native input"
+    );
+    take(http, "stop");
+
+    // The backup control over HTTP (the host page): a file backup added
+    // here is removed there by its label.
+    control
+        .join_native(NativeInput::File(main_wav.clone()))
+        .unwrap();
+    control
+        .add_native_backup(NativeInput::File(backup_wav.clone()))
+        .unwrap();
+    let off = format!(
+        "{{\"device\":{},\"on\":false}}",
+        serde_json::to_string(&label).unwrap()
+    );
+    let (code, body) = request_body(http, "/native/backup", native, &off);
+    assert_eq!(code, 200, "{body}");
+    let seen: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(seen["backups"], serde_json::json!([]), "{body}");
+    let (code, body) = request_body(http, "/native/backup", native, "{}");
+    assert_eq!(code, 400, "{body}");
+    assert!(control.leave_native().unwrap());
+
+    control.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A POST with a JSON body.
+fn request_body(addr: SocketAddr, path: &str, headers: &str, body: &str) -> (u16, String) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(90))).unwrap();
+    write!(
+        s,
+        "POST {path} HTTP/1.1\r\nHost: localhost:{}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        addr.port(),
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    let status = out[9..12].parse().unwrap();
+    let body = out.split_once("\r\n\r\n").unwrap().1.to_string();
+    (status, body)
+}

@@ -71,6 +71,9 @@ pub struct NativeState {
     pub error: Option<String>,
     /// Muted in the call (the live stream only; its track keeps recording).
     pub muted: bool,
+    /// The backup microphones recording beside it (their labels: a device's
+    /// display name), while joined.
+    pub backups: Vec<String>,
 }
 
 /// What every join of the host's participant records with.
@@ -91,8 +94,31 @@ pub(crate) struct NativeBase {
 #[cfg_attr(not(feature = "native-capture"), allow(dead_code))]
 struct Joined {
     label: String,
+    /// The main input (what a backup may not be).
+    input: NativeInput,
     takes: mpsc::Sender<TakeCtl>,
     threads: Vec<JoinHandle<()>>,
+    /// Backup microphones: (label, input, source id `mic-N`).
+    backups: Vec<(String, NativeInput, String)>,
+}
+
+/// The next free backup source id: `mic-2`, `mic-3`, ... (as a browser
+/// guest's backups).
+fn next_source(taken: &[(String, NativeInput, String)]) -> String {
+    (2..)
+        .map(|n| format!("mic-{n}"))
+        .find(|s| !taken.iter().any(|(_, _, t)| t == s))
+        .expect("a free source id")
+}
+
+/// Whether `a` and `b` are the same input; `default` names the default
+/// input's device, if known.
+fn same_input(a: &NativeInput, b: &NativeInput, default: Option<&str>) -> bool {
+    let named = |i: &NativeInput| match i {
+        NativeInput::Device(None) => default.map(|d| NativeInput::Device(Some(d.to_string()))),
+        other => Some(other.clone()),
+    };
+    a == b || named(a).is_some_and(|x| Some(x) == named(b))
 }
 
 /// Joins and leaves the host's own participant (see the module docs).
@@ -168,6 +194,7 @@ impl NativeCtl {
             self.muted
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let label = input.label();
+            let input_kept = input.clone();
             let (participant, prepared) = crate::native::prepare(crate::native::Config {
                 input,
                 name: self.base.name.clone(),
@@ -197,8 +224,10 @@ impl NativeCtl {
             info!(input = %label, "host microphone joined");
             *joined = Some(Joined {
                 label,
+                input: input_kept,
                 takes,
                 threads,
+                backups: vec![],
             });
             Ok(())
         }
@@ -249,10 +278,72 @@ impl NativeCtl {
             return Err("the host microphone is not in the call".into());
         };
         let input = NativeInput::Device(device);
+        let default = default_device();
+        if j.backups
+            .iter()
+            .any(|(_, b, _)| same_input(b, &input, default.as_deref()))
+        {
+            return Err(format!(
+                "{} is recording as a backup microphone; remove it as a backup first",
+                input.label()
+            ));
+        }
         j.label = input.label();
+        j.input = input.clone();
         *self.switch.lock().map_err(|_| "native lock poisoned")? = Some(input);
         info!(input = %j.label, "host microphone switch requested");
         Ok(())
+    }
+
+    /// Also record `input` as a backup microphone: a track of its own (source
+    /// `mic-N`) in each take, from the one recording now. Only while the host
+    /// microphone is in the call; not its own input, nor one already a backup.
+    pub fn add_backup(&self, input: NativeInput) -> Result<String, String> {
+        let mut joined = self.joined.lock().map_err(|_| "native lock poisoned")?;
+        let Some(j) = joined.as_mut() else {
+            return Err("the host microphone is not in the call".into());
+        };
+        let default = default_device();
+        if same_input(&j.input, &input, default.as_deref()) {
+            return Err(format!(
+                "{} is the host microphone itself; choose another input as a backup",
+                input.label()
+            ));
+        }
+        if j.backups
+            .iter()
+            .any(|(_, b, _)| same_input(b, &input, default.as_deref()))
+        {
+            return Err(format!("{} is already a backup microphone", input.label()));
+        }
+        let source = next_source(&j.backups);
+        j.takes
+            .send(TakeCtl::AddBackup {
+                input: input.clone(),
+                source: source.clone(),
+            })
+            .map_err(|_| "the host microphone's recorder has ended")?;
+        info!(input = %input.label(), source = %source, "backup microphone added");
+        j.backups.push((input.label(), input, source.clone()));
+        Ok(source)
+    }
+
+    /// Stop recording the backup microphone labelled `label` (its files of
+    /// the take recording now are finished). False if it was not a backup.
+    pub fn remove_backup(&self, label: &str) -> Result<bool, String> {
+        let mut joined = self.joined.lock().map_err(|_| "native lock poisoned")?;
+        let Some(j) = joined.as_mut() else {
+            return Err("the host microphone is not in the call".into());
+        };
+        let Some(i) = j.backups.iter().position(|(l, _, _)| l == label) else {
+            return Ok(false);
+        };
+        let (_, _, source) = j.backups.remove(i);
+        let _ = j.takes.send(TakeCtl::RemoveBackup {
+            source: source.clone(),
+        });
+        info!(input = %label, source = %source, "backup microphone removed");
+        Ok(true)
     }
 
     /// Mute (true) or unmute the native microphone in the call: the live
@@ -270,11 +361,19 @@ impl NativeCtl {
 
     /// Whether it can join, with what, and whether it is joined.
     pub fn state(&self) -> NativeState {
-        let joined = self
+        let (joined, backups) = self
             .joined
             .lock()
             .ok()
-            .and_then(|j| j.as_ref().map(|j| j.label.clone()));
+            .and_then(|j| {
+                j.as_ref().map(|j| {
+                    (
+                        Some(j.label.clone()),
+                        j.backups.iter().map(|(l, _, _)| l.clone()).collect(),
+                    )
+                })
+            })
+            .unwrap_or_default();
         let (devices, error) = list_devices();
         let joined_now = joined.is_some();
         NativeState {
@@ -283,8 +382,18 @@ impl NativeCtl {
             devices,
             error,
             muted: joined_now && self.muted.load(std::sync::atomic::Ordering::Relaxed),
+            backups,
         }
     }
+}
+
+/// The default input's display name, if the inputs can be listed.
+fn default_device() -> Option<String> {
+    list_devices()
+        .0
+        .into_iter()
+        .find(|d| d.default)
+        .map(|d| d.name)
 }
 
 #[cfg(feature = "native-capture")]
@@ -319,5 +428,37 @@ mod tests {
         let ctl = NativeCtl::for_test(tx);
         let e = ctl.switch(Some("USB".into())).unwrap_err();
         assert!(e.contains("not in the call"), "{e}");
+    }
+
+    #[test]
+    fn backups_need_the_microphone_in_the_call() {
+        let (tx, _rx) = mpsc::channel();
+        let ctl = NativeCtl::for_test(tx);
+        let e = ctl
+            .add_backup(NativeInput::Device(Some("USB".into())))
+            .unwrap_err();
+        assert!(e.contains("not in the call"), "{e}");
+        assert!(ctl.remove_backup("USB").is_err());
+        assert!(ctl.state().backups.is_empty());
+    }
+
+    #[test]
+    fn backup_sources_are_the_next_free_mic_n() {
+        let b = |s: &str| ("x".to_string(), NativeInput::Device(None), s.to_string());
+        assert_eq!(next_source(&[]), "mic-2");
+        assert_eq!(next_source(&[b("mic-2"), b("mic-4")]), "mic-3");
+    }
+
+    #[test]
+    fn the_default_input_is_the_device_it_names() {
+        let usb = NativeInput::Device(Some("USB".into()));
+        let default = NativeInput::Device(None);
+        assert!(same_input(&usb, &usb, None));
+        assert!(same_input(&default, &usb, Some("USB")));
+        assert!(same_input(&usb, &default, Some("USB")));
+        assert!(!same_input(&default, &usb, Some("Built-in")));
+        assert!(!same_input(&default, &usb, None));
+        let file = NativeInput::File("a.wav".into());
+        assert!(!same_input(&file, &NativeInput::File("b.wav".into()), None));
     }
 }

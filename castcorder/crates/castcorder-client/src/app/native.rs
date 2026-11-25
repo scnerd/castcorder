@@ -1,7 +1,9 @@
 //! The host machine's own page: join and leave the call with a microphone the
 //! host captures natively (castcorder-host `/native`), instead of this page's
 //! microphone. Shown only on a localhost page of a host built with native
-//! capture (the desktop app's window, `task host`).
+//! capture (the desktop app's window, `task host`). While joined, the other
+//! inputs can each be recorded as a backup microphone (`/native/backup`): a
+//! track of its own, recorded only, like a browser guest's backups.
 
 use super::*;
 
@@ -18,6 +20,21 @@ struct NativeView {
     error: String,
     /// Muted in the call (call-only: the host keeps recording it).
     muted: bool,
+    /// The inputs recording as backup microphones.
+    backups: Vec<String>,
+}
+
+/// The inputs that can be a backup beside `joined`: every listed device but
+/// the one in the call (`default input` is the default device).
+fn backup_choices(v: &NativeView) -> Vec<String> {
+    let Some(joined) = &v.joined else {
+        return vec![];
+    };
+    v.devices
+        .iter()
+        .filter(|(name, default)| name != joined && !(joined == "default input" && *default))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn parse(v: &JsValue) -> NativeView {
@@ -35,6 +52,10 @@ fn parse(v: &JsValue) -> NativeView {
         devices,
         error: string(v, "error"),
         muted: get(v, "muted").is_truthy(),
+        backups: get(v, "backups")
+            .dyn_into::<Array>()
+            .map(|a| a.iter().filter_map(|b| b.as_string()).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -151,6 +172,22 @@ pub(super) fn NativeMic(
             busy.set(false);
         });
     };
+    // A backup microphone on (recorded beside the joined one) or off.
+    let backup = move |name: String, on: bool| {
+        busy.set(true);
+        message.set(String::new());
+        spawn_local(async move {
+            let body = serde_json::json!({ "device": name, "on": on }).to_string();
+            match native_request("POST", "/native/backup", Some(body)).await {
+                Ok(s) => state.set(s),
+                Err(e) => {
+                    warn!(error = %e, on, "backup microphone");
+                    message.set(e);
+                }
+            }
+            busy.set(false);
+        });
+    };
     view! {
         <Show when=move || state.get().available>
             <div class="native">
@@ -176,6 +213,25 @@ pub(super) fn NativeMic(
                     disabled=move || !joined() || busy.get() on:click=move |_| mute(!state.get_untracked().muted)>
                     {move || if state.get().muted { "Unmute" } else { "Mute" }}</button>
             </div>
+            <Show when=move || !backup_choices(&state.get()).is_empty()>
+                <fieldset id="native-backups" class="native-backups">
+                    <legend class="small">"Backup microphones (recorded only, each a track of its own)"</legend>
+                    <For each=move || backup_choices(&state.get()) key=|d| d.clone() let:d>
+                        {
+                            let name = StoredValue::new(d.clone());
+                            view! {
+                                <label class="small">
+                                    <input type="checkbox" class="native-backup" data-device=d.clone()
+                                        disabled=move || busy.get()
+                                        prop:checked=move || state.get().backups.contains(&name.get_value())
+                                        on:change=move |ev| backup(name.get_value(), event_target_checked(&ev)) />
+                                    " " {d.clone()}
+                                </label>
+                            }
+                        }
+                    </For>
+                </fieldset>
+            </Show>
             <span class="small muted"><span id="native-state">{move || match state.get().joined {
                     Some(j) => format!("in the call with {j}"),
                     None => "not in the call".to_string(),

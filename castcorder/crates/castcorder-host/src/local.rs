@@ -3,9 +3,11 @@
 //! recovery of a take the host never finalised (Ctrl+C, a crash).
 //!
 //! A host track is recorded like a guest's item, under the host's own device
-//! id: each WAV segment `takeNN_<who>_mic[-segN].wav` is an item named after
-//! its file (format `wav`), and the take's one timing file
-//! `takeNN_<who>_mic.timing.jsonl` is the item `takeNN_<who>_mic-timing`
+//! id: each WAV segment `takeNN_<who>_<source>[-segN].wav` is an item named
+//! after its file (format `wav`), the source being `mic` or a backup
+//! microphone's `mic-N` (as a browser guest's backups), and each source's
+//! timing file `takeNN_<who>_<source>.timing.jsonl` is the item
+//! `takeNN_<who>_<source>-timing`
 //! (format `timing.jsonl`), so the take checklist and alignment see every
 //! track alike. The verifying of a host item is reading the whole file at
 //! finalize (its size and BLAKE3 root become the entry's). The FLAC beside a
@@ -25,8 +27,22 @@ use castcorder_protocol::TakeId;
 use castcorder_recorder::{FlacError, flac_name, recover, verify_flac_of_wav, wav_to_flac};
 use tracing::{error, info, warn};
 
-/// The source id of the host's microphone items.
+/// The source id of the host's microphone items (a backup's is `mic-N`).
 pub const SOURCE: &str = "mic";
+
+/// Whether `s` is a microphone source id: `mic`, or a backup's `mic-N`.
+fn is_mic_source(s: &str) -> bool {
+    s == SOURCE
+        || s.strip_prefix("mic-")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `(who, source)` of a track's base name `takeNN_<who>_<source>`.
+fn who_and_source(base: &str) -> Option<(&str, &str)> {
+    let (front, source) = base.rsplit_once('_')?;
+    let (_, who) = front.split_once('_')?;
+    is_mic_source(source).then_some((who, source))
+}
 
 fn stem(file: &str) -> &str {
     file.trim_end_matches(".wav")
@@ -50,7 +66,7 @@ fn is_host_mic_wav(name: &str, take: u32) -> bool {
         return false;
     };
     let (base, _) = split_segment(s);
-    base.starts_with(&format!("take{take:02}_")) && base.ends_with("_mic")
+    base.starts_with(&format!("take{take:02}_")) && who_and_source(base).is_some()
 }
 
 /// Manifest items for a take's finished host files: each WAV, and the timing
@@ -76,13 +92,12 @@ pub fn items<S: Storage>(
     Ok(out)
 }
 
-/// The participant name in a host track's file name: `takeNN_<who>_mic...`.
-fn who_of(wav: &str) -> String {
+/// The participant name and source in a host track's file name:
+/// `takeNN_<who>_<source>...`.
+fn who_of(wav: &str) -> (String, String) {
     let (base, _) = split_segment(stem(wav));
-    base.split_once('_')
-        .map(|(_, rest)| rest.trim_end_matches("_mic"))
-        .unwrap_or("host")
-        .to_string()
+    let (who, source) = who_and_source(base).unwrap_or(("host", SOURCE));
+    (who.to_string(), source.to_string())
 }
 
 /// Convert each WAV to FLAC beside it and read the FLAC back from disk to
@@ -269,10 +284,10 @@ fn recover_track<S: Storage + Clone>(
         },
         _ => None,
     };
-    let who = who_of(&group[0]);
+    let (who, source) = who_of(&group[0]);
     let recorded = items(dir, group, timing_file.as_deref()).and_then(|items| {
         for item in &items {
-            lib.record_local(device, &who, take, SOURCE, item)?;
+            lib.record_local(device, &who, take, &source, item)?;
         }
         Ok(())
     });
@@ -497,6 +512,93 @@ mod tests {
         );
         // A second startup finds nothing to do.
         assert!(recover_takes(&mut lib, &[1], DEVICE, true).is_empty());
+        let _ = std::fs::remove_dir_all(root.root());
+    }
+
+    #[test]
+    fn track_names_give_who_and_a_microphone_source() {
+        assert_eq!(who_of("take01_host_mic.wav"), ("host".into(), "mic".into()));
+        assert_eq!(
+            who_of("take01_Pat-2_mic-3-seg2.wav"),
+            ("Pat-2".into(), "mic-3".into())
+        );
+        assert!(is_host_mic_wav("take01_host_mic-2.wav", 1));
+        assert!(is_host_mic_wav("take01_host_mic-2-seg4.wav", 1));
+        for no in [
+            "take02_host_mic-2.wav",
+            "take01_host_mic-.wav",
+            "take01_host_mic-x.wav",
+            "take01_host_camera.wav",
+            "take01_host_mic-2.flac",
+        ] {
+            assert!(!is_host_mic_wav(no, 1), "{no}");
+        }
+    }
+
+    /// A backup microphone's track left unfinalised is recovered as a track
+    /// of its own (source `mic-2`), beside the main microphone's.
+    #[test]
+    fn startup_recovers_a_backup_track_under_its_own_source() {
+        let root = temp("recover-backup");
+        let mut lib = library(&root);
+        let dir = lib.take_dir(TakeId(1)).unwrap().clone();
+        wav(&dir, "take01_host_mic.wav", fmt(SampleFormat::I16), 4_800);
+        timing_file(
+            &dir,
+            "take01_host_mic.timing.jsonl",
+            &["take01_host_mic.wav"],
+            Some(4_800),
+        );
+        wav(&dir, "take01_host_mic-2.wav", fmt(SampleFormat::I16), 4_800);
+        wav(
+            &dir,
+            "take01_host_mic-2-seg2.wav",
+            fmt(SampleFormat::I16),
+            2_400,
+        );
+        timing_file(
+            &dir,
+            "take01_host_mic-2.timing.jsonl",
+            &["take01_host_mic-2.wav", "take01_host_mic-2-seg2.wav"],
+            None,
+        );
+        let got = recover_takes(&mut lib, &[1], DEVICE, true);
+        assert_eq!(
+            got,
+            vec![
+                Recovered {
+                    take: TakeId(1),
+                    wavs: vec!["take01_host_mic.wav".into()]
+                },
+                Recovered {
+                    take: TakeId(1),
+                    wavs: vec![
+                        "take01_host_mic-2.wav".into(),
+                        "take01_host_mic-2-seg2.wav".into()
+                    ]
+                },
+            ]
+        );
+        let entries = lib.entries(TakeId(1)).unwrap();
+        let mut got: Vec<(String, String)> = entries
+            .iter()
+            .map(|e| (e.offer.source.0.clone(), e.offer.name.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("mic", "take01_host_mic"),
+                ("mic", "take01_host_mic-timing"),
+                ("mic-2", "take01_host_mic-2"),
+                ("mic-2", "take01_host_mic-2-seg2"),
+                ("mic-2", "take01_host_mic-2-timing"),
+            ]
+            .map(|(s, n)| (s.to_string(), n.to_string()))
+        );
+        assert!(entries.iter().all(|e| e.participant == "host"));
+        assert!(castcorder_align::ready(&entries));
+        assert!(dir.exists("take01_host_mic-2.flac").unwrap(), "converted");
         let _ = std::fs::remove_dir_all(root.root());
     }
 

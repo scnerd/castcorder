@@ -124,6 +124,26 @@ impl HostControl {
             .unwrap_or(false)
     }
 
+    /// Also record `input` as a backup microphone beside the native one (see
+    /// `Running::add_native_backup`); returns its source id.
+    pub fn add_native_backup(&self, input: NativeInput) -> Result<String, String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .add_native_backup(input)
+    }
+
+    /// Stop recording the backup microphone labelled `label`. False if it
+    /// was not a backup.
+    pub fn remove_native_backup(&self, label: &str) -> Result<bool, String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .remove_native_backup(label)
+    }
+
     /// The inputs the host can join with and whether it is joined, if running.
     pub fn native_state(&self) -> Option<NativeState> {
         self.running
