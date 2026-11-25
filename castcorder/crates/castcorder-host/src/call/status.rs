@@ -9,7 +9,9 @@
 //!   loads a room (it reads other rooms as saved).
 //! - It needs no call secret: the host answers for every room the device was
 //!   in ([`crate::room::Room::membership`]), so a regenerated link does not
-//!   lose the room. A room it was kicked from says only that. Trusted devices
+//!   lose the room, and for every room that trusts the person its
+//!   certificate vouches for, even one the device never joined
+//!   (cast-40e.11). A room it was kicked from says only that. Trusted devices
 //!   are told the room's call link; only the live room names who is in it;
 //!   the calls listed are only those the device was in (each call's
 //!   `devices.jsonl`, read without opening the call's library).
@@ -40,6 +42,8 @@ fn members(call_dir: &Path) -> BTreeSet<String> {
 impl Call {
     /// Answer a status query of `device`: every room of this host it was in.
     /// `nonce` is what its proof signs.
+    /// `person` is the person its certificate vouches for (verified against
+    /// the proof's key): a room that trusts that person counts it.
     pub(super) fn host_status(
         &mut self,
         device: &str,
@@ -47,6 +51,7 @@ impl Call {
         nonce: &str,
         audience: &str,
         owner: bool,
+        person: Option<[u8; 32]>,
     ) -> Result<HostStatus, String> {
         let device = self
             .room
@@ -60,11 +65,13 @@ impl Call {
             if !self.rooms.exists(&name) {
                 continue;
             }
-            let m = self.judge(&name, |r| r.membership_as(&device, alias.as_deref(), owner));
+            let m = self.judge(&name, |r| {
+                r.membership_as(&device, alias.as_deref(), owner, person.as_ref())
+            });
             let (allowed, why) = match m {
                 None => (false, "never in this room"),
                 Some(m) if m.removed => (false, "kicked from this room"),
-                Some(_) => (true, "was in this room"),
+                Some(_) => (true, "was in this room, or its person is trusted here"),
             };
             if m.is_some() {
                 crate::room::decision(&device, "guest", &format!("status of {name}"), allowed, why);
