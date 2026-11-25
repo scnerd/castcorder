@@ -767,6 +767,11 @@ impl Call {
             Ok(Effect::Changed) => Response::Done,
             Ok(Effect::Remove(conns)) => {
                 self.remove.extend(conns.into_iter().map(GuestId));
+                // The kicked device's sync-only connections of this room go
+                // too: its pull ends and the partial file is kept as a
+                // resumable partial, never counted as landed.
+                let banned = self.banned_syncers();
+                self.remove.extend(banned);
                 Response::Done
             }
             Ok(Effect::Roles(conns)) => {

@@ -24,6 +24,7 @@ mod rendezvous;
 mod room;
 mod rooms;
 mod tls;
+pub use tls::unverified_client;
 mod tracks;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
