@@ -86,10 +86,25 @@ pub const MIN_RENEW_MS: f64 = 10_000.0;
 /// the rendezvous, so a guest renewing then may briefly find it offline.
 pub const RENEW_RETRY_MS: f64 = 3_000.0;
 
+/// Whether a connection's selected candidate pair goes through a relay: either
+/// end's candidate type (`candidateType` in `getStats`) is `relay`.
+pub fn pair_is_relayed(local_type: &str, remote_type: &str) -> bool {
+    local_type == "relay" || remote_type == "relay"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use castcorder_link::wire::IceServer;
+
+    #[test]
+    fn only_a_relay_candidate_makes_the_pair_relayed() {
+        assert!(pair_is_relayed("relay", "host"));
+        assert!(pair_is_relayed("srflx", "relay"));
+        assert!(!pair_is_relayed("host", "host"));
+        assert!(!pair_is_relayed("srflx", "prflx"));
+        assert!(!pair_is_relayed("", ""));
+    }
 
     #[test]
     fn the_role_url_sits_beside_the_offer_url() {
