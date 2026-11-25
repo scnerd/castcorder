@@ -1,0 +1,7 @@
+models/
+target/
+vendor/
+logs/
+data/*.parquet
+data/*.wav
+

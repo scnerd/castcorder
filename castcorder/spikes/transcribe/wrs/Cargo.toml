@@ -1,0 +1,19 @@
+[package]
+name = "stt-wrs"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+
+[dependencies]
+whisper-rs = "0.16.0"
+hound = "3.5.1"
+windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+debug = false
