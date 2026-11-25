@@ -191,6 +191,8 @@ pub struct RoomView {
     pub calls: Vec<CallView>,
     /// It is the room `--room` names.
     pub default: bool,
+    /// Persons trusted in it, by id (ADR 0005).
+    pub persons: Vec<String>,
 }
 
 impl Call {
@@ -547,6 +549,34 @@ impl Call {
         }
     }
 
+    /// Trust (or stop trusting) the person `person` in `room` (the host
+    /// machine's home). A room's `room.json` that does not read is left as
+    /// it is.
+    pub(super) fn trust_person(
+        &mut self,
+        room: &str,
+        person: &str,
+        trust: bool,
+    ) -> Result<(), String> {
+        if !self.rooms.exists(room) {
+            return Err(format!("unknown_room: no room named {room} on this host"));
+        }
+        if room == self.room_name {
+            self.room.trust_person(person, trust)?;
+            self.save_room();
+            return Ok(());
+        }
+        let path = self.rooms.room_dir(room).join("room.json");
+        let mut r = match std::fs::read_to_string(&path) {
+            Ok(text) => Room::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+            Err(_) => Room::new(false),
+        };
+        if r.trust_person(person, trust)? {
+            std::fs::write(&path, r.to_json()).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Every room, for the host machine's home.
     pub(super) fn rooms_view(&mut self) -> Vec<RoomView> {
         let now = self.rooms.now_ms();
@@ -557,10 +587,11 @@ impl Call {
             .filter(|r| self.rooms.exists(r))
             .map(|name| {
                 let dir = self.rooms.room_dir(&name);
-                let state = if name == self.room_name {
-                    self.room.state(None)
+                let (state, persons) = if name == self.room_name {
+                    (self.room.state(None), self.room.trusted_persons())
                 } else {
-                    read_room(&dir).state(None)
+                    let r = read_room(&dir);
+                    (r.state(None), r.trusted_persons())
                 };
                 let calls = rooms::list_calls(&dir);
                 let room_live = live && name == self.room_name;
@@ -587,6 +618,7 @@ impl Call {
                         })
                         .collect(),
                     default: name == default,
+                    persons,
                     name,
                 }
             })

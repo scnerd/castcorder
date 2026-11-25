@@ -33,6 +33,9 @@ struct HomeRoom {
     current: Option<String>,
     calls: Vec<HomeCall>,
     default: bool,
+    /// Persons trusted in it, by id.
+    #[serde(default)]
+    persons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -120,6 +123,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let data = RwSignal::new(HomeData::default());
     let message = RwSignal::new(String::new());
     let new_name = RwSignal::new(String::new());
+    let contacts = RwSignal::new(Vec::<super::person::ContactItem>::new());
     let refresh = move || {
         spawn_local(async move {
             match home_request("GET", "/rooms", None).await {
@@ -194,6 +198,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     <span id="home-message" class="small muted">{move || message.get()}</span>
                 </div>
                 <super::person::PersonCard/>
+                <super::person::ContactsCard list=contacts/>
                 <ul id="rooms" class="list">
                     <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
                         {
@@ -256,6 +261,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                         }).collect_view()}
                                     </ul>
                                     <Show when=move || no_calls><span class="small muted empty-calls">"No calls yet."</span></Show>
+                                    <super::person::RoomTrust room=name.clone() trusted=r.persons.clone() contacts=contacts/>
                                 </li>
                             }
                         }

@@ -14,7 +14,8 @@
 // Then B leaves mid-take and its page delivers the take over a sync-only
 // connection, signalled through the mailbox (background sync), and a browser
 // profile and a second host install link to the host's person with link
-// requests through the mailbox (lib/personlink.mjs).
+// requests through the mailbox (lib/personlink.mjs), and two installs'
+// persons become contacts on the home through the mailbox (lib/contacts.mjs).
 //
 // Every port is picked by the OS (none collide with a running `task host`).
 // CARGO_TARGET_DIR and CASTCORDER_DIST select other build dirs.
@@ -52,6 +53,7 @@ import { callDir, check, checks } from './lib/helpers.mjs';
 import { ctx } from './lib/ctx.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
 import { personLinkChecks } from './lib/personlink.mjs';
+import { contactsChecks } from './lib/contacts.mjs';
 import { COTURN_IMAGE, dockerProblem, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -388,6 +390,8 @@ try {
 
   // Link requests through the mailbox (lib/personlink.mjs).
   await personLinkChecks({ HTTP, rendezvous: RV_HTTP });
+  // Contacts through the mailbox, on the home (lib/contacts.mjs).
+  await contactsChecks({ HTTP, rendezvous: RV_HTTP });
 
   // The server saw only routing metadata.
   const secret = frag.split('.')[1];
@@ -415,7 +419,7 @@ try {
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
   for (const [, st] of procs) killTree(st.p);
-  for (const p of [ctx.host8, ctx.host9]) if (p) p.kill();
+  for (const p of [ctx.host8, ctx.host9, ctx.host10]) if (p) p.kill();
   if (turn) coturnLog = stopCoturn(CONTAINER).replaceAll(TURN_SECRET, '<secret>');
 }
 if (coturnLog) writeFileSync(join(RESULTS, 'system-coturn.log'), coturnLog);
@@ -423,6 +427,7 @@ for (const [name, st] of procs) writeFileSync(join(RESULTS, 'system-' + name + '
 for (const n of Object.keys(logs)) writeFileSync(join(RESULTS, 'system-guest-' + n + '.log'), logs[n].join('\n'));
 if (ctx.host8) writeFileSync(join(RESULTS, 'system-host-rejoin.log'), ctx.host8Log || '');
 if (ctx.host9) writeFileSync(join(RESULTS, 'system-host-person-2.log'), ctx.host9Log || '');
+if (ctx.host10) writeFileSync(join(RESULTS, 'system-host-contacts-2.log'), ctx.host10Log || '');
 if (!passed) {
   for (const [name, st] of procs) {
     console.log(name + ' log tail:');
