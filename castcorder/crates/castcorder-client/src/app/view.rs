@@ -293,10 +293,15 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     }
 }
 
-/// Before joining: name, password, camera choice, the recording notice.
+/// Before joining (cast-n56.3): on the left a camera and microphone test
+/// with the device pickers, on the right the room, a name (required), the
+/// password (only once the host asked for one, or typed), the recording
+/// notice and Join.
 #[component]
-fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
+fn Lobby(ui: Ui) -> impl IntoView {
+    let test = lobby::test_ui();
     let on_join = move |_| {
+        lobby::stop();
         ui.join_note.set(String::new());
         ui.join_retry.set(false);
         spawn_local(async move {
@@ -306,10 +311,17 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
             }
         })
     };
-    let shown_name = move || {
-        let n = ui.name.get();
-        if n.trim().is_empty() {
-            placeholder.get()
+    let named = move || !clean_name(&ui.name.get()).is_empty();
+    // The host refused the last attempt for its password (or one is typed).
+    let asked_password = move || {
+        ui.join_note.get() == refusal_note("wrong_password:")
+            || ui.connection.get() == refusal_state("wrong_password:")
+    };
+    let show_password = move || asked_password() || !ui.password.get().is_empty();
+    let note = move || {
+        let n = ui.join_note.get();
+        if asked_password() && ui.password.get().is_empty() {
+            "This call has a password. Type it below, then press Try again.".to_string()
         } else {
             n
         }
@@ -340,50 +352,87 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
         }
     };
     let last_error = move || ui.errors.get().last().cloned().unwrap_or_default();
+    let testing = move || test.state.get() != "off";
+    let video_shown = move || test.state.get() == "on" && ui.camera.get();
+    let room_title = move || {
+        let r = ui.room_name.get();
+        if r.is_empty() {
+            "A Castcorder call".to_string()
+        } else {
+            r
+        }
+    };
     view! {
         <div class="lobby" hidden=move || ui.joined.get()>
             <div class="brand"><Mark/> "Castcorder"</div>
             <div class="lobby-main">
                 <div class="lobby-preview">
                     <div class="preview-box">
-                        <div class="tile-avatar"><span class="tile-initials">{move || initials(&shown_name())}</span></div>
+                        <video id="lobby-video" autoplay=true playsinline=true prop:muted=true hidden=move || !video_shown()></video>
+                        <div class="tile-avatar" hidden=video_shown>
+                            <span class="tile-initials">{move || { let n = clean_name(&ui.name.get()); if n.is_empty() { "?".to_string() } else { initials(&n) } }}</span>
+                        </div>
+                        <span class="preview-label" hidden=video_shown>
+                            {move || if !testing() { "Camera preview" } else if ui.camera.get() { "Opening your camera..." } else { "Camera off" }}</span>
                     </div>
-                    <span class="small muted">"Your microphone and camera open when you join: allow them when the browser asks."</span>
+                    <div class="mic-test">
+                        <div id="mic-meter" class="mic-meter" role="meter" aria-label="Microphone level" aria-valuemin="0" aria-valuemax="100"
+                            aria-valuenow=move || test.level.get().to_string() data-level=move || test.level.get().to_string()>
+                            <span style:width=move || format!("{}%", test.level.get())></span>
+                        </div>
+                        <span id="mic-heard" class="small" class:ok-text=move || test.heard.get()>
+                            {move || match test.state.get() {
+                                "off" => "Test your microphone and camera before you join.",
+                                "starting" => "Opening your microphone...",
+                                _ if test.heard.get() => "We hear you",
+                                _ => "Say something: the bar moves when we hear you.",
+                            }}</span>
+                        <button id="test-devices" type="button" class="btn outline"
+                            on:click=move |_| if testing() { lobby::stop() } else { lobby::start(ui) }>
+                            {move || if testing() { "Stop test" } else { "Test mic and camera" }}</button>
+                    </div>
+                    <span class="small warn-text" id="test-note" hidden=move || test.note.get().is_empty()>{move || test.note.get()}</span>
+                    <div class="lobby-pickers"><devices::LobbyDevices ui=ui/></div>
+                    <label class="check">
+                        <input id="lobby-camera" type="checkbox" prop:checked=move || ui.camera.get() on:change=move |_| toggle_camera(ui) />
+                        "Camera on when I join"
+                    </label>
                 </div>
                 <div class="lobby-form">
-                    <div>
-                        <span class="small muted">"You're joining "</span>
-                        <Show when=move || !ui.room_name.get().is_empty()>
-                            <span class="small muted lobby-room">"Room " <strong id="lobby-room">{move || ui.room_name.get()}</strong>
-                                <Show when=home::is_local_page> " - " <a href="/" id="back-to-rooms">"All rooms"</a></Show></span>
-                        </Show>
+                    <div class="lobby-head">
+                        <span class="small muted">"You're joining"</span>
                         // One h1 in the page at a time (tests click it as a user gesture).
-                        <Show when=move || !ui.joined.get() fallback=|| view! { <p class="lobby-title">"A Castcorder call"</p> }><h1>"A Castcorder call"</h1></Show>
+                        <Show when=move || !ui.joined.get() fallback=move || view! { <p class="lobby-title">{room_title}</p> }>
+                            <h1>{move || if ui.room_name.get().is_empty() {
+                                room_title().into_any()
+                            } else {
+                                view! { <span id="lobby-room">{move || ui.room_name.get()}</span> }.into_any()
+                            }}</h1>
+                        </Show>
+                        <Show when=home::is_local_page>
+                            <a class="small lobby-room" href="/" id="back-to-rooms">"All rooms"</a>
+                        </Show>
                     </div>
                     <div class="field">
                         <label for="name">"Your name"</label>
-                        <input id="name" placeholder=move || placeholder.get() prop:value=move || ui.name.get()
+                        <input id="name" placeholder="How others will see you" autocomplete="name" prop:value=move || ui.name.get()
                             on:input=move |ev| ui.name.set(event_target_value(&ev)) />
                     </div>
-                    <div class="field">
+                    <div class="field" hidden=move || !show_password()>
                         <label for="password">"Call password"</label>
-                        <input id="password" type="password" placeholder="Only if the call has one" prop:value=move || ui.password.get()
+                        <input id="password" type="password" placeholder="From the host" prop:value=move || ui.password.get()
                             on:input=move |ev| ui.password.set(event_target_value(&ev)) />
                     </div>
-                    <devices::LobbyDevices ui=ui/>
-                    <label class="check">
-                        <input type="checkbox" prop:checked=move || ui.camera.get() on:change=move |_| toggle_camera(ui) />
-                        "Camera on when I join"
-                    </label>
                     <LinkBar ui=ui id="call-link-lobby"/>
                     <div class="notice" role="note">
-                        <span class="dot" aria-hidden="true"></span>
-                        <span>"This call is recorded. Your microphone, and your camera if it is on, record on this computer at full quality and go to the host after each take. Producers can see and switch which microphone and camera you use."</span>
+                        <span class="info" aria-hidden="true">"i"</span>
+                        <span>"This call is recorded. Your computer records your microphone, and your camera if it is on, at full quality and sends the files to the host after each take. Producers can see and switch which microphone and camera you use."</span>
                     </div>
-                    <button id="join" class="btn primary big" disabled=move || ui.joined.get() on:click=on_join>"Join call"</button>
+                    <button id="join" class="btn primary big" disabled=move || ui.joined.get() || !named() on:click=on_join>"Join call"</button>
+                    <span class="small muted" id="name-needed" hidden=named>"Type your name to join."</span>
                     <div id="join-note" class="lobby-error" role="alert" hidden=move || ui.join_note.get().is_empty()>
-                        <span>{move || ui.join_note.get()}</span>
-                        <button id="join-retry" class="btn" hidden=move || !ui.join_retry.get() on:click=on_join>"Try again"</button></div>
+                        <span>{note}</span>
+                        <button id="join-retry" class="btn" hidden=move || !ui.join_retry.get() || !named() on:click=on_join>"Try again"</button></div>
                     <span class="lobby-status" hidden=move || !ui.join_note.get().is_empty()>{status}</span>
                     <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
                     <span class="lobby-error" hidden=move || ui.errors.get().is_empty() || !ui.join_note.get().is_empty()>{last_error}</span>
@@ -789,12 +838,10 @@ pub(super) fn App() -> impl IntoView {
         ui.error("worker", &e);
     }
     devices::bind(ui);
-    // The default name comes from the device id, known once the key loads.
-    let placeholder = RwSignal::new(String::from("Guest"));
+    // Load the device key early: a key that cannot load is said before Join.
     spawn_local(async move {
-        match crate::identity::device().await {
-            Ok(d) => placeholder.set(default_name(&d.id)),
-            Err(e) => ui.error("device key", &e),
+        if let Err(e) = crate::identity::device().await {
+            ui.error("device key", &e);
         }
     });
     // On the host machine the lobby starts with the name saved on the home.
@@ -864,7 +911,7 @@ pub(super) fn App() -> impl IntoView {
             } else if home::is_home_page() {
                 view! { <home::Home ui=ui/> }.into_any()
             } else {
-                view! { <Lobby ui=ui placeholder=placeholder/><Call ui=ui/> }.into_any()
+                view! { <Lobby ui=ui/><Call ui=ui/> }.into_any()
             }}
         </div>
         <p hidden>

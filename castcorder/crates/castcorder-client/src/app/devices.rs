@@ -359,6 +359,10 @@ fn pick(ui: Ui, kind: Kind, id: String) {
     d.pick(kind).set(id);
     info!(kind = kind.key(), device = %device.as_ref().map(|x| x.label.as_str()).unwrap_or("system default"), "device picked");
     if !ui.joined.get_untracked() {
+        // The lobby's device test follows the pick.
+        if kind != Kind::Speakers {
+            super::lobby::restart(ui);
+        }
         return;
     }
     let epoch = join_epoch();

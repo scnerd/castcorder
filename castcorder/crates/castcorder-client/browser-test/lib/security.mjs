@@ -100,6 +100,12 @@ export async function securityChecks() {
   await H.click('#set-password');
   await waitFor(async () => (await text(H, '#room-password')) === 'password set', 'password set', 10000);
   const E = await openGuest('E', [], HTTPS2);
+  // No password field until the host asks for one (cast-n56.3).
+  check(!(await E.isVisible('#password')), 'the lobby shows no password field before the call asks');
+  await E.click('#join');
+  await waitFor(async () => (await state(E)) === 'wrong password', 'E refused: no password', 20000);
+  check(await E.isVisible('#password') && (await text(E, '#join-note > span')).includes('has a password'),
+    'a call with a password asks for it: ' + (await text(E, '#join-note > span')));
   await E.fill('#password', 'wrong');
   await E.click('#join');
   await waitFor(async () => (await state(E)) === 'wrong password', 'E refused: wrong password', 20000);
