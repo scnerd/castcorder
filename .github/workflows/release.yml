@@ -23,6 +23,12 @@ on:
 permissions:
   contents: read
 
+env:
+  # whisper.cpp (ggml) tunes itself to the build machine by default; installers
+  # must run on any user's CPU, and the macOS universal build cross-compiles,
+  # where -mcpu=native fails. Build for the portable baseline instead.
+  GGML_NATIVE: "OFF"
+
 jobs:
   verify:
     name: verify
