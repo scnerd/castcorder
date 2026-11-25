@@ -522,6 +522,7 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .disk-bar > span { display: block; height: 100%; background: var(--tile-avatar); }
 .device-list { list-style: none; margin: 0; padding: 0; }
 .device-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+.device-row .revoke-device { margin-left: auto; }
 .join-existing > summary { cursor: pointer; color: var(--accent); font-size: 14px; }
 .join-existing[open] { display: flex; flex-direction: column; gap: 8px; }
 .join-existing .row input { flex: 1; min-width: 0; }

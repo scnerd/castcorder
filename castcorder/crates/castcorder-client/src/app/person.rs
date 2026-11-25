@@ -112,6 +112,9 @@ pub(super) fn PersonCard() -> impl IntoView {
     let message = RwSignal::new(String::new());
     let links = RwSignal::new(Vec::<String>::new());
     let code = RwSignal::new(String::new());
+    // The linked device whose Remove was pressed once: the second press
+    // revokes it (cast-40e.6).
+    let removing = RwSignal::new(None::<String>);
     let refresh = move || {
         spawn_local(async move {
             match person_request("/person", None).await {
@@ -235,13 +238,31 @@ pub(super) fn PersonCard() -> impl IntoView {
                     </span>
                 </li>
                 <For each=move || data.get().devices key=|d| d.id.clone() let:d>
+                    {
+                        let (id1, id2) = (d.id.clone(), d.id.clone());
+                        let asked = move || removing.get().as_deref() == Some(id1.as_str());
+                        view! {
                     <li class="device-row" data-device=d.id.clone()>
                         <Icon name=if d.kind == "app" { "screen" } else { "globe" } small=true/>
                         <span class="contact-text">
                             <span class="contact-name">{d.name.clone()}</span>
                             <span class="small muted">{if d.kind == "app" { "Castcorder app" } else { "Browser" }}</span>
                         </span>
+                        <button class="btn tiny outline revoke-device"
+                            title="It stops being yours everywhere: your rooms and your contacts stop trusting it. Lost or sold devices."
+                            on:click=move |_| {
+                                if removing.get_untracked().as_deref() == Some(id2.as_str()) {
+                                    removing.set(None);
+                                    post("/person/revoke", serde_json::json!({ "device": id2.clone() }), "Device removed.");
+                                } else {
+                                    removing.set(Some(id2.clone()));
+                                }
+                            }>
+                            {move || if asked() { "Remove for good?" } else { "Remove" }}
+                        </button>
                     </li>
+                        }
+                    }
                 </For>
             </ul>
             <div class="row">

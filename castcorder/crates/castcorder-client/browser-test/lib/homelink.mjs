@@ -81,6 +81,14 @@ export async function homeLinkChecks() {
   await waitFor(async () => (await P.locator('#linked-devices li[data-device]:has-text("Lab browser")').count()) === 1,
     'the You card lists the linked browser', 10000);
   check((await row.count()) === 0, 'the approved request leaves the list');
+  // cast-40e.6: Remove asks once more, then revokes the device.
+  const lab = P.locator('#linked-devices li[data-device]:has-text("Lab browser")');
+  await lab.locator('.revoke-device').click();
+  check((await lab.locator('.revoke-device').innerText()).trim() === 'Remove for good?', 'Remove asks once more before revoking');
+  check((await lab.count()) === 1, 'the first press of Remove keeps the device');
+  await lab.locator('.revoke-device').click();
+  await waitFor(async () => (await lab.count()) === 0, 'the revoked browser leaves the You card', 10000);
+  check((await text(P, '#person-message')) === 'Device removed.', 'the You card says the device was removed');
   check(errors.length === 0, 'the link page raised no page errors: ' + errors.join('; '));
 
   // Last: in Firefox a custom-scheme link leaves the page deaf to later clicks.

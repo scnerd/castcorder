@@ -390,6 +390,11 @@ impl Running {
         self.persons.decide(device, approve)
     }
 
+    /// Revoke one of this person's linked devices, by device id (cast-40e.6).
+    pub fn revoke_device(&self, device: &str) -> Result<(), String> {
+        self.persons.revoke(device, wall_ms())
+    }
+
     /// Link this install to the person of the device that made `code`, in
     /// the background ([`Running::person`]'s `joining` follows it).
     pub fn join_person(&self, code: &str) -> Result<(), String> {

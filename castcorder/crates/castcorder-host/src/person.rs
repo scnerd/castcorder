@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 
 use castcorder_link::identity::{self, device_id};
 use castcorder_link::person::{
-    DeviceCert, DeviceKind, LinkCode, PersonKey, fingerprint, verify_cert,
+    DeviceCert, DeviceKind, LinkCode, PersonKey, Revocation, fingerprint, verify_cert,
+    verify_revocation,
 };
 use castcorder_link::wire::{
     AnswerPlain, LinkAnswer, LinkAsk, LinkGrant, OfferPlain, b64, from_json, to_json, unb64,
@@ -75,6 +76,9 @@ struct Saved {
     cert: DeviceCert,
     #[serde(default)]
     devices: Vec<LinkedDevice>,
+    /// This person's device revocations (cast-40e.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked: Vec<Revocation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -158,6 +162,8 @@ struct Inner {
     saved: Saved,
     codes: Vec<Code>,
     joining: Option<Joining>,
+    /// Devices contacts' persons revoked (learned by [`crate::contact`]).
+    foreign_revoked: std::collections::BTreeSet<String>,
 }
 
 /// This install's person, shared by the HTTP listeners, the rendezvous
@@ -216,6 +222,7 @@ impl Persons {
                     device_name: device_name_default(),
                     cert: person.certify(&host_pub, DeviceKind::App, now_ms),
                     devices: Vec::new(),
+                    revoked: Vec::new(),
                 };
                 write_atomic(&path, &serde_json::to_string_pretty(&saved)?)?;
                 info!(person = %person.id(), "made a person key");
@@ -229,6 +236,7 @@ impl Persons {
             saved,
             codes: Vec::new(),
             joining: None,
+            foreign_revoked: Default::default(),
         }))))
     }
 
@@ -263,12 +271,64 @@ impl Persons {
             return false;
         };
         match verify_cert(cert, device) {
-            Ok(p) => p == self.lock().person.public(),
+            Ok(p) => {
+                let g = self.lock();
+                p == g.person.public() && !g.own_revoked(&device_id(device))
+            }
             Err(e) => {
                 warn!(reason = e.reason(), "device certificate refused");
                 false
             }
         }
+    }
+
+    /// The person `cert` vouches for the device whose key is `device`, unless
+    /// that device was revoked (by this person or a contact's): a room's
+    /// trust of a person does not reach a revoked install.
+    pub fn person_of(
+        &self,
+        cert: Option<&DeviceCert>,
+        device: Option<&[u8; 32]>,
+    ) -> Option<[u8; 32]> {
+        let p = cert_person(cert, device)?;
+        (!self.is_revoked(&device_id(device?))).then_some(p)
+    }
+
+    /// Revoke one of this person's devices (cast-40e.6), by device id: it is
+    /// no longer the owner's anywhere this install decides, it leaves the
+    /// devices linked from here, and the revocation goes to contacts with
+    /// the next presence pings. Not this install itself.
+    pub fn revoke(&self, device: &str, now_ms: u64) -> Result<(), String> {
+        let mut g = self.lock();
+        if device == device_id(&g.host.id().0) {
+            return Err("this install cannot revoke itself".into());
+        }
+        if !device.starts_with('k') || device.len() < 8 {
+            return Err("not a device id".into());
+        }
+        g.saved.devices.retain(|d| d.id != device);
+        if !g.own_revoked(device) {
+            let r = g.person.revoke(device, now_ms);
+            g.saved.revoked.push(r);
+        }
+        info!(device, "revoked a device");
+        g.save().map_err(|e| e.to_string())
+    }
+
+    /// This person's revocations, to send to contacts and new app installs.
+    pub fn revocations(&self) -> Vec<Revocation> {
+        self.lock().saved.revoked.clone()
+    }
+
+    /// Whether `device` (an id) was revoked by this person or a contact's.
+    pub fn is_revoked(&self, device: &str) -> bool {
+        let g = self.lock();
+        g.own_revoked(device) || g.foreign_revoked.contains(device)
+    }
+
+    /// Note devices a contact's person revoked (already verified).
+    pub fn note_revoked(&self, devices: impl IntoIterator<Item = String>) {
+        self.lock().foreign_revoked.extend(devices);
     }
 
     /// The person as the host machine's page shows it.
@@ -414,6 +474,11 @@ impl Persons {
         let Some(key) = unb64(&proof.key).and_then(|k| <[u8; 32]>::try_from(k).ok()) else {
             return LinkAnswer::Refused("malformed key".into());
         };
+        // A revoked device stays revoked: linking it again would make it
+        // the owner's here while contacts keep refusing it.
+        if g.own_revoked(&device) {
+            return LinkAnswer::Refused("this device was removed from the person".into());
+        }
         g.expire(now_ms);
         g.answer(ask, key, &device, now_ms)
     }
@@ -442,6 +507,12 @@ impl Persons {
         g.saved.key = b64(&person.secret());
         g.saved.name = grant.person_name.clone();
         g.saved.cert = grant.cert.clone();
+        g.saved.revoked = grant
+            .revoked
+            .iter()
+            .filter(|r| verify_revocation(r).ok() == Some(person.public()))
+            .cloned()
+            .collect();
         g.person = person;
         g.codes.clear();
         g.save().map_err(|e| e.to_string())
@@ -497,6 +568,10 @@ impl Persons {
 }
 
 impl Inner {
+    fn own_revoked(&self, device: &str) -> bool {
+        self.saved.revoked.iter().any(|r| r.device == device)
+    }
+
     fn save(&self) -> io::Result<()> {
         write_atomic(&self.path, &serde_json::to_string_pretty(&self.saved)?)
     }
@@ -575,6 +650,11 @@ impl Inner {
                     // Only an app install holds the person key.
                     person_secret: (claim.kind == DeviceKind::App)
                         .then(|| b64(&self.person.secret())),
+                    revoked: if claim.kind == DeviceKind::App {
+                        self.saved.revoked.clone()
+                    } else {
+                        Vec::new()
+                    },
                 })
             }
         }
@@ -960,5 +1040,60 @@ mod tests {
         assert!(b2.owns(Some(&a.cert()), Some(&host_a.id().0)));
         let _ = std::fs::remove_dir_all(dir_a);
         let _ = std::fs::remove_dir_all(dir_b);
+    }
+
+    #[test]
+    fn a_revoked_device_is_no_longer_owned_here_or_on_apps_linked_later() {
+        let dir_a = tmp("revoke-a");
+        let dir_c = tmp("revoke-c");
+        let host_a = HostKey::from_secret([1; 32]);
+        let host_c = HostKey::from_secret([3; 32]);
+        let laptop = HostKey::from_secret([5; 32]);
+        let a = Persons::load_or_create(&dir_a, &host_a, NOW).unwrap();
+        let code = a.new_code(NOW).unwrap();
+        a.answer(&ask(&code, &laptop, DeviceKind::Browser, NOW), NOW);
+        a.decide(&device_id(&laptop.id().0), true).unwrap();
+        let LinkAnswer::Granted(g) = a.answer(&ask(&code, &laptop, DeviceKind::Browser, NOW), NOW)
+        else {
+            panic!("not granted")
+        };
+        let lid = device_id(&laptop.id().0);
+        assert!(a.owns(Some(&g.cert), Some(&laptop.id().0)));
+        assert_eq!(
+            a.person_of(Some(&g.cert), Some(&laptop.id().0)),
+            Some(a.public())
+        );
+        assert!(a.revoke(&device_id(&host_a.id().0), NOW).is_err());
+        a.revoke(&lid, NOW + 1).unwrap();
+        assert!(!a.owns(Some(&g.cert), Some(&laptop.id().0)));
+        assert_eq!(a.person_of(Some(&g.cert), Some(&laptop.id().0)), None);
+        assert!(a.view(NOW).devices.is_empty());
+        // Revoking twice signs once.
+        a.revoke(&lid, NOW + 2).unwrap();
+        assert_eq!(a.revocations().len(), 1);
+        assert_eq!(verify_revocation(&a.revocations()[0]), Ok(a.public()));
+        // It survives a restart.
+        let a2 = Persons::load_or_create(&dir_a, &host_a, NOW).unwrap();
+        assert!(!a2.owns(Some(&g.cert), Some(&laptop.id().0)));
+        // It cannot be linked again.
+        let again = a2.new_code(NOW).unwrap();
+        assert!(matches!(
+            a2.answer(&ask(&again, &laptop, DeviceKind::Browser, NOW), NOW),
+            LinkAnswer::Refused(w) if w.contains("removed")
+        ));
+        // An app linked later learns it with its grant.
+        let code = a2.new_code(NOW).unwrap();
+        a2.answer(&ask(&code, &host_c, DeviceKind::App, NOW), NOW);
+        a2.decide(&device_id(&host_c.id().0), true).unwrap();
+        let LinkAnswer::Granted(gc) = a2.answer(&ask(&code, &host_c, DeviceKind::App, NOW), NOW)
+        else {
+            panic!("not granted")
+        };
+        let c = Persons::load_or_create(&dir_c, &host_c, NOW).unwrap();
+        c.adopt(&gc).unwrap();
+        assert!(c.owns(Some(&a2.cert()), Some(&host_a.id().0)));
+        assert!(!c.owns(Some(&g.cert), Some(&laptop.id().0)));
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_c);
     }
 }

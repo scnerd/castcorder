@@ -39,6 +39,7 @@ use crate::link::{HostId, LinkError};
 use crate::wire::{b64, unb64};
 
 const CERT: &[u8] = b"castcorder-link device cert v1\0";
+const REVOKE: &[u8] = b"castcorder-link device revocation v1\0";
 
 /// The person id of a person public key.
 pub fn person_id(key: &[u8; 32]) -> String {
@@ -210,6 +211,63 @@ impl PersonKey {
     }
 }
 
+/// The person key's statement that a device (by device id) no longer
+/// belongs to the person (ADR 0005, cast-40e.6). Hosts that learn it stop
+/// counting that device as the person's: no owner seat, no trust through
+/// the person, and their rooms drop its trust and producer role.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revocation {
+    /// The person's Ed25519 public key, base64url.
+    pub person: String,
+    /// The revoked device's id ([`crate::identity::device_id`]).
+    pub device: String,
+    /// When, ms since the Unix epoch.
+    pub revoked_ms: u64,
+    /// Ed25519 signature by the person key over [`revocation_message`].
+    pub sig: String,
+}
+
+/// The bytes the person key signs to revoke one device.
+pub fn revocation_message(person: &[u8; 32], device: &str, revoked_ms: u64) -> Vec<u8> {
+    let mut m = REVOKE.to_vec();
+    m.extend_from_slice(person);
+    m.extend_from_slice(device.as_bytes());
+    m.push(0);
+    m.extend_from_slice(revoked_ms.to_string().as_bytes());
+    m
+}
+
+/// Check a revocation; the person public key that signed it.
+pub fn verify_revocation(r: &Revocation) -> Result<[u8; 32], CertError> {
+    let person = key32(&r.person).ok_or(CertError::Malformed)?;
+    let sig: [u8; 64] = unb64(&r.sig)
+        .and_then(|s| s.try_into().ok())
+        .ok_or(CertError::Malformed)?;
+    let vk = VerifyingKey::from_bytes(&person).map_err(|_| CertError::Malformed)?;
+    vk.verify_strict(
+        &revocation_message(&person, &r.device, r.revoked_ms),
+        &Signature::from_bytes(&sig),
+    )
+    .map_err(|_| CertError::BadSignature)?;
+    Ok(person)
+}
+
+impl PersonKey {
+    /// Revoke the device `device` (its device id).
+    pub fn revoke(&self, device: &str, revoked_ms: u64) -> Revocation {
+        let person = self.public();
+        let sig = self
+            .sk
+            .sign(&revocation_message(&person, device, revoked_ms));
+        Revocation {
+            person: b64(&person),
+            device: device.to_string(),
+            revoked_ms,
+            sig: b64(&sig.to_bytes()),
+        }
+    }
+}
+
 impl std::fmt::Debug for PersonKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PersonKey({})", self.id())
@@ -329,6 +387,36 @@ mod tests {
 
     fn device(n: u8) -> [u8; 32] {
         SigningKey::from_bytes(&[n; 32]).verifying_key().to_bytes()
+    }
+
+    #[test]
+    fn a_revocation_verifies_and_binds_device_time_and_person() {
+        let p = PersonKey::from_secret([3; 32]);
+        let r = p.revoke("kabc", 7);
+        assert_eq!(verify_revocation(&r), Ok(p.public()));
+        for bad in [
+            Revocation {
+                device: "kabd".into(),
+                ..r.clone()
+            },
+            Revocation {
+                revoked_ms: 8,
+                ..r.clone()
+            },
+            Revocation {
+                person: b64(&PersonKey::from_secret([4; 32]).public()),
+                ..r.clone()
+            },
+        ] {
+            assert_eq!(verify_revocation(&bad), Err(CertError::BadSignature));
+        }
+        assert_eq!(
+            verify_revocation(&Revocation {
+                sig: "x".into(),
+                ..r
+            }),
+            Err(CertError::Malformed)
+        );
     }
 
     #[test]
