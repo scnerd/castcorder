@@ -47,6 +47,8 @@ pub struct Mailbox {
     /// earliest of them), if it carried any that do: the call connection
     /// renews them before then (cast-lxt.11).
     pub relay_expires: Option<u64>,
+    /// Why the hello carried no relay credentials, if the rendezvous said.
+    pub relay_error: Option<String>,
 }
 
 impl Drop for Mailbox {
@@ -86,6 +88,7 @@ impl Mailbox {
             closed,
             ice_servers: js_sys::Array::new().into(),
             relay_expires: None,
+            relay_error: None,
         };
         match mb.next(HELLO_MS).await? {
             ServerMsg::Hello {
@@ -93,9 +96,10 @@ impl Mailbox {
                 relay_error,
                 ..
             } => {
-                if let Some(why) = relay_error {
+                if let Some(why) = &relay_error {
                     tracing::warn!(reason = %why, "the rendezvous gave no relay (TURN) credentials");
                 }
+                mb.relay_error = relay_error;
                 mb.ice_servers = js_sys::JSON::parse(&to_json(&ice_servers))?;
                 mb.relay_expires = crate::signal::relay_expires(&ice_servers);
                 Ok(mb)

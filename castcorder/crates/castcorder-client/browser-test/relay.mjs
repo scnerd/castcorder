@@ -173,7 +173,10 @@ try {
   check(['A', 'B'].every((n) => logs[n].some((l) => l.includes('ice transport policy forced') && l.includes('relay'))),
     'both guests forced iceTransportPolicy=relay');
   const minted = (rv.err.match(/relay credentials minted/g) || []).length;
-  check(minted >= 3, 'the rendezvous minted relay credentials for the host and both guests (' + minted + ')');
+  // Both guests share one address here, so the second reuses the first's
+  // credential (cast-lxt.12) instead of minting its own.
+  const reused = (rv.err.match(/relay credentials reused/g) || []).length;
+  check(minted >= 2 && minted + reused >= 3, 'the rendezvous gave relay credentials to the host and both guests (' + minted + ' minted, ' + reused + ' reused)');
 
   const pairs = await waitFor(() => {
     const m = [...host.err.matchAll(/chosen candidate pair candidate_pair=Udp (\S+) -> (\S+)/g)];
@@ -276,7 +279,7 @@ try {
   const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 60000, 250).catch(() => false);
   check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
-  check(minted2 >= 4, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
+  check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
 
   // Relay metering. The guests leave, so their coturn sessions end and coturn
   // reports their bytes (it counts a session when it ends).

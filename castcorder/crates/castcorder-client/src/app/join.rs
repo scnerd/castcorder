@@ -390,6 +390,13 @@ async fn renew_relay(
         let fresh = match crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, &link)).await {
             Ok(mb) => match mb.relay_expires {
                 Some(e) => Ok((e, mb.ice_servers.clone())),
+                None if crate::signal::relay_quota_spent(mb.relay_error.as_deref()) => {
+                    // The budget is spent for the period: asking again every
+                    // few seconds only adds load (cast-lxt.12). Keep the old
+                    // credentials; a dropped call reconnects as usual.
+                    warn!("relay budget spent; relay credentials are not renewed");
+                    return;
+                }
                 None => Err("the rendezvous gave no relay credentials".to_string()),
             },
             Err(e) => Err(describe(&e)),

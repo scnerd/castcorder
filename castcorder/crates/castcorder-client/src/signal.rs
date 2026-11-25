@@ -86,6 +86,13 @@ pub const MIN_RENEW_MS: f64 = 10_000.0;
 /// the rendezvous, so a guest renewing then may briefly find it offline.
 pub const RENEW_RETRY_MS: f64 = 3_000.0;
 
+/// Whether a hello's `relay_error` is the relay budget being spent
+/// (`relay_quota: ...`): asking again within the budget period cannot help,
+/// so a renewal loop gives up and keeps its old credentials.
+pub fn relay_quota_spent(relay_error: Option<&str>) -> bool {
+    relay_error.is_some_and(|e| e.starts_with(castcorder_link::wire::code::RELAY_QUOTA))
+}
+
 /// Whether a connection's selected candidate pair goes through a relay: either
 /// end's candidate type (`candidateType` in `getStats`) is `relay`.
 pub fn pair_is_relayed(local_type: &str, remote_type: &str) -> bool {
@@ -96,6 +103,14 @@ pub fn pair_is_relayed(local_type: &str, remote_type: &str) -> bool {
 mod tests {
     use super::*;
     use castcorder_link::wire::IceServer;
+
+    #[test]
+    fn only_a_spent_budget_stops_renewal_retries() {
+        assert!(relay_quota_spent(Some("relay_quota: over budget")));
+        assert!(!relay_quota_spent(Some("host_offline: gone")));
+        assert!(!relay_quota_spent(Some("rate_limited: too many")));
+        assert!(!relay_quota_spent(None));
+    }
 
     #[test]
     fn only_a_relay_candidate_makes_the_pair_relayed() {
