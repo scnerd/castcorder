@@ -104,6 +104,17 @@ export async function rejoinChecks({ rendezvous } = {}) {
   await G.waitForSelector('#join');
   await waitFor(async () => (await row(G, first).locator('.needs-producer').count()) === 1, 'a past call says a producer can continue it', 20000);
   check((await row(G, first).locator('.continue-call').count()) === 0, 'a guest that is not a producer is not offered Continue');
+  // Archive the past call in this browser's own list (cast-bc4): hidden, shown
+  // on demand, restored; the current call has no Archive.
+  check((await row(G, second).locator('.archive-call').count()) === 0, 'the current call cannot be archived');
+  await row(G, first).locator('.archive-call').click();
+  await waitFor(async () => !(await row(G, first).isVisible()), 'an archived call leaves this browser\x27s list', 10000);
+  await waitFor(async () => (await card(G).locator('.toggle-archived').textContent()).includes('Show archived (1)'), 'the room offers its archived call', 10000);
+  await card(G).locator('.toggle-archived').click();
+  await waitFor(async () => await row(G, first).isVisible(), 'Show archived lists it again', 5000);
+  check((await row(G, first).textContent()).includes('Archived'), 'an archived call says so');
+  await row(G, first).locator('.archive-call').click();
+  await waitFor(async () => (await card(G).locator('.toggle-archived').count()) === 0 && (await row(G, first).isVisible()), 'Unarchive puts it back', 10000);
   await G.goto(base + '/?name=Gus&call=' + encodeURIComponent(first) + '#' + frag);
   await G.waitForSelector('#join');
   check((await text(G, '#rejoin-target')).includes(first), 'a page opened to rejoin a call says so');

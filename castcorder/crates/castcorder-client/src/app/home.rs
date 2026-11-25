@@ -22,6 +22,9 @@ struct HomeCall {
     started_ms: u64,
     takes: u32,
     live: bool,
+    /// Hidden until "Show archived" (cast-bc4).
+    #[serde(default)]
+    archived: bool,
 }
 
 /// One room, as `GET /rooms` says.
@@ -255,6 +258,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         people: RwSignal::new(Default::default()),
         past: RwSignal::new(Default::default()),
         invite: RwSignal::new(Default::default()),
+        replace: RwSignal::new(Default::default()),
+        archived: RwSignal::new(Default::default()),
     };
     let refresh = move || {
         spawn_local(async move {
@@ -566,6 +571,10 @@ struct Opened {
     people: RwSignal<std::collections::BTreeSet<String>>,
     past: RwSignal<std::collections::BTreeSet<String>>,
     invite: RwSignal<std::collections::BTreeSet<String>>,
+    /// Rooms asking "replace the link?" (cast-7jv).
+    replace: RwSignal<std::collections::BTreeSet<String>>,
+    /// Rooms showing their archived calls too (cast-bc4).
+    archived: RwSignal<std::collections::BTreeSet<String>>,
 }
 
 /// Show or hide `room` in `set`.
@@ -618,9 +627,14 @@ fn room_card(
     let mut calls = r.calls.clone();
     calls.reverse();
     let count = calls.len();
+    let hidden = calls.iter().filter(|c| c.archived).count();
+    let nm = StoredValue::new(name.clone());
+    let archived_shown = move || open.archived.with(|s| s.contains(&nm.get_value()));
     let (p1, p2, p3, p4) = (name.clone(), name.clone(), name.clone(), name.clone());
     let (i1, i2, i3) = (name.clone(), name.clone(), name.clone());
     let inviting = move || open.invite.with(|s| s.contains(&i1));
+    let (r1, r2, r3) = (name.clone(), name.clone(), name.clone());
+    let replacing = move || open.replace.with(|s| s.contains(&r1));
     let people = move || open.people.with(|s| s.contains(&p1));
     let menu = NodeRef::<leptos::html::Details>::new();
     let close_menu = move || {
@@ -653,7 +667,7 @@ fn room_card(
                             <button class="menu-item room-people-toggle" on:click=move |_| { close_menu(); flip(open.people, &p2, !open.people.with_untracked(|s| s.contains(&p2))); }>"People and settings..."</button>
                             <button class="menu-item open-room-folder" on:click=move |_| { close_menu(); act("/folder/open", serde_json::json!({ "room": n3.clone() }), "Folder opened."); }>"Open recordings folder"</button>
                             <button class="menu-item regen-room-link" title="The old link stops working; people in the call stay"
-                                on:click=move |_| { close_menu(); act("/rooms/link", serde_json::json!({ "room": n4.clone() }), "New call link made; the old one no longer works."); }>"Replace link (old one stops working)"</button>
+                                on:click=move |_| { close_menu(); flip(open.replace, &r2, true); }>"Replace link..."</button>
                         </div>
                     </details>
                 </span>
@@ -663,6 +677,17 @@ fn room_card(
                 Some(c) => format!("Joining continues the call of {c}"),
                 None => "Joining starts a new call".to_string(),
             }}</span>
+            <div class="room-people room-replace" role="alertdialog" hidden=move || !replacing()>
+                <span class="small">"Replace this room's call link? The old link stops working for everyone, including copies pasted into invites or calendars. People already in the call stay."</span>
+                <span class="room-actions">
+                    <button class="btn cancel-replace" on:click=move |_| flip(open.replace, &r3, false)>"Cancel"</button>
+                    <button class="btn primary confirm-replace" on:click={
+                        let n = n4.clone();
+                        let r = name.clone();
+                        move |_| { flip(open.replace, &r, false); act("/rooms/link", serde_json::json!({ "room": n.clone() }), "New call link made; the old one no longer works."); }
+                    }>"Replace link"</button>
+                </span>
+            </div>
             <div class="room-people room-invite" hidden=move || !inviting()>
                 <span class="small muted">"Invite contacts to this room's call. Someone offline gets it when back online."</span>
                 <ul class="list invite-list">
@@ -706,24 +731,38 @@ fn room_card(
             <Show when=move || count != 0>
                 <details class="past-calls" prop:open={let p = p3.clone(); move || open.past.with(|s| s.contains(&p))}
                     on:toggle={let p = p4.clone(); move |ev| flip(open.past, &p, event_target::<web_sys::HtmlDetailsElement>(&ev).open())}>
-                    <summary class="small">{format!("Past calls ({count})")}</summary>
+                    <summary class="small">{format!("Past calls ({})", count - hidden)}</summary>
+                    <Show when=move || hidden != 0>
+                        <button class="btn tiny outline toggle-archived" on:click=move |_| flip(open.archived, &nm.get_value(), !archived_shown())>
+                            {move || if archived_shown() { format!("Hide archived ({hidden})") } else { format!("Show archived ({hidden})") }}
+                        </button>
+                    </Show>
                     <ul class="list calls">
                         {calls.clone().into_iter().map(|c| {
-                            let (room_a, room_b, id_a, id_b) = (r.name.clone(), r.name.clone(), c.id.clone(), c.id.clone());
+                            let (room_a, room_b, room_c, id_a, id_b, id_c) = (r.name.clone(), r.name.clone(), r.name.clone(), c.id.clone(), c.id.clone(), c.id.clone());
                             let next = current.as_deref() == Some(c.id.as_str());
                             let clive = c.live;
+                            let is_archived = c.archived;
+                            let shown = move || !is_archived || archived_shown();
                             view! {
-                                <li class="call-row" data-call=c.id.clone() class:next=next>
+                                <li class="call-row" data-call=c.id.clone() class:next=next class:archived=is_archived hidden=move || !shown()>
                                     <span class="call-when" title=when(c.started_ms)>{day(c.started_ms)}</span>
                                     <span class="small call-takes">{takes(c.takes)}</span>
                                     <span class="small muted call-id">{c.id.clone()}</span>
                                     <Show when=move || clive><span class="chip ok">"Live"</span></Show>
                                     <Show when=move || next && !clive><span class="chip">"Next join"</span></Show>
+                                    <Show when=move || is_archived><span class="chip">"Archived"</span></Show>
                                     <span class="call-actions">
                                         <button class="btn tiny continue-call" disabled=next
                                             on:click=move |_| act("/rooms/call", serde_json::json!({ "room": room_a.clone(), "call": id_a.clone() }), "This call continues: the next to join lands in it.")>"Continue this call"</button>
                                         <button class="btn tiny outline open-call-folder"
                                             on:click=move |_| act("/folder/open", serde_json::json!({ "room": room_b.clone(), "call": id_b.clone() }), "Folder opened.")>"Open folder"</button>
+                                        <button class="btn tiny outline archive-call" disabled=clive
+                                            title=if is_archived { "Show this call in the list again" } else { "Hide this call from the list; its recordings stay" }
+                                            on:click=move |_| act("/rooms/archive", serde_json::json!({ "room": room_c.clone(), "call": id_c.clone(), "archived": !is_archived }),
+                                                if is_archived { "Call restored to the list." } else { "Call archived: its recordings stay on disk." })>
+                                            {if is_archived { "Unarchive" } else { "Archive" }}
+                                        </button>
                                     </span>
                                 </li>
                             }

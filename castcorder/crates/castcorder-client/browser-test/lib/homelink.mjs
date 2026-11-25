@@ -54,6 +54,18 @@ export async function homeLinkChecks() {
   const old = P.locator('#joined-cards li[data-joined-room="Old-show"]');
   check((await old.textContent()).includes('Removed') && (await old.locator('a').count()) === 0,
     'a room the device was removed from says so and offers no way in');
+  // Replacing a room's link asks first (cast-7jv): it breaks every copy of the
+  // old link, so one click on the menu item does nothing until confirmed.
+  const mainCard = P.locator('#rooms li[data-room="main-show"]');
+  await mainCard.locator('.room-menu summary').click();
+  await mainCard.locator('.regen-room-link').click();
+  await waitFor(async () => await mainCard.locator('.room-replace').isVisible(), 'the room asks before replacing its link', 5000);
+  check((await mainCard.locator('.room-replace').textContent()).includes('old link stops working'),
+    'the question says the old link stops working');
+  check(!(await text(P, '#home-message')).includes('New call link made'), 'nothing was replaced by asking');
+  await mainCard.locator('.cancel-replace').click();
+  await waitFor(async () => !(await mainCard.locator('.room-replace').isVisible()), 'Cancel closes the question', 5000);
+  check(true, 'Cancel leaves the link alone');
   // The You card is in Settings, a place of the home's left nav (cast-n56.1).
   await P.click('#nav-settings');
   await P.waitForSelector('#person #link-device', { timeout: 15000 });

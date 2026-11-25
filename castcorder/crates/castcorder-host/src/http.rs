@@ -354,6 +354,9 @@ struct HomeRequest {
     room: Option<String>,
     #[serde(default)]
     call: Option<String>,
+    /// `/rooms/archive`: hide the call (else bring it back).
+    #[serde(default)]
+    archived: bool,
     /// `/folder/open`: the whole recordings folder (Settings).
     #[serde(default)]
     library: bool,
@@ -890,8 +893,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
-            | "/rooms/call" | "/person" | "/person/code" | "/person/decide" | "/person/join"
-            | "/person/revoke",
+            | "/rooms/call" | "/rooms/archive" | "/person" | "/person/code" | "/person/decide"
+            | "/person/join" | "/person/revoke",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -943,7 +946,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             ),
             None => gone(),
         },
-        ("POST", "/rooms" | "/rooms/link" | "/rooms/call") => {
+        ("POST", "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive") => {
             let r = match serde_json::from_slice::<HomeRequest>(&req.body) {
                 Ok(r) => r,
                 Err(e) => return text(400, format!("bad json: {e}")),
@@ -959,6 +962,13 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                     reply,
                 })
                 .map(|a| a.map(|link| serde_json::json!({ "link": link }))),
+                "/rooms/archive" => ask(app, |reply| Command::ArchiveCall {
+                    room: r.room.unwrap_or_default(),
+                    call: r.call.unwrap_or_default(),
+                    archived: r.archived,
+                    reply,
+                })
+                .map(|a| a.map(|()| serde_json::json!({}))),
                 _ => ask(app, |reply| Command::ChooseCall {
                     room: r.room.unwrap_or_default(),
                     call: r.call,

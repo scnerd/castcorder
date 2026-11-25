@@ -725,6 +725,24 @@ impl Running {
             .map_err(|_| "the host did not answer")?
     }
 
+    /// Hide one call of `room` from the home's lists, or bring it back
+    /// (`archived` false); recordings stay put. A call someone is in cannot
+    /// be hidden.
+    pub fn archive_call(&self, room: &str, call: &str, archived: bool) -> Result<(), String> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::ArchiveCall {
+                room: room.to_string(),
+                call: call.to_string(),
+                archived,
+                reply,
+            })
+            .map_err(|_| "the host is stopping")?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the host did not answer")?
+    }
+
     /// The live status (guests, recording take, syncing outboxes), asked of
     /// the call's thread; `None` once the host is stopping.
     pub fn live_status(&self) -> Option<LiveStatus> {

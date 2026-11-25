@@ -252,6 +252,11 @@ pub struct PresencePing {
     /// install's contacts, to merge (cast-40e.9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync: Option<OwnSync>,
+    /// The asking install is going offline (stopping, or starting to
+    /// appear offline): show it offline now rather than when it goes
+    /// stale (cast-40e.12).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub leaving: bool,
 }
 
 /// A person's contacts as one of its app installs keeps them, sent to its
@@ -653,8 +658,17 @@ mod tests {
                 device: "Laptop".into(),
                 revoked: Vec::new(),
                 sync: None,
+                leaving: false,
             })
         );
+        assert!(!to_json(&ping).contains("leaving"));
+        // Going offline (cast-40e.12).
+        let bye: OfferPlain = from_json(
+            r#"{"secret":"","name":"Bob","sdp":"x","presence":{"device":"Laptop","leaving":true}}"#,
+        )
+        .unwrap();
+        assert!(bye.presence.as_ref().unwrap().leaving);
+        assert!(to_json(&bye).contains(r#""leaving":true"#));
         let pa = AnswerPlain::Presence(PresenceAnswer {
             name: "Ann".into(),
             device: "Desk".into(),
