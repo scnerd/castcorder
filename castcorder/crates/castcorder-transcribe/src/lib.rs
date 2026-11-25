@@ -166,17 +166,34 @@ fn is_marker(text: &str) -> bool {
 }
 
 impl Whisper {
-    /// How long transcribing `secs` of hiss takes, in seconds.
+    /// How long transcribing `secs` of hiss takes, in seconds. The clock
+    /// starts once [`ENGINE`] is held, so time spent waiting for another
+    /// transcriber does not make the GPU look slow.
     fn time(&mut self, secs: f32) -> Result<f64, String> {
         let audio = hiss(secs);
+        let _one = engine();
         let start = std::time::Instant::now();
-        self.transcribe(&audio)?;
+        self.run(&audio)?;
         Ok(start.elapsed().as_secs_f64())
     }
 }
 
 impl Transcriber for Whisper {
     fn transcribe(&mut self, pcm: &[f32]) -> Result<Vec<Segment>, String> {
+        let _one = engine();
+        self.run(pcm)
+    }
+
+    /// Run the model once on real input (silence is never given to it), so
+    /// weights are loaded and GPU shaders compiled before the call needs it.
+    fn warm_up(&mut self) -> Result<(), String> {
+        self.transcribe(&hiss(2.0)).map(|_| ())
+    }
+}
+
+impl Whisper {
+    /// [`Transcriber::transcribe`], with [`ENGINE`] already held.
+    fn run(&mut self, pcm: &[f32]) -> Result<Vec<Segment>, String> {
         let rms = (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len().max(1) as f32).sqrt();
         if pcm.is_empty() || rms < QUIET_RMS {
             return Ok(Vec::new());
@@ -207,7 +224,6 @@ impl Transcriber for Whisper {
         // for a short utterance (much faster; a little padding for safety).
         let secs = audio.len() as f32 / SAMPLE_RATE as f32;
         p.set_audio_ctx(((secs * 50.0) as i32 + 64).min(1500));
-        let _one = engine();
         let state = &mut self.inner.as_mut().ok_or("the model is closed")?.0;
         state
             .full(p, audio)
@@ -237,12 +253,6 @@ impl Transcriber for Whisper {
             });
         }
         Ok(out)
-    }
-
-    /// Run the model once on real input (silence is never given to it), so
-    /// weights are loaded and GPU shaders compiled before the call needs it.
-    fn warm_up(&mut self) -> Result<(), String> {
-        self.transcribe(&hiss(2.0)).map(|_| ())
     }
 }
 
