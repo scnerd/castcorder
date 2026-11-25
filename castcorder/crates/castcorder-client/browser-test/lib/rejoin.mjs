@@ -138,6 +138,16 @@ export async function rejoinChecks({ rendezvous } = {}) {
   check(await card(G).locator('.rejoin-room').isHidden(), 'a kicked device is offered no Rejoin');
   check((await card(G).locator('.rejoin-call, .continue-call').count()) === 0, 'nor any call');
 
+  // The link is regenerated (cast-lot): K (not trusted) is told plainly to ask
+  // the host for the new link, not "Status unknown", and is offered no Rejoin.
+  await P.click('#regen-link');
+  await K.reload();
+  await K.waitForSelector('#join');
+  await waitFor(async () => (await card(K).count()) === 1 && (await chip(K)) !== 'Checking', 'K\x27s list is checked', 30000);
+  check((await chip(K)) === 'Link changed', 'after the link is regenerated K\x27s room says the link changed, not unknown: ' + (await chip(K)));
+  check((await card(K).locator('.link-changed-note').innerText()).includes('ask the host for the new link'), 'the room says to ask the host for the new link');
+  check(await card(K).locator('.rejoin-room').isHidden(), 'no Rejoin is offered with a link that no longer works');
+
   // The host stops: K's page (served by the rendezvous) reloads and still
   // lists the room, offline.
   await leave(P);
