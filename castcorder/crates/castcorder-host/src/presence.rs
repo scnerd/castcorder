@@ -293,7 +293,8 @@ pub fn spawn(
     thread::Builder::new()
         .name("presence".into())
         .spawn(move || {
-            info!("presence pings start once registered with the rendezvous");
+            // Not "registered with the rendezvous": tests count that line.
+            info!("presence pings will start after the first registration");
             while !stop.load(Ordering::SeqCst) {
                 for (to, person) in contacts.presence_due(crate::wall_ms()) {
                     let (contacts, base) = (contacts.clone(), base.clone());
