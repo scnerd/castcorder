@@ -643,6 +643,7 @@ fn Call(ui: Ui) -> impl IntoView {
         })
     };
     let invite_open = RwSignal::new(false);
+    let phone_more = RwSignal::new(false);
     let more_open = RwSignal::new(false);
     let top_title = move || {
         let r = ui
@@ -869,7 +870,7 @@ fn Call(ui: Ui) -> impl IntoView {
                         </button>
                         <span class="dock-label">{move || if ui.camera.get() { "Stop video" } else { "Start video" }}</span>
                     </div>
-                    <div class="dock-item">
+                    <div class="dock-item desk-only">
                         <button id="self-view" class="dock-btn" aria-pressed=move || if ui.self_view.get() { "false" } else { "true" }
                             aria-label=move || if ui.self_view.get() { "Hide self view (others still see you)" } else { "Show self view" }
                             on:click=move |_| ui.self_view.update(|v| *v = !*v)>
@@ -877,7 +878,7 @@ fn Call(ui: Ui) -> impl IntoView {
                         </button>
                         <span class="dock-label">{move || if ui.self_view.get() { "Hide me" } else { "Show me" }}</span>
                     </div>
-                    <div class="dock-item">
+                    <div class="dock-item desk-only">
                         <Show when=move || ui.devices.open.get()>
                             <devices::DevicesDialog ui=ui/>
                         </Show>
@@ -887,6 +888,34 @@ fn Call(ui: Ui) -> impl IntoView {
                             <Icon name="sliders"/>
                         </button>
                         <span class="dock-label">"Devices"</span>
+                    </div>
+                    // On a phone (cast-n56.7): People (Recordings for a guest) and
+                    // More, which holds Hide me, Devices, Recordings and Transcript.
+                    <div class="dock-item phone-only">
+                        <button id="dock-people" class="dock-btn" aria-pressed=move || pressed(if producer() { Panel::People } else { Panel::Recordings })
+                            on:click=move |_| { phone_more.set(false); toggle(if producer() { Panel::People } else { Panel::Recordings }) }>
+                            {move || if producer() { view! { <Icon name="people"/> }.into_any() } else { view! { <Icon name="folder"/> }.into_any() }}
+                        </button>
+                        <span class="dock-label">{move || if producer() { "People" } else { "Recordings" }}</span>
+                    </div>
+                    <div class="dock-item phone-only">
+                        <Show when=move || phone_more.get()>
+                            <div class="dialog more-sheet" id="more-sheet" role="menu">
+                                <button id="more-self-view" class="btn ghost" on:click=move |_| { phone_more.set(false); ui.self_view.update(|v| *v = !*v) }>
+                                    <Icon name="self" small=true/>{move || if ui.self_view.get() { "Hide me (others still see you)" } else { "Show me" }}</button>
+                                <button id="more-devices" class="btn ghost" on:click=move |_| { phone_more.set(false); devices::toggle_dialog(ui) }>
+                                    <Icon name="sliders" small=true/>"Devices"</button>
+                                <Show when=producer>
+                                    <button id="more-recordings" class="btn ghost" on:click=move |_| { phone_more.set(false); toggle(Panel::Recordings) }>
+                                        <Icon name="folder" small=true/>"Recordings"</button>
+                                </Show>
+                                <button id="more-transcript" class="btn ghost" on:click=move |_| { phone_more.set(false); toggle(Panel::Transcript) }>
+                                    <Icon name="lines" small=true/>"Transcript"</button>
+                            </div>
+                        </Show>
+                        <button id="dock-more" class="dock-btn" aria-expanded=move || if phone_more.get() { "true" } else { "false" }
+                            on:click=move |_| phone_more.update(|o| *o = !*o)>"..."</button>
+                        <span class="dock-label">"More"</span>
                     </div>
                     <Show when=producer>
                         <span class="dock-sep" aria-hidden="true"></span>
