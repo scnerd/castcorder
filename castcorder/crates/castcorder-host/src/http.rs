@@ -58,7 +58,10 @@
 //!   [`crate::NativeState`] as JSON (`available`, `joined`, `devices`,
 //!   `error`); `POST /native/join` takes `{"device":NAME|null}` (null: the
 //!   default input) and `POST /native/leave` leaves; both answer the state,
-//!   or 409 with the reason.
+//!   or 409 with the reason. `POST /native/backup` takes
+//!   `{"device":NAME,"on":true|false}`: record that input as a backup
+//!   microphone beside the joined one (a track of its own), or stop; it
+//!   answers the state (its `backups`), or 409 with the reason.
 //! - `POST /folder/open`, under the same guard: opens the call's folder
 //!   (`<library>/<call>`) in the host machine's file manager; 204, or 409
 //!   with the reason. It takes no path: only that folder is ever opened.
@@ -892,9 +895,9 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/native" | "/rooms" | "/person" | "/settings" | "/joined-rooms")
         | (
             "POST",
-            "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/rooms"
-            | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/person" | "/person/code"
-            | "/person/decide" | "/person/join" | "/person/revoke",
+            "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
+            | "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/person"
+            | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -1019,6 +1022,30 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                     ),
                     Err(e) => text(409, e),
                 },
+            }
+        }
+        ("POST", "/native/backup") => {
+            let v = serde_json::from_slice::<serde_json::Value>(&req.body).ok();
+            let device = v
+                .as_ref()
+                .and_then(|v| v["device"].as_str().map(str::to_string));
+            let on = v.as_ref().and_then(|v| v["on"].as_bool());
+            let (Some(device), Some(on)) = (device, on) else {
+                return text(400, "send {\"device\": name, \"on\": true or false}");
+            };
+            let r = if on {
+                app.native
+                    .add_backup(crate::NativeInput::Device(Some(device)))
+                    .map(|_| ())
+            } else {
+                app.native.remove_backup(&device).map(|_| ())
+            };
+            match r {
+                Ok(()) => json(
+                    200,
+                    serde_json::to_string(&app.native.state()).unwrap_or_default(),
+                ),
+                Err(e) => text(409, e),
             }
         }
         ("POST", "/native/mute") => {
@@ -1259,7 +1286,13 @@ mod tests {
             // So do the rooms the app's call window joined elsewhere.
             let (status, body) = request_with(addr, "/joined-rooms", headers);
             assert_eq!(status, 403, "{headers}: {body}");
+            // And the backup microphones.
+            let (status, body) = request_method_with(addr, "POST", "/native/backup", headers);
+            assert_eq!(status, 403, "{headers}: {body}");
         }
+        // Allowed, but nothing is joined: a backup is refused with the reason.
+        let (status, body) = request_method_with(local_addr, "POST", "/native/backup", ok);
+        assert_eq!(status, 400, "no body: {body}");
         stop.store(true, Ordering::SeqCst);
     }
 

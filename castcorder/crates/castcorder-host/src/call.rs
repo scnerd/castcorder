@@ -219,6 +219,8 @@ pub enum Command {
         device: String,
         /// The participant's display name.
         participant: String,
+        /// The source: `mic`, or a backup microphone's `mic-N`.
+        source: String,
         /// The verified files.
         items: Vec<castcorder_core::library::LocalItem>,
         /// Told when the items are in the manifest.
@@ -302,6 +304,20 @@ pub enum TakeCtl {
     },
     /// The participant left: finish any take, close the input, end.
     Quit,
+    /// Also record `input` as backup source `source` (`mic-2`, ...): a track
+    /// of its own in each take, from the one recording now.
+    AddBackup {
+        /// The input.
+        input: crate::NativeInput,
+        /// Its source id.
+        source: String,
+    },
+    /// Stop recording backup `source` (its files of the take recording now
+    /// are finished, and held to the take's alignment).
+    RemoveBackup {
+        /// Its source id.
+        source: String,
+    },
 }
 
 /// What the host's own participant hears.
@@ -2015,6 +2031,7 @@ impl Call {
                 take,
                 device,
                 participant,
+                source,
                 items,
                 ack,
             } => {
@@ -2027,13 +2044,8 @@ impl Call {
                     return;
                 };
                 for item in &items {
-                    if let Err(e) = library.record_local(
-                        &device,
-                        &participant,
-                        take,
-                        crate::local::SOURCE,
-                        item,
-                    ) {
+                    if let Err(e) = library.record_local(&device, &participant, take, &source, item)
+                    {
                         warn!(take = take.0, file = %item.file, error = %e, "host track not recorded in the manifest");
                     }
                 }

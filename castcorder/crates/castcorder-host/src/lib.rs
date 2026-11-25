@@ -608,6 +608,21 @@ impl Running {
         self.native.set_muted(muted)
     }
 
+    /// Also record `input` as a backup microphone beside the native one: a
+    /// track of its own (source `mic-N`, the id returned) in each take, from
+    /// the one recording now. Errors unless the native input is in the call,
+    /// for its own input and for an input already a backup.
+    pub fn add_native_backup(&self, input: NativeInput) -> Result<String, String> {
+        self.native.add_backup(input)
+    }
+
+    /// Stop recording the backup microphone labelled `label` (as in
+    /// [`NativeState::backups`]); its files of the take recording now are
+    /// finished. False if it was not a backup.
+    pub fn remove_native_backup(&self, label: &str) -> Result<bool, String> {
+        self.native.remove_backup(label)
+    }
+
     /// Whether this host can join natively, with which inputs, and whether
     /// it is joined.
     pub fn native_state(&self) -> NativeState {
