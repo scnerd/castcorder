@@ -21,8 +21,12 @@ export async function lobbyLinkChecks(A) {
 
 export async function topBarLinkChecks(A, B) {
   const top = A.locator('#call-link-top');
+  // The link sits behind Invite (cast-n56.5).
+  check(!(await top.isVisible()), 'the top bar keeps the call link behind Invite');
+  await A.click('#invite');
   const shown = await waitFor(async () => ((await top.isVisible()) && (await top.textContent())) || '', 'the top bar shows a call link', 15000);
   check(shown === HTTPS_LINK_OF(), 'the producer\'s top bar shows the call link (' + shown + ')');
-  check((await B.locator('#call-link-top').count()) === 0 || !(await B.locator('#call-link-top').isVisible()),
-    'a guest\'s top bar does not show the link');
+  check((await B.locator('#call-link-top').count()) === 0 && (await B.locator('#invite').count()) === 0,
+    'a guest\'s top bar has no Invite and no link');
+  await A.click('#invite');
 }

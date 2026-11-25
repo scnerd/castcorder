@@ -517,6 +517,9 @@ fn LeftPage(
     }
 }
 
+/// Bars in the own tile's level (the newest of the dock's readings).
+const SELF_WAVE: usize = 12;
+
 /// In the call: top bar, stage, side panel, dock.
 #[component]
 fn Call(ui: Ui) -> impl IntoView {
@@ -595,6 +598,30 @@ fn Call(ui: Ui) -> impl IntoView {
             (crate::recorders::rollup_text(&list), n < m)
         })
     };
+    let invite_open = RwSignal::new(false);
+    let more_open = RwSignal::new(false);
+    let top_title = move || {
+        let r = ui
+            .call_ref
+            .get()
+            .map(|c| c.room)
+            .unwrap_or_else(|| ui.room_name.get());
+        if r.is_empty() {
+            "Castcorder".to_string()
+        } else {
+            r
+        }
+    };
+    let role_word = move || {
+        let r = ui.role.get();
+        if r.host_machine {
+            "Host"
+        } else if r.producer {
+            "Producer"
+        } else {
+            "Guest"
+        }
+    };
     let can_start = move || ui.take.get().starts_with("idle");
     let can_stop = move || ui.take.get().starts_with("recording");
     // Bar `i` of the dock waveform (fixed spans; only their heights change,
@@ -615,38 +642,57 @@ fn Call(ui: Ui) -> impl IntoView {
     view! {
         <div class="call" hidden=move || !ui.joined.get()>
             <header class="topbar" class:recording=take_rec>
-                <div class="title">
-                    <Show when=move || ui.joined.get() fallback=|| view! { <strong>"Castcorder"</strong> }><h1>"Castcorder"</h1></Show>
-                    <span class="small muted">{move || if producer() { "You are a producer on this call" } else { "Guest" }}</span>
+                <div class="top-left">
+                    // One h1 in the page at a time (tests click it as a user gesture).
+                    <Show when=move || ui.joined.get() fallback=move || view! { <strong>{top_title}</strong> }><h1>{top_title}</h1></Show>
+                    <span class="chip role-chip" id="role-chip">{role_word}</span>
+                    {move || rollup().map(|(text, short)| view! {
+                        <button id="track-rollup" class="chip" class:warn=short title="Whose machines are recording this take"
+                            on:click=move |_| ui.panel.set(Panel::People)>{text}</button>
+                    })}
+                    <button class="chip" hidden=move || producer() || unsent() == 0
+                        on:click=move |_| ui.panel.set(Panel::Recordings)>
+                        {move || format!("Your recordings: {} not yet with the host", unsent())}</button>
+                    <button class="chip warn" hidden=move || ui.errors.get().is_empty()
+                        on:click=move |_| ui.panel.set(Panel::Recordings)>
+                        <Icon name="alert" small=true/>
+                        {move || { let n = ui.errors.get().len(); format!("{n} problem{}", if n == 1 { "" } else { "s" }) }}</button>
                 </div>
-                <div class="pill rec" role="status" hidden=move || !take_rec()>
-                    <span class="dot"></span>"REC"<span>{move || take_label(&ui.take.get())}</span>
-                    <span class="rec-time" id="rec-elapsed" hidden=move || ui.elapsed.get().is_empty()>{move || ui.elapsed.get()}</span>
+                // A fixed slot: the bar does not move when a take starts.
+                <div class="rec-slot">
+                    <div class="pill rec" role="status" hidden=move || !take_rec()>
+                        <span class="dot"></span>"REC"<span>{move || take_label(&ui.take.get())}</span>
+                        <span class="rec-time" id="rec-elapsed" hidden=move || ui.elapsed.get().is_empty()>{move || ui.elapsed.get()}</span>
+                    </div>
+                    <div class="pill idle" role="status" hidden=take_rec>
+                        <span class="dot"></span>"Not recording"
+                    </div>
                 </div>
-                <div class="pill idle" role="status" hidden=take_rec>
-                    <span class="dot"></span>"Not recording"
-                </div>
-                {move || rollup().map(|(text, short)| view! {
-                    <button id="track-rollup" class="chip" class:warn=short title="Whose machines are recording this take"
-                        on:click=move |_| ui.panel.set(Panel::People)>{text}</button>
-                })}
-                <button class="chip" hidden=move || producer() || unsent() == 0
-                    on:click=move |_| ui.panel.set(Panel::Recordings)>
-                    {move || format!("Your recordings: {} not yet with the host", unsent())}</button>
-                <button class="chip warn" hidden=move || ui.errors.get().is_empty()
-                    on:click=move |_| ui.panel.set(Panel::Recordings)>
-                    <Icon name="alert" small=true/>
-                    {move || { let n = ui.errors.get().len(); format!("{n} problem{}", if n == 1 { "" } else { "s" }) }}</button>
                 <div class="right">
-                    <Show when=producer><LinkBar ui=ui id="call-link-top"/></Show>
                     <Show when=producer>
-                        <button class="btn" aria-pressed=move || pressed(Panel::People) on:click=move |_| toggle(Panel::People)>
+                        <div class="menu-wrap">
+                            <button id="invite" class="btn" aria-expanded=move || if invite_open.get() { "true" } else { "false" }
+                                on:click=move |_| invite_open.update(|o| *o = !*o)>
+                                <Icon name="link" small=true/>"Invite"</button>
+                            <div class="popover invite-pop" hidden=move || !invite_open.get()>
+                                <LinkBar ui=ui id="call-link-top"/>
+                                <span class="small muted">"Anyone with this link can ask to join."</span>
+                            </div>
+                        </div>
+                        <button class="btn" id="open-people" aria-pressed=move || pressed(Panel::People) on:click=move |_| toggle(Panel::People)>
                             <Icon name="people" small=true/>"People"</button>
                     </Show>
-                    <button class="btn" aria-pressed=move || pressed(Panel::Recordings) on:click=move |_| toggle(Panel::Recordings)>
+                    <button class="btn" id="open-recordings" aria-pressed=move || pressed(Panel::Recordings) on:click=move |_| toggle(Panel::Recordings)>
                         <Icon name="folder" small=true/>"Recordings"</button>
-                    <button class="btn" aria-pressed=move || pressed(Panel::Transcript) on:click=move |_| toggle(Panel::Transcript)>
-                        <Icon name="lines" small=true/>"Transcript"</button>
+                    <div class="menu-wrap">
+                        <button id="more-menu" class="btn" aria-label="More" aria-expanded=move || if more_open.get() { "true" } else { "false" }
+                            on:click=move |_| more_open.update(|o| *o = !*o)>"..."</button>
+                        <div class="popover more-pop" hidden=move || !more_open.get()>
+                            <button class="btn ghost" id="open-transcript" aria-pressed=move || pressed(Panel::Transcript)
+                                on:click=move |_| { more_open.set(false); toggle(Panel::Transcript) }>
+                                <Icon name="lines" small=true/>"Transcript"</button>
+                        </div>
+                    </div>
                 </div>
             </header>
 
@@ -672,7 +718,13 @@ fn Call(ui: Ui) -> impl IntoView {
                             <div class="tile-avatar"><span class="tile-initials">{move || initials(&ui.name.get())}</span></div>
                             <video id="self-video" autoplay=true muted=true prop:muted=true playsinline=true width="320" height="180"></video>
                             <div class="tile-note" hidden=move || !ui.muted.get()>"Muted in the call. Your track keeps recording."</div>
+                            // Hidden from you only: not the camera-off avatar (cast-n56.5).
+                            <div class="self-hidden-note" id="self-hidden-note">"Self view hidden. Others still see you."</div>
                             <div class="tile-name">{move || format!("{} (you)", ui.name.get())}</div>
+                            // Your own level, from the same readings as the dock's waveform.
+                            <div class="tile-level" id="self-level">
+                                <div class="tile-wave">{(WAVE_LEN - SELF_WAVE..WAVE_LEN).map(|i| view! { <span style=move || bar(i)></span> }).collect_view()}</div>
+                            </div>
                             {move || own_chip().map(|(words, state)| view! {
                                 <div id="self-track" class="tile-track" role="status" data-state=state>
                                     <span class="dot"></span><span>{words}</span></div>

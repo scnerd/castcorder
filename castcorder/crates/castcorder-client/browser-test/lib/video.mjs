@@ -48,6 +48,12 @@ export async function videoChecks(A, B) {
   console.log('info A outbound video: ' + JSON.stringify(outbound));
   const layers = outbound.filter((o) => o.rid && o.framesEncoded > 0).map((o) => o.rid).sort();
   check(layers.join(',') === 'h,l', 'A sends two simulcast layers (' + layers.join(',') + ')');
+  // Hide me with the camera on (cast-n56.5): a note says only the self view
+  // is hidden, not the camera-off avatar.
+  await A.click('#self-view');
+  check(await A.isVisible('#self-hidden-note') && !(await A.isVisible('.stage > .tile:first-child .tile-avatar')),
+    'Hide me with the camera on says the self view is hidden (others still see you), not camera off');
+  await A.click('#self-view');
   // Camera off: released, B's frames from A stop, audio goes on.
   const offers = () => (ctx.hostLog.match(/sent offer/g) || []).length;
   const offersBefore = offers();

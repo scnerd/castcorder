@@ -150,13 +150,24 @@ input[type="text"], input[type="password"], input:not([type]), select {
 details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 
 /* Top bar */
-.topbar { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--surface);
-  border-bottom: 3px solid var(--border); flex-wrap: wrap; }
+.topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center;
+  gap: 12px; padding: 8px 16px; background: var(--surface); border-bottom: 3px solid var(--border); }
 .topbar.recording { border-bottom-color: var(--rec); }
-.topbar .title { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
-.topbar .title strong, .topbar .title h1 { margin: 0; font-size: 15px; font-weight: 700; }
+.top-left { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.topbar .top-left strong, .topbar .top-left h1 { margin: 0; font-size: 15px; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.role-chip { padding: 2px 8px; font-size: 12px; }
+/* The REC pill's slot keeps its width whether a take records or not. */
+.rec-slot { display: flex; justify-content: center; min-width: 210px; }
+.topbar .right { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+.menu-wrap { position: relative; }
+.popover { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; display: flex; flex-direction: column;
+  gap: 8px; padding: 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25); min-width: 220px; }
+.popover[hidden] { display: none; }
+.invite-pop { width: min(420px, calc(100vw - 32px)); }
+.invite-pop .linkbar code { max-width: none; flex: 1; }
 .lobby-title { margin: 0; font-size: 26px; font-weight: 700; }
-.topbar .right { display: flex; gap: 8px; margin-left: auto; align-items: center; flex-wrap: wrap; }
 .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px;
   font-size: 14px; font-weight: 600; white-space: nowrap; }
 .pill .dot { width: 10px; height: 10px; border-radius: 50%; }
@@ -195,6 +206,12 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 .tile video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000;
   z-index: 1; }
 .tile.camera-off video, .tile.self-off video, .tile.self-hidden video { visibility: hidden; }
+.self-hidden-note { display: none; position: absolute; inset: 0; z-index: 1; align-items: center;
+  justify-content: center; padding: 0 16px; text-align: center; font-size: 14px; color: #c9ced6;
+  background: repeating-linear-gradient(135deg, #1c2027 0 12px, #20252d 12px 24px); }
+.tile.self-hidden:not(.self-off) .self-hidden-note { display: flex; }
+.tile.self-hidden:not(.self-off) .tile-avatar { display: none; }
+.stage > .tile:first-child .tile-name { max-width: calc(100% - 100px); }
 .tile-name { position: absolute; left: 10px; bottom: 10px; z-index: 2; max-width: calc(100% - 20px);
   background: rgba(0, 0, 0, 0.6); padding: 5px 10px; border-radius: 8px; font-size: 14px; font-weight: 500;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -323,6 +340,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   /* Above the full-screen side panel (open by default for producers). */
   .dock { position: relative; z-index: 11; }
   .side { position: fixed; inset: 0; width: auto; z-index: 10; }
+  .topbar { grid-template-columns: minmax(0, 1fr) auto; }
+  .topbar .right { grid-column: 1 / -1; justify-content: flex-start; }
+  .rec-slot { min-width: 0; }
   /* The Devices dialog fits the viewport, not its dock button (cast-lg7). */
   .dialog { position: fixed; left: 12px; right: 12px; bottom: 84px; transform: none; width: auto;
     max-width: none; box-sizing: border-box; }
