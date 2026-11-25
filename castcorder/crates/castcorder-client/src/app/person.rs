@@ -1117,6 +1117,38 @@ async fn link_this(code: LinkCode, name: String) -> Result<LinkGrant, String> {
     }
 }
 
+/// The app's call window links itself to its install's person (cast-40e.7):
+/// the app hands its project pages (`/v/`) a link code approved in advance
+/// (`window.__castcorderAutoLink`, set by the window's script only on the
+/// rendezvous origin). An unlinked profile uses it once, with nobody asked;
+/// offers wait for it (`identity::cert_settled`).
+pub(super) fn auto_link() {
+    if crate::identity::person().is_some()
+        || !window()
+            .location()
+            .pathname()
+            .unwrap_or_default()
+            .contains("/v/")
+    {
+        return;
+    }
+    let Some(code) = Reflect::get(&window(), &JsValue::from_str("__castcorderAutoLink"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .and_then(|f| LinkCode::parse(&f).ok())
+    else {
+        return;
+    };
+    crate::identity::set_linking(true);
+    spawn_local(async move {
+        match link_this(code, "Castcorder app".into()).await {
+            Ok(g) => info!(person = %g.person_name, "the app's call window linked itself"),
+            Err(e) => warn!(error = %e, "the app's call window did not link itself"),
+        }
+        crate::identity::set_linking(false);
+    });
+}
+
 /// The page a link opens: link this browser profile.
 #[component]
 pub(super) fn LinkPage(ui: Ui) -> impl IntoView {

@@ -214,7 +214,13 @@ pub struct RoomView {
     pub producers: Vec<String>,
     /// Devices that joined with its link, but this person's own.
     pub devices: Vec<JoinedDevice>,
+    /// Who waits for a producer to join it now, by name (cast-n56.9).
+    pub waiting: Vec<String>,
 }
+
+/// How long after its last ask a waiting guest still counts as waiting
+/// (guests ask again every 2.5 s).
+const WAITING_FOR_MS: u64 = 10_000;
 
 impl Call {
     /// Anyone in the call (a connection or the host's own participant), or a
@@ -609,6 +615,9 @@ impl Call {
     /// Every room, for the host machine's home.
     pub(super) fn rooms_view(&mut self) -> Vec<RoomView> {
         let now = self.rooms.now_ms();
+        let wall = crate::wall_ms();
+        self.waiting
+            .retain(|_, (_, at)| wall.saturating_sub(*at) <= WAITING_FOR_MS);
         let live = self.is_live();
         let default = self.rooms.default_room();
         rooms::list_rooms(&self.rooms.library)
@@ -670,6 +679,17 @@ impl Call {
                     persons,
                     producers,
                     devices,
+                    waiting: {
+                        let mut w: Vec<String> = self
+                            .waiting
+                            .iter()
+                            .filter(|((room, _), _)| *room == name)
+                            .map(|(_, (who, _))| who.clone())
+                            .collect();
+                        w.sort();
+                        w.dedup();
+                        w
+                    },
                     name,
                 }
             })

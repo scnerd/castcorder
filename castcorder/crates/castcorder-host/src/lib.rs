@@ -352,6 +352,39 @@ impl Running {
         ))
     }
 
+    /// The link the app hands its own call window so it links itself to
+    /// this person (cast-40e.7): the origin of the project's pages on the
+    /// rendezvous and the code's fragment (`link.<host-id>.<secret>`), whose
+    /// code is approved in advance ([`person::Persons::new_auto_code`]).
+    /// None until the rendezvous is registered: the call window asks through
+    /// its mailbox, so only the project's own pages may be given it.
+    pub fn call_window_link(&self) -> Option<(String, String)> {
+        let b = self.call_links.base.as_ref()?;
+        if !self
+            .call_links
+            .registered
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        match self.call_window_code() {
+            Ok(fragment) => Some((origin_of(&b.base), fragment)),
+            Err(e) => {
+                tracing::warn!(error = %e, "no link code for the call window");
+                None
+            }
+        }
+    }
+
+    /// A new link code approved in advance for the app's call window (its
+    /// fragment, `link.<host-id>.<secret>`; see [`Running::call_window_link`]).
+    pub fn call_window_code(&self) -> Result<String, String> {
+        self.persons
+            .new_auto_code(wall_ms())
+            .map(|c| c.fragment())
+            .map_err(|e| e.to_string())
+    }
+
     /// Approve or decline a device's link request.
     pub fn decide_link(&self, device: &str, approve: bool) -> Result<(), String> {
         self.persons.decide(device, approve)
@@ -1074,4 +1107,30 @@ fn init_logging(library: &Path) {
         .with(json)
         .with(filter)
         .try_init();
+}
+
+/// The origin (`scheme://host[:port]`) of a URL.
+fn origin_of(url: &str) -> String {
+    let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    format!("{scheme}://{host}")
+}
+
+#[cfg(test)]
+mod origin_tests {
+    #[test]
+    fn origin_of_a_url() {
+        assert_eq!(
+            super::origin_of("https://cast.example/"),
+            "https://cast.example"
+        );
+        assert_eq!(
+            super::origin_of("https://cast.example:8443/a/b"),
+            "https://cast.example:8443"
+        );
+        assert_eq!(
+            super::origin_of("http://127.0.0.1:5000"),
+            "http://127.0.0.1:5000"
+        );
+    }
 }
