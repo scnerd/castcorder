@@ -739,7 +739,9 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         }
         // A status query needs no call secret: the host answers for the
         // rooms the device's key was in, so a regenerated link still works.
-        Ok((_, o)) if o.status => {
+        Ok((current, o)) if o.status => {
+            // Only whether the link it came through still opens a room (cast-lot).
+            let link_changed = current.is_none();
             let (reply_tx, rx) = mpsc::channel();
             let sent = tx.send(Command::HostStatus {
                 device: o.device,
@@ -753,7 +755,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 .ok()
                 .and_then(|_| rx.recv_timeout(Duration::from_secs(10)).ok())
             {
-                Some(Ok(st)) => AnswerPlain::Status(st),
+                Some(Ok(mut st)) => {
+                    st.link_changed = link_changed;
+                    AnswerPlain::Status(st)
+                }
                 Some(Err(e)) => AnswerPlain::Rejected(e),
                 None => AnswerPlain::Rejected("host thread not answering".into()),
             }
@@ -1218,6 +1223,7 @@ mod tests {
                         room: "show".into(),
                         ..Default::default()
                     }],
+                    ..Default::default()
                 };
                 reply.send(Ok(st)).unwrap();
             }
@@ -1227,7 +1233,10 @@ mod tests {
         host.join().unwrap();
         let r: AnswerPlain =
             serde_json::from_slice(&guest.open_reply(&unb64(&a).unwrap()).unwrap()).unwrap();
-        assert!(matches!(r, AnswerPlain::Status(st) if st.rooms[0].room == "show"));
+        // The old link is named as old (cast-lot), nothing more.
+        assert!(
+            matches!(r, AnswerPlain::Status(st) if st.rooms[0].room == "show" && st.link_changed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

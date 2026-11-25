@@ -350,6 +350,10 @@ pub enum AnswerPlain {
 pub struct HostStatus {
     /// Every room of this host the device was in, by name.
     pub rooms: Vec<RoomStatus>,
+    /// The call link this query came through is no longer any room's current
+    /// link (it was regenerated). Says nothing about which room it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub link_changed: bool,
 }
 
 /// One room as a device that was in it sees it.
@@ -611,12 +615,22 @@ mod tests {
                 }],
                 ..Default::default()
             }],
+            ..Default::default()
         });
         assert_eq!(
             to_json(&st),
             r#"{"status":{"rooms":[{"room":"show","live":true,"busy":false,"current":"2026-11-16","in_call":["Pat"],"producer":false,"calls":[{"id":"2026-11-16","started_ms":5,"takes":2}]}]}}"#
         );
         assert_eq!(from_json::<AnswerPlain>(&to_json(&st)), Some(st));
+        let old = AnswerPlain::Status(HostStatus {
+            link_changed: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            to_json(&old),
+            r#"{"status":{"rooms":[],"link_changed":true}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&old)), Some(old));
         let gone: RoomStatus = from_json(r#"{"room":"x","removed":true}"#).unwrap();
         assert!(gone.removed && gone.calls.is_empty());
     }

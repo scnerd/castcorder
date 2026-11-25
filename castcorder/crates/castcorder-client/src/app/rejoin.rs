@@ -68,7 +68,12 @@ pub(super) struct Room {
 #[derive(Clone, Debug, PartialEq)]
 enum Seen {
     Checking,
-    Online(HostStatus),
+    /// The answer, and the room whose link the query went through if the host
+    /// says that link was regenerated (cast-lot).
+    Online(HostStatus, Option<String>),
+    /// The room's link was regenerated and this device was not given the new
+    /// one: only the host can say what it is now.
+    LinkChanged,
     Offline,
     /// The query failed otherwise (an older host, a refusal).
     Unknown(String),
@@ -352,7 +357,10 @@ fn refresh(seen: RwSignal<Vec<(String, Seen)>>, list: RwSignal<Vec<Room>>) {
                 Ok(st) => {
                     merge(&r.host, &st);
                     list.set(load());
-                    Seen::Online(st)
+                    // The query went through this room's link: if the host says
+                    // that link is old, `room_seen` checks no new one came.
+                    let old = st.link_changed.then(|| r.room.clone());
+                    Seen::Online(st, old)
                 }
                 Err(e)
                     if e.contains("host_offline")
@@ -378,10 +386,19 @@ fn refresh(seen: RwSignal<Vec<(String, Seen)>>, list: RwSignal<Vec<Room>>) {
 fn room_seen(seen: &[(String, Seen)], r: &Room) -> (Seen, Option<RoomStatus>) {
     match seen.iter().find(|(h, _)| h == &r.host).map(|(_, s)| s) {
         None => (Seen::Checking, None),
-        Some(Seen::Online(st)) => (
-            Seen::Online(HostStatus::default()),
-            st.rooms.iter().find(|s| s.room == r.room).cloned(),
-        ),
+        Some(Seen::Online(st, old)) => {
+            let rs = st.rooms.iter().find(|s| s.room == r.room).cloned();
+            // A trusted device was sent the new link (and `merge` took it); a
+            // removed one is told that instead.
+            let stale = old.as_deref() == Some(r.room.as_str())
+                && rs.as_ref().is_none_or(|s| s.link.is_none() && !s.removed);
+            let seen = if stale {
+                Seen::LinkChanged
+            } else {
+                Seen::Online(HostStatus::default(), None)
+            };
+            (seen, rs)
+        }
         Some(s) => (s.clone(), None),
     }
 }
@@ -499,6 +516,7 @@ fn chip(state: &(Seen, Option<RoomStatus>), removed: bool) -> (&'static str, &'s
     match state {
         (Seen::Checking, _) => ("chip", "Checking"),
         (Seen::Offline, _) => ("chip", "Host offline"),
+        (Seen::LinkChanged, _) => ("chip warn", "Link changed"),
         (Seen::Unknown(_), _) => ("chip warn", "Status unknown"),
         (_, Some(s)) if s.live => ("chip ok", "Live"),
         (_, Some(s)) if s.busy => ("chip", "Host busy in another room"),
@@ -513,6 +531,7 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
     let state = Memo::new(move |_| card.with_value(|c| room_seen(&seen.get(), c)));
     let flagged = r.removed;
     let removed = move || flagged || state.with(|s| s.1.as_ref().is_some_and(|s| s.removed));
+    let changed = move || state.with(|s| s.0 == Seen::LinkChanged);
     let who = move || {
         state.with(|s| {
             s.1.as_ref()
@@ -540,7 +559,7 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
         .map(|c| {
             let id = StoredValue::new(c.id.clone());
             let action = move || {
-                let gone = removed();
+                let gone = removed() || changed();
                 state.with(|s| id.with_value(|i| call_action(s.1.as_ref(), gone, i)))
             };
             let go = move |_| rejoin(ui, &card.get_value(), Some(id.get_value()));
@@ -581,10 +600,11 @@ fn RoomCard(ui: Ui, r: Room, seen: RwSignal<Vec<(String, Seen)>>) -> impl IntoVi
                 </span>
                 <span class="small muted in-call">{who}</span>
             </div>
-            <div class="row" hidden=removed>
+            <div class="row" hidden=move || removed() || changed()>
                 <button class="btn primary rejoin-room" on:click=move |_| rejoin(ui, &card.get_value(), None)>"Rejoin"</button>
                 <span class="small muted next-call">{next}</span>
             </div>
+            <span class="small muted link-changed-note" hidden=move || removed() || !changed()>"This room's link has changed - ask the host for the new link."</span>
             <span class="small muted removed-note" hidden=move || !removed()>"A producer removed you from this room."</span>
             <ul class="list calls">{rows}</ul>
         </li>
