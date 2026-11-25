@@ -711,6 +711,16 @@ fn begin_source(source: Source, path: &str) -> u32 {
     SOURCE_GEN.set(generation);
     SOURCE.with(|s| *s.borrow_mut() = Some(source));
     SOURCE_PATH.with(|p| *p.borrow_mut() = path.to_string());
+    // A track opened before this source began recorded no path: it gets the
+    // one that is actually used (cast-bwt).
+    ACTIVE.with(|a| {
+        if let Some(a) = a.borrow().as_ref()
+            && crate::capturepath::is_unset(&string(&a.meta, "capturePath"))
+        {
+            set(&a.meta, "capture", crate::capturepath::describe(path));
+            set(&a.meta, "capturePath", path);
+        }
+    });
     LEVEL.set((0.0, 0));
     generation
 }
@@ -993,16 +1003,7 @@ async fn open_track(msg: JsValue) -> Result<String, JsValue> {
         "wav-ieee-float32-interleaved, 58-byte header, size fields patched every flush",
     );
     let path = SOURCE_PATH.with(|p| p.borrow().clone());
-    set(
-        &meta,
-        "capture",
-        match path.as_str() {
-            "mstp-window" => "MediaStreamTrackProcessor (page) f32-planar",
-            "mstp-worker" => "MediaStreamTrackProcessor (worker) f32-planar",
-            "worklet" => "AudioWorklet f32-planar via MessagePort (render clock)",
-            _ => "none",
-        },
-    );
+    set(&meta, "capture", crate::capturepath::describe(&path));
     set(&meta, "capturePath", path.as_str());
     set(&meta, "startedAt", js_sys::Date::now());
     let take = num(&meta, "take") as u32;
