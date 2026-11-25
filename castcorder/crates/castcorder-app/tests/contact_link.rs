@@ -79,6 +79,7 @@ fn start(root: &Path, name: &str, rv: SocketAddr) -> Running {
         retry: Duration::from_secs(2),
         look: Duration::from_secs(3),
         wait: Duration::from_secs(2),
+        bye: Duration::from_secs(2),
     };
     castcorder_host::start(c, |_| {}).unwrap()
 }

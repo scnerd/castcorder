@@ -26,7 +26,7 @@ fn nothing_is_pinged_before_the_first_registration() {
     b.sweep();
     b.look(T0, &t());
     assert!(b.due(&installs(), T0, &t()).is_empty());
-    b.registered();
+    b.registered(0);
     assert_eq!(
         b.due(&installs(), T0, &t()).len(),
         3,
@@ -42,20 +42,20 @@ fn nothing_is_pinged_before_the_first_registration() {
 fn online_installs_heartbeat_and_others_retry_slowly() {
     let tm = t();
     let mut b = Board::default();
-    b.registered();
+    b.registered(0);
     b.due(&installs(), T0, &tm);
     b.heard("kA1", "pAnn", "Desk", T0 + 1000);
     b.gone("kA2", T0 + 1000);
     b.gone("kB1", T0 + 1000);
     // Online: pinged again a heartbeat after it was last heard.
-    assert!(b.due(&installs(), T0 + 29 * MIN, &tm).is_empty());
+    assert!(b.due(&installs(), T0 + 59 * MIN, &tm).is_empty());
     assert_eq!(
-        b.due(&installs(), T0 + 31 * MIN, &tm),
+        b.due(&installs(), T0 + 61 * MIN, &tm),
         vec!["kA1".to_string()]
     );
     // Not online: pinged again only after the retry time.
     assert_eq!(
-        b.due(&installs(), T0 + 60 * MIN, &tm),
+        b.due(&installs(), T0 + 120 * MIN, &tm),
         vec!["kA2".to_string(), "kB1".to_string()]
     );
 }
@@ -64,38 +64,38 @@ fn online_installs_heartbeat_and_others_retry_slowly() {
 fn being_pinged_by_an_install_spares_its_heartbeat() {
     let tm = t();
     let mut b = Board::default();
-    b.registered();
+    b.registered(0);
     b.due(&installs(), T0, &tm);
     b.heard("kB1", "pBob", "Laptop", T0 + 1000);
-    // It pinged us 20 minutes in: no heartbeat until 30 minutes after that.
+    // It pinged us 20 minutes in: no heartbeat until an hour after that.
     b.heard("kB1", "pBob", "", T0 + 20 * MIN);
     assert!(
-        !b.due(&installs(), T0 + 40 * MIN, &tm)
+        !b.due(&installs(), T0 + 79 * MIN, &tm)
             .contains(&"kB1".to_string())
     );
     assert!(
-        b.due(&installs(), T0 + 51 * MIN, &tm)
+        b.due(&installs(), T0 + 81 * MIN, &tm)
             .contains(&"kB1".to_string())
     );
     // An empty name keeps the one it said before.
-    assert_eq!(b.view("pBob", T0 + 51 * MIN, &tm).online, vec!["Laptop"]);
+    assert_eq!(b.view("pBob", T0 + 81 * MIN, &tm).online, vec!["Laptop"]);
 }
 
 #[test]
 fn the_open_home_sweeps_at_most_every_few_minutes() {
     let tm = t();
     let mut b = Board::default();
-    b.registered();
+    b.registered(0);
     b.due(&installs(), T0, &tm);
     b.look(T0, &tm);
     assert_eq!(b.due(&installs(), T0, &tm).len(), 3);
-    b.look(T0 + MIN, &tm);
+    b.look(T0 + 9 * MIN, &tm);
     assert!(
-        b.due(&installs(), T0 + MIN, &tm).is_empty(),
+        b.due(&installs(), T0 + 9 * MIN, &tm).is_empty(),
         "within the floor"
     );
-    b.look(T0 + 2 * MIN, &tm);
-    assert_eq!(b.due(&installs(), T0 + 2 * MIN, &tm).len(), 3);
+    b.look(T0 + 10 * MIN, &tm);
+    assert_eq!(b.due(&installs(), T0 + 10 * MIN, &tm).len(), 3);
 }
 
 #[test]
@@ -124,4 +124,64 @@ fn what_was_heard_goes_stale_or_ends_with_an_unanswered_ping() {
     // Removing forgets.
     b.forget("pAnn");
     assert_eq!(b.view("pAnn", T0, &tm), PresenceView::default());
+}
+
+#[test]
+fn pings_are_counted_and_leaving_goes_to_those_online_once() {
+    let tm = t();
+    let mut b = Board::default();
+    assert!(!b.ready());
+    b.registered(T0);
+    b.registered(T0 + 5);
+    assert_eq!(
+        b.traffic().since_ms,
+        T0,
+        "counted from the first registration"
+    );
+    assert_eq!(b.due(&installs(), T0, &tm).len(), 3);
+    b.answered();
+    b.received();
+    b.received();
+    assert_eq!(
+        b.traffic(),
+        Traffic {
+            since_ms: T0,
+            sent: 3,
+            answered: 1,
+            received: 2,
+        }
+    );
+    b.heard("kA1", "pAnn", "Desk", T0);
+    assert_eq!(b.online(T0, &tm), vec!["kA1".to_string()]);
+    assert!(!b.take_leave());
+    b.leave();
+    assert!(b.take_leave());
+    assert!(!b.take_leave(), "once");
+}
+
+/// The cost the defaults put on the rendezvous (docs/design.md "Cost on
+/// the Worker"): pings a day to one contact install that stays online,
+/// over 8 hours with an hour of the home open, heard from by nothing else.
+#[test]
+fn the_default_timing_keeps_pings_per_contact_install_low() {
+    let tm = t();
+    let mut b = Board::default();
+    let one = vec![("kB1".to_string(), "pBob".to_string())];
+    b.registered(T0);
+    let mut sent = 0;
+    let mut now = T0;
+    while now < T0 + 8 * 60 * MIN {
+        if (T0 + 60 * MIN..T0 + 120 * MIN).contains(&now) {
+            b.look(now, &tm);
+        }
+        let due = b.due(&one, now, &tm);
+        if !due.is_empty() {
+            b.heard("kB1", "pBob", "Laptop", now);
+        }
+        sent += due.len();
+        now += MIN;
+    }
+    // A sweep at registration, 7 heartbeats, 6 sweeps for the hour of
+    // looking (the heartbeat in it spared by a sweep).
+    assert!(sent <= 14, "{sent} pings");
 }
