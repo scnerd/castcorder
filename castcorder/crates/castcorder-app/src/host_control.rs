@@ -30,6 +30,7 @@ pub struct HostStatus {
 /// One room in the tray's Rooms menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayRoom {
+    /// The room's name (its folder).
     pub name: String,
     /// Its call is the live one.
     pub live: bool,
