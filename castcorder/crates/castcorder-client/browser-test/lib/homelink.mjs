@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
 import { waitFor, text, check } from './helpers.mjs';
@@ -38,7 +38,22 @@ export async function homeLinkChecks() {
 
   const P = await openGuest('H', [], HTTP11, undefined, 'Pat');
   await P.setViewportSize({ width: 1000, height: 500 });
+  // The rooms the app's call window joined elsewhere, as it hands them to the
+  // app (cast-n56.9; the host keeps the list in its library): shown as cards.
+  writeFileSync(join(LIB, 'joined-rooms.json'), JSON.stringify([
+    { url: 'https://rv.example.org/v/1/#hostid.secret', host: 'hostid', room: 'Their-show', last_ms: 1700000000000,
+      calls: [{ id: 'c1', started_ms: 1699990000000, takes: 1 }, { id: 'c2', started_ms: 1700000000000, takes: 2 }] },
+    { url: 'https://rv.example.org/v/1/#gone.secret', host: 'gone', room: 'Old-show', removed: true, calls: [] },
+  ]));
   await P.goto(HTTP11 + '/');
+  await P.waitForSelector('#joined-cards li[data-joined-room="Their-show"]', { timeout: 15000 });
+  const theirs = P.locator('#joined-cards li[data-joined-room="Their-show"]');
+  check((await theirs.textContent()).includes('2 calls'), 'the home lists a room the app joined elsewhere as a card with its calls');
+  check((await theirs.locator('a').getAttribute('href')) === 'castcorder://rv.example.org/v/1/#hostid.secret',
+    'its card opens the room in the app\x27s call window');
+  const old = P.locator('#joined-cards li[data-joined-room="Old-show"]');
+  check((await old.textContent()).includes('Removed') && (await old.locator('a').count()) === 0,
+    'a room the device was removed from says so and offers no way in');
   // The You card is in Settings, a place of the home's left nav (cast-n56.1).
   await P.click('#nav-settings');
   await P.waitForSelector('#person #link-device', { timeout: 15000 });

@@ -246,6 +246,9 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let who = RwSignal::new(Who::default());
     let place = RwSignal::new(Place::Rooms);
     let invites = RwSignal::new(Invites::default());
+    // The rooms the app's call window joined on other hosts, as it last saved
+    // them (cast-n56.9); empty in a plain browser.
+    let joined = RwSignal::new(Vec::<super::rejoin::Room>::new());
     // Which rooms show their people and their past calls: kept across the
     // re-render a changed room gets.
     let open = Opened {
@@ -271,6 +274,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                 && invites.get_untracked() != v
             {
                 invites.set(v);
+            }
+            if let Ok(t) = home_request("GET", "/joined-rooms", None).await
+                && let Ok(v) = serde_json::from_str::<Vec<super::rejoin::Room>>(&t)
+                && joined.get_untracked() != v
+            {
+                joined.set(v);
             }
             if let Ok(t) = home_request("GET", "/person", None).await
                 && let Ok(w) = serde_json::from_str::<Who>(&t)
@@ -500,6 +509,11 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 super::person::show_element("home-message");
                             }>"Rooms you joined"</a></span>
                         </div>
+                        <ul id="joined-cards" class="list">
+                            <For each=move || joined.get() key=|r| format!("{r:?}") let:r>
+                                {joined_card(r)}
+                            </For>
+                        </ul>
                     </section>
                     <section id="home-contacts" class="home-place" hidden=move || place.get() != Place::Contacts>
                         <super::person::ContactsCard list=contacts rooms=room_names/>
@@ -511,6 +525,38 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                 </div>
             </div>
         </div>
+    }
+}
+
+/// A room the app joined on another host: what this app last saw of it, with a
+/// way to open it in the call window (where its live status and Rejoin are).
+fn joined_card(r: super::rejoin::Room) -> impl IntoView {
+    let line = if r.removed {
+        "Removed from this room".to_string()
+    } else {
+        let calls = r.calls.len();
+        format!(
+            "{} - last in it {}",
+            match calls {
+                0 => "No calls".to_string(),
+                1 => "1 call".to_string(),
+                n => format!("{n} calls"),
+            },
+            if r.last_ms > 0 {
+                when(r.last_ms)
+            } else {
+                "(unknown)".into()
+            }
+        )
+    };
+    let open = (!r.removed && r.url.starts_with("https://") && r.url.contains("/#"))
+        .then(|| app_link(&r.url));
+    view! {
+        <li class="room-card joined-card" data-joined-room=r.room.clone()>
+            <div class="room-title"><strong>{r.room.clone()}</strong></div>
+            <div class="small muted">{line}</div>
+            {open.map(|href| view! { <a class="button" href=href>"Open in the call window"</a> })}
+        </li>
     }
 }
 

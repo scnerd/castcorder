@@ -134,6 +134,17 @@ fn save(list: &[Room]) {
         serde_json::to_string(list),
     ) {
         let _ = s.set_item(KEY, &t);
+        // The app's call window also hands the list to the app, for the home
+        // to show as cards (cast-n56.9); a browser has no bridge.
+        if super::contact_offer::bridge().is_some() {
+            spawn_local(async move {
+                let args = object();
+                set(&args, "rooms", t);
+                if let Err(e) = super::contact_offer::invoke("joined_rooms_save", args).await {
+                    warn!(error = %e, "the app did not keep the joined rooms");
+                }
+            });
+        }
     }
 }
 
@@ -370,6 +381,8 @@ async fn ask(room: &Room) -> Result<HostStatus, String> {
 
 /// Ask every host in the list once; `seen` gets each host's answer.
 fn refresh(seen: RwSignal<Vec<(String, Seen)>>, list: RwSignal<Vec<Room>>) {
+    // Hand the app the list as it is now (it may predate the bridge).
+    save(&load());
     let mut hosts: Vec<Room> = Vec::new();
     for r in load() {
         if !hosts.iter().any(|h| h.host == r.host) {

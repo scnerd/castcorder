@@ -186,6 +186,15 @@ impl HostControl {
             .add_contact(code)
     }
 
+    /// Keep the call window's list of joined rooms for the home.
+    pub fn save_joined_rooms(&self, json: &str) -> Result<(), String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .save_joined_rooms(json)
+    }
+
     /// Rotate the call secret (the old call link stops admitting anyone) and
     /// return the new call link, if the host is reachable through a rendezvous.
     pub fn regenerate_link(&self) -> Result<Option<String>, String> {

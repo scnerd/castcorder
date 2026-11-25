@@ -17,10 +17,12 @@ fn main() {
     // The commands the call window may call from the project's pages
     // (cast-40e.10); main.rs grants them to that window and origin only.
     #[cfg(feature = "desktop")]
-    tauri_build::try_build(
-        tauri_build::Attributes::new().app_manifest(
-            tauri_build::AppManifest::new().commands(&["contact_code", "contact_add"]),
-        ),
-    )
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "contact_code",
+            "contact_add",
+            "joined_rooms_save",
+        ]),
+    ))
     .expect("tauri build step");
 }
