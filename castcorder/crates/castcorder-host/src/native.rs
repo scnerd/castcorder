@@ -79,6 +79,9 @@ pub struct Config {
     pub keep_wav: bool,
     /// Muted in the call (the live stream only; the track keeps recording).
     pub muted: Arc<AtomicBool>,
+    /// A device to switch to mid-call: the recorder ends its segment, opens
+    /// it, and records the next segment (same participant, same take).
+    pub switch: Arc<std::sync::Mutex<Option<NativeInput>>>,
 }
 
 /// A participant about to join: playback runs (a device input only), the
@@ -519,11 +522,12 @@ fn run(
         writer: None,
         files: vec![],
     };
+    let mut current = cfg.input.clone();
     loop {
         // Open already muted if the host is: muting only once the live loop
         // runs would send the first moments of audio to the call.
         opts.muted = cfg.muted.load(Ordering::Relaxed);
-        let opened = match &cfg.input {
+        let opened = match &current {
             NativeInput::Device(device) => {
                 GstCapture::open_device_with_live(device.as_deref(), Watchdog::default(), &opts)
             }
@@ -532,7 +536,7 @@ fn run(
         let (mut cap, live) = match opened {
             Ok(c) => c,
             Err(e) => {
-                warn!(input = ?cfg.input, error = %e, "host microphone not available; retrying");
+                warn!(input = ?current, error = %e, "host microphone not available; retrying");
                 match takes.recv_timeout(REOPEN) {
                     Ok(c) => {
                         if rec.control(c) {
@@ -568,7 +572,14 @@ fn run(
                 .spawn(move || live_loop(live, &stop, &commands, &rtp_next, &muted))
                 .ok()
         };
+        let mut switched = false;
         let quit = 'capture: loop {
+            if let Some(next) = take_switch(&cfg.switch, &current) {
+                info!(from = ?current, to = ?next, "host microphone switching");
+                current = next;
+                switched = true;
+                break 'capture false;
+            }
             loop {
                 match takes.try_recv() {
                     Ok(c) => {
@@ -603,7 +614,7 @@ fn run(
             }
         };
         rec.end_segment();
-        if !quit && matches!(cfg.input, NativeInput::Device(_)) {
+        if !quit && !switched && matches!(current, NativeInput::Device(_)) {
             // The device went away mid-take: Mic lost until it is reopened
             // and a new segment records.
             rec.source(castcorder_protocol::SourceState::Lost);
@@ -618,7 +629,7 @@ fn run(
             rec.stop(None);
             return;
         }
-        if matches!(cfg.input, NativeInput::File(_)) {
+        if matches!(current, NativeInput::File(_)) {
             // A file plays once: then only take commands, until quit.
             info!("host microphone file played to its end");
             loop {
@@ -635,7 +646,25 @@ fn run(
                 }
             }
         }
-        thread::sleep(REOPEN);
+        if !switched {
+            thread::sleep(REOPEN);
+        }
+    }
+}
+
+/// A pending switch to another device, taken from `slot` (only between
+/// devices: a file input is a test input and is never switched).
+fn take_switch(
+    slot: &std::sync::Mutex<Option<NativeInput>>,
+    current: &NativeInput,
+) -> Option<NativeInput> {
+    let mut slot = slot.lock().ok()?;
+    match (slot.as_ref()?, current) {
+        (NativeInput::Device(_), NativeInput::Device(_)) => slot.take(),
+        _ => {
+            slot.take();
+            None
+        }
     }
 }
 
@@ -702,6 +731,22 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    #[test]
+    fn a_switch_is_taken_once_and_only_between_devices() {
+        let slot = std::sync::Mutex::new(None);
+        let cur = NativeInput::Device(None);
+        assert_eq!(take_switch(&slot, &cur), None);
+        let usb = NativeInput::Device(Some("USB".into()));
+        *slot.lock().unwrap() = Some(usb.clone());
+        assert_eq!(take_switch(&slot, &cur), Some(usb.clone()));
+        assert_eq!(take_switch(&slot, &usb), None, "taken once");
+        // A file input is never switched, and the request is dropped.
+        let file = NativeInput::File("a.wav".into());
+        *slot.lock().unwrap() = Some(usb);
+        assert_eq!(take_switch(&slot, &file), None);
+        assert!(slot.lock().unwrap().is_none());
+    }
+
     /// Loose bound on start and stop latency (logged, not the point).
     const SANITY_US: i64 = 3_000_000;
 
@@ -734,6 +779,7 @@ mod tests {
             device_id: "host-test".into(),
             keep_wav: true,
             muted: Default::default(),
+            switch: Default::default(),
         };
         let rec = thread::spawn(move || run(cfg, take_rx, cmd_tx, None));
         // The first Opus frame means the capture is open.

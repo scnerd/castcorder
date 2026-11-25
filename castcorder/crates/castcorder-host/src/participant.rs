@@ -106,6 +106,8 @@ pub(crate) struct NativeCtl {
     joined: Mutex<Option<Joined>>,
     /// Muted in the call (call-only: the live stream; the track records).
     muted: Arc<std::sync::atomic::AtomicBool>,
+    /// A device to switch to, taken by the recorder.
+    switch: Arc<Mutex<Option<NativeInput>>>,
 }
 
 impl NativeCtl {
@@ -120,6 +122,7 @@ impl NativeCtl {
             base,
             joined: Mutex::new(None),
             muted: Default::default(),
+            switch: Default::default(),
         }
     }
 
@@ -158,6 +161,9 @@ impl NativeCtl {
             if joined.is_some() {
                 return Err("the host microphone is already in the call".into());
             }
+            if let Ok(mut s) = self.switch.lock() {
+                *s = None;
+            }
             // Every join starts unmuted.
             self.muted
                 .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -170,6 +176,7 @@ impl NativeCtl {
                 device_id: self.base.device_id.clone(),
                 keep_wav: self.base.keep_wav,
                 muted: self.muted.clone(),
+                switch: self.switch.clone(),
             });
             let takes = participant.takes.clone();
             let tx = self.tx.lock().map_err(|_| "host lock poisoned")?.clone();
@@ -233,6 +240,21 @@ impl NativeCtl {
         Ok(true)
     }
 
+    /// Switch the joined microphone to another input (`None`: the default)
+    /// mid-call: the take keeps recording, with a new segment from the new
+    /// device. Errors if the host microphone is not in the call.
+    pub fn switch(&self, device: Option<String>) -> Result<(), String> {
+        let mut joined = self.joined.lock().map_err(|_| "native lock poisoned")?;
+        let Some(j) = joined.as_mut() else {
+            return Err("the host microphone is not in the call".into());
+        };
+        let input = NativeInput::Device(device);
+        j.label = input.label();
+        *self.switch.lock().map_err(|_| "native lock poisoned")? = Some(input);
+        info!(input = %j.label, "host microphone switch requested");
+        Ok(())
+    }
+
     /// Mute (true) or unmute the native microphone in the call: the live
     /// stream goes silent, its track keeps recording, and everyone sees it
     /// muted with its level moving. False if it is not in the call.
@@ -285,4 +307,17 @@ fn list_devices() -> (Vec<NativeDevice>, Option<String>) {
 #[cfg(not(feature = "native-capture"))]
 fn list_devices() -> (Vec<NativeDevice>, Option<String>) {
     (vec![], None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_needs_the_microphone_in_the_call() {
+        let (tx, _rx) = mpsc::channel();
+        let ctl = NativeCtl::for_test(tx);
+        let e = ctl.switch(Some("USB".into())).unwrap_err();
+        assert!(e.contains("not in the call"), "{e}");
+    }
 }
