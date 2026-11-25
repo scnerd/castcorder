@@ -16,6 +16,7 @@ default-members = [
   "crates/castcorder-port-clock",
   "crates/castcorder-port-disk",
   "crates/castcorder-port-net",
+  "crates/castcorder-port-transcribe",
   "crates/castcorder-protocol",
   "crates/castcorder-recorder",
   "crates/castcorder-rendezvous",
@@ -47,6 +48,7 @@ castcorder-port-clock = { path = "crates/castcorder-port-clock" }
 castcorder-port-net = { path = "crates/castcorder-port-net" }
 castcorder-port-disk = { path = "crates/castcorder-port-disk" }
 castcorder-port-capture = { path = "crates/castcorder-port-capture" }
+castcorder-port-transcribe = { path = "crates/castcorder-port-transcribe" }
 castcorder-capture-gst = { path = "crates/castcorder-capture-gst" }
 castcorder-recorder = { path = "crates/castcorder-recorder" }
 castcorder-align = { path = "crates/castcorder-align" }
@@ -90,6 +92,12 @@ opt-level = 3
 # tests (tens of minutes of audio) crawl.
 [profile.dev.package.castcorder-recorder]
 opt-level = 3
+
+# whisper.cpp (built by cmake) follows the opt-level: a debug build makes the
+# transcription contract tests take minutes.
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3
+debug = false
 
 [profile.dev.package.flacenc]
 opt-level = 3

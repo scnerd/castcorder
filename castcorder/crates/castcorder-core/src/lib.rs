@@ -31,3 +31,4 @@ pub mod outbox;
 pub mod safety;
 pub mod sync;
 pub mod timing;
+pub mod transcript;
