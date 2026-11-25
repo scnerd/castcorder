@@ -250,6 +250,18 @@ jobs:
       - name: Fetch the transcription models
         run: task app:models
 
+      # whisper.cpp's Vulkan shader generator is a nested CMake build whose
+      # MSBuild file-tracking paths pass Windows' 260-character limit under
+      # D:\a\castcorder\castcorder\castcorder\target. Build in C:\t and keep the
+      # usual path as a junction to it, so later steps find the bundles there.
+      - name: Short target folder (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\t | Out-Null
+          New-Item -ItemType Junction -Path castcorder\target -Target C:\t | Out-Null
+          "CARGO_TARGET_DIR=C:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
         with:
