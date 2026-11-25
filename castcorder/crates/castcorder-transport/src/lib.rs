@@ -458,7 +458,8 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             } else {
                 self.spare.as_ref().expect("checked")
             };
-            self.relays[b].set_server(server, local, sock, now_d);
+            let working = self.relays[a].working();
+            self.relays[b].set_server(server, working, local, sock, now_d);
             self.rotating = Some(b);
             self.draining = None;
             return;
@@ -480,14 +481,15 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.spare.as_ref()
         };
         if let Some(sock) = other {
-            self.relays[b].set_server(None, local, sock, now_d);
+            self.relays[b].set_server(None, None, local, sock, now_d);
         }
         let sock = if a == 0 {
             &self.socket
         } else {
             self.spare.as_ref().expect("active relay 1 has a spare")
         };
-        self.relays[a].set_server(server, local, sock, now_d);
+        let working = self.relays[a].working();
+        self.relays[a].set_server(server, working, local, sock, now_d);
     }
 
     /// A second socket (bound like the first, on its own port) for the
@@ -526,6 +528,34 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         let mut next = self.relays[0].tick(&self.socket, now_d);
         if let Some(sp) = &self.spare {
             next = next.min(self.relays[1].tick(sp, now_d));
+        }
+        // Every address of the server unanswered: this socket's flow may be
+        // dropped for good (some TURN paths black-hole a 5-tuple), and retrying
+        // on it never recovers. Move the allocation to the other socket, which
+        // has another source port, and start again from the first address.
+        let a = self.active;
+        if self.rotating.is_none()
+            && self.draining.is_none()
+            && self.spare.is_some()
+            && self.relays[a].exhausted()
+            && let Some(server) = self.relays[a].credentials().cloned()
+        {
+            let b = 1 - a;
+            let (old, new) = if b == 0 {
+                (self.spare.as_ref().expect("checked"), &self.socket)
+            } else {
+                (&self.socket, self.spare.as_ref().expect("checked"))
+            };
+            let local = self.destination_for(server.addr);
+            info!(
+                from = a,
+                to = b,
+                "turn allocation unanswered on every address; retrying from the other socket"
+            );
+            self.relays[a].set_server(None, None, local, old, now_d);
+            self.relays[b].set_server(Some(server), None, local, new, now_d);
+            self.active = b;
+            next = now_d;
         }
         if let Some(b) = self.rotating
             && self.relays[b].relayed().is_some()
@@ -569,7 +599,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
                 };
                 if let Some(sock) = sock {
                     info!("old relay allocation deleted");
-                    self.relays[i].set_server(None, self.local, sock, now_d);
+                    self.relays[i].set_server(None, None, self.local, sock, now_d);
                 }
                 self.draining = None;
             } else {

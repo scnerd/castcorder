@@ -115,6 +115,9 @@ pub(crate) struct Relay {
     deadline: Option<Duration>,
     /// A send to the server failed during this allocation (warned once).
     send_failed: bool,
+    /// Every address of the server went unanswered, one after the other (see
+    /// [`Relay::exhausted`]).
+    exhausted: bool,
     requested: Vec<IpAddr>,
     pub(crate) stats: RelayStats,
 }
@@ -189,10 +192,15 @@ fn duration(i: Instant) -> Duration {
 
 impl Relay {
     /// Use `server` from now on (dropping any allocation on another server or
-    /// with other credentials), or stop relaying with `None`.
+    /// with other credentials), or stop relaying with `None`. `working` is the
+    /// server address a previous allocation was granted on: if the new server
+    /// still lists it, start there, not at the first address (a path that
+    /// black-holes the first address would cost [`ALLOCATE_TIMEOUT`] again on
+    /// every credential renewal).
     pub(crate) fn set_server<S: DatagramSocket>(
         &mut self,
         server: Option<TurnServer>,
+        working: Option<SocketAddr>,
         local: SocketAddr,
         socket: &S,
         now: Duration,
@@ -211,8 +219,14 @@ impl Relay {
             }
         }
         info!(server = ?server.as_ref().map(|s| s.addr.to_string()), "turn server set");
+        let at = server
+            .as_ref()
+            .zip(working)
+            .and_then(|(s, w)| (0..s.addresses()).find(|&i| s.address(i) == w))
+            .unwrap_or(0);
         *self = Relay {
             server,
+            at,
             local: Some(local),
             stats: std::mem::take(&mut self.stats),
             ..Relay::default()
@@ -248,6 +262,19 @@ impl Relay {
     /// The server address in use (allocated on, or being tried).
     pub(crate) fn server(&self) -> Option<SocketAddr> {
         self.server.as_ref().map(|s| s.address(self.at))
+    }
+
+    /// The server address that holds (or last held) the allocation, if one was
+    /// granted: what a renewal should try first.
+    pub(crate) fn working(&self) -> Option<SocketAddr> {
+        self.relayed.and(self.server())
+    }
+
+    /// No allocation, and every address of the server has gone unanswered in
+    /// turn: a path that drops this socket's flow for good needs a fresh source
+    /// port (the host moves the allocation to its other socket).
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted && self.relayed.is_none()
     }
 
     /// The relayed address, once the server has granted the allocation.
@@ -287,6 +314,7 @@ impl Relay {
             // to the next one at once, and wait only after trying them all.
             let next = (self.at + 1) % server.addresses();
             if next == 0 {
+                self.exhausted = true;
                 self.fail(now, &format!("turn allocation {why}; retrying later"));
             } else {
                 let to = server.address(next);
