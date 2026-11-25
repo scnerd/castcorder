@@ -99,6 +99,12 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
     Ok(())
 }
 
+thread_local! {
+    /// Set once a connection had to ask for relay credentials: later
+    /// connections of this page ask up front.
+    static RELAY_FIRST: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Start one connection attempt; a failure schedules the next.
 pub(super) fn connect(ui: Ui, epoch: u32) {
     let conn = CONN_EPOCH.get().wrapping_add(1);
@@ -284,8 +290,9 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     let link = LINK.with(|l| l.borrow().clone());
     // (`?lazyRelay=1` with the forced policy is the browser test's way to
     // exercise the lazy request deterministically: no candidates until asked.)
-    let relay_now = query_param("iceTransportPolicy").as_deref() == Some("relay")
-        && query_param("lazyRelay").as_deref() != Some("1");
+    let relay_now = RELAY_FIRST.get()
+        || (query_param("iceTransportPolicy").as_deref() == Some("relay")
+            && query_param("lazyRelay").as_deref() != Some("1"));
     let mailbox = match &link {
         Some(l) => Some(crate::mailbox::Mailbox::open(&mailbox_url(&url, l, relay_now)).await?),
         None => None,
@@ -325,7 +332,7 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     info!(call = %ctx.call, device = %ctx.device, sync_only, "answer applied");
     match (relay_expires, link) {
         (Some(expires), Some(l)) => spawn_local(renew_relay(pc, url, l, expires, current)),
-        (None, Some(l)) if !relay_now => spawn_local(lazy_relay(pc, url, l, current)),
+        (None, Some(_)) if !relay_now => spawn_local(lazy_relay(ui, epoch, pc, current)),
         _ => {}
     }
     Ok(())
@@ -333,17 +340,17 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
 
 /// Watch a connection that started without relay credentials: if it connects,
 /// nothing is ever minted for it; if it fails or has not connected after
-/// [`crate::signal::DIRECT_WAIT_MS`], ask the rendezvous for credentials (the
-/// same hello a renewal uses, naming the host), `setConfiguration` with them,
-/// and ask the host for an ICE restart so both sides gather relay candidates.
-/// Credentials once held are then renewed as usual ([`renew_relay`]).
+/// [`crate::signal::DIRECT_WAIT_MS`], connect again asking for relay
+/// credentials from the start. (A restart on this connection is not possible:
+/// the host is told by a message over a channel that is not open yet.) Later
+/// reconnects of this page ask up front too, since direct has not worked.
 async fn lazy_relay(
+    ui: Ui,
+    epoch: u32,
     pc: RtcPeerConnection,
-    url: String,
-    link: castcorder_link::CallLink,
     current: impl Fn() -> bool + 'static,
 ) {
-    use crate::signal::{DirectVerdict, RENEW_RETRY_MS, direct_verdict};
+    use crate::signal::{DirectVerdict, direct_verdict};
     const POLL_MS: i32 = 250;
     let started = js_sys::Date::now();
     loop {
@@ -358,44 +365,9 @@ async fn lazy_relay(
         }
     }
     info!("no direct connection; asking for relay credentials");
-    for attempt in 0..3 {
-        if attempt > 0 {
-            crate::mailbox::sleep_ms(RENEW_RETRY_MS as i32).await;
-        }
-        if !current() {
-            return;
-        }
-        let got = match crate::mailbox::Mailbox::open(&mailbox_url(&url, &link, true)).await {
-            Ok(mb) => match mb.relay_expires {
-                Some(e) => Ok((e, mb.ice_servers.clone())),
-                None if crate::signal::relay_quota_spent(mb.relay_error.as_deref()) => {
-                    warn!("relay budget spent; staying on the direct attempt");
-                    return;
-                }
-                None => Err("the rendezvous gave no relay credentials".to_string()),
-            },
-            Err(e) => Err(describe(&e)),
-        };
-        if !current() {
-            return;
-        }
-        match got {
-            Ok((expires, servers)) => {
-                if let Err(err) = call(&pc, "setConfiguration", &[&rtc_config(&servers, false)]) {
-                    warn!(error = %describe(&err), "relay credentials not applied");
-                    continue;
-                }
-                send_signal(&Signal::Restart);
-                info!(
-                    expires,
-                    "relay credentials applied; asked the host to restart ICE"
-                );
-                renew_relay(pc, url, link, expires, current).await;
-                return;
-            }
-            Err(why) => warn!(reason = %why, "relay credentials not obtained"),
-        }
-    }
+    RELAY_FIRST.set(true);
+    disconnect();
+    connect(ui, epoch);
 }
 
 /// The mailbox URL for a call connection through the rendezvous: naming the
