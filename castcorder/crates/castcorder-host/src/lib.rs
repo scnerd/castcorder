@@ -915,6 +915,12 @@ pub fn start(
             tracing::warn!(error = %e, "no spare UDP socket: renewing relay credentials will drop relayed calls")
         }
     }
+    // A fresh socket (new source port) for each TURN retry when a path drops
+    // one flow for good (cast-7bu).
+    let bind_ip = args.bind;
+    host.set_socket_factory(Box::new(move || {
+        UdpDatagramSocket::bind(SocketAddr::new(bind_ip, 0))
+    }));
     let (tx, rx) = mpsc::channel();
     let health = rendezvous::SharedHealth::default();
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {

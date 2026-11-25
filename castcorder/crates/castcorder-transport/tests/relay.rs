@@ -624,6 +624,62 @@ fn an_unanswered_server_is_retried_from_a_fresh_source_port() {
     assert_eq!((stats.timeouts, stats.allocations), (1, 1), "{stats:?}");
 }
 
+/// cast-7bu: with a socket factory every retry is a new source port, so a path
+/// that drops several flows for good is escaped once one is not dropped.
+/// Without a factory the retry only alternates between the two dead sockets
+/// (the first and the spare) and never allocates.
+#[test]
+fn every_turn_retry_can_use_a_fresh_source_port() {
+    for with_factory in [false, true] {
+        init_log();
+        let time = SimTime::new();
+        let net = SimNetwork::new(time.clone(), SEED);
+        let mut turn = SimTurn::new(&net, &time);
+        let mut host = Host::new(
+            net.bind(ip(1)),
+            time.clock(SimClockConfig::default()),
+            HostConfig::default(),
+        );
+        // The first socket (10.0.0.1) and the spare (10.0.0.9) are dropped
+        // for good; the sim partitions by address, so each fresh socket sits
+        // on another one: 10.0.0.10 is dropped too, 10.0.0.11 is not.
+        for dead in [1, 9, 10] {
+            net.partition(ip(dead), ip(TURN_IP));
+        }
+        host.set_spare_socket(net.bind(ip(9)));
+        if with_factory {
+            let net2 = net.clone();
+            let mut next = 10;
+            host.set_socket_factory(Box::new(move || {
+                let s = net2.bind(ip(next));
+                next += 1;
+                Ok(s)
+            }));
+        }
+        host.set_turn_server(Some(TurnServer {
+            addr: turn.addr(),
+            username: USER.into(),
+            password: PASS.into(),
+            alternates: vec![],
+        }));
+        let start = time.now();
+        let end = start + castcorder_transport::ALLOCATE_TIMEOUT * 4;
+        while host.relayed().is_none() && time.now() < end {
+            host.poll();
+            turn.step();
+            time.advance(Duration::from_millis(10));
+        }
+        if with_factory {
+            assert!(host.relayed().is_some(), "{:?}", host.relay_stats());
+            // The factory replaces the spare: 10.0.0.1 times out, then the first
+            // fresh socket (10.0.0.10, dropped too), then 10.0.0.11 allocates.
+            assert_eq!(host.relay_stats().timeouts, 2, "{:?}", host.relay_stats());
+        } else {
+            assert!(host.relayed().is_none(), "two dead sockets cannot allocate");
+        }
+    }
+}
+
 /// RFC 8489 retransmission: an Allocate whose first datagrams are lost is
 /// sent again, so a lossy path allocates late rather than timing out.
 #[test]
