@@ -22,6 +22,7 @@ use castcorder_protocol::{
 };
 use std::path::PathBuf;
 
+mod link;
 mod routing;
 mod status;
 mod sync;
@@ -83,6 +84,14 @@ pub enum Command {
         call: Option<String>,
         /// Where the answer goes; a refusal starts with its code
         /// (`waiting:`, `kicked:`, `locked:`, `wrong_password:`, ...).
+        reply: mpsc::Sender<Result<String, String>>,
+    },
+    /// A contact link (castcorder-host `contact_link`): an admitted offer
+    /// from a contact's app install, accepted as a sync-only connection.
+    /// The answer SDP.
+    ContactLink {
+        peer: crate::contact::LinkPeer,
+        offer_sdp: String,
         reply: mpsc::Sender<Result<String, String>>,
     },
     /// A status query: every room of this host the device was in
@@ -378,6 +387,9 @@ pub struct Call {
     /// Sync-only connections ([`sync`]): not participants, never counted
     /// as anyone in the call.
     syncers: BTreeMap<GuestId, sync::Syncer>,
+    /// Contact links ([`link`]): sync-only connections from contacts'
+    /// installs, never counted as anyone in the call either.
+    links: BTreeMap<GuestId, link::Linked>,
 }
 
 /// How often the library volume's free space is read (host timeline, us).
@@ -500,6 +512,7 @@ impl Call {
             recorders_dirty: false,
             recorders_due_us: 0,
             syncers: BTreeMap::new(),
+            links: BTreeMap::new(),
         };
         call.save_room();
         call
@@ -1432,6 +1445,11 @@ impl Call {
                         self.offer_call_track(id, &call, &offer)
                     }
                     Request::ClockPing { .. } => unreachable!("answered above"),
+                    // Only a contact link asks this (`sync`).
+                    Request::SharedRooms => Response::Error {
+                        kind: ErrorKind::NotAllowed,
+                        message: "shared rooms are only told over a contact link".into(),
+                    },
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
                     Request::StartTake => {
@@ -1521,6 +1539,11 @@ impl Call {
                             {
                                 self.sync_gone(guest, &reason);
                             }
+                            HostEvent::GuestGone { guest, reason }
+                                if self.links.contains_key(&guest) =>
+                            {
+                                self.link_gone(guest, &reason);
+                            }
                             HostEvent::GuestGone { guest, reason } => {
                                 info!(guest = guest.0, reason = ?reason, "guest left");
                                 self.rpc.remove(&guest);
@@ -1557,6 +1580,7 @@ impl Call {
                         host.poll();
                     }
                     self.serve_syncers();
+                    self.serve_links();
                     for id in std::mem::take(&mut self.remove) {
                         // Kicked (or refused at Join): flush its last answer,
                         // then drop it; it is reported gone next poll.
@@ -1712,6 +1736,13 @@ impl Call {
                     "at the host machine",
                 );
                 let _ = reply.send(self.stop_take());
+            }
+            Command::ContactLink {
+                peer,
+                offer_sdp,
+                reply,
+            } => {
+                let _ = reply.send(self.offer_link(host, peer, &offer_sdp));
             }
             Command::HostStatus {
                 device,

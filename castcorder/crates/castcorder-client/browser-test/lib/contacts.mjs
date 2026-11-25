@@ -113,6 +113,20 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   const room = await card.getAttribute('data-room');
   const trusted = (await call(HTTP, '/rooms')).rooms.find((r) => r.name === room).persons;
   check(trusted.length === 1 && trusted[0] === bob.id, 'contacts: the room trusts Bob\x27s person: ' + JSON.stringify(trusted));
+  // Contact links (cast-40e.4): Bob's install opens one to Ann's through
+  // the mailbox and learns the room she trusts him in, with its call link.
+  const shared = await call(HTTP2, '/contacts/rooms?person=' + encodeURIComponent(ann.id));
+  const rooms = shared.installs.flatMap((i) => i.rooms);
+  check(shared.installs.length === 1 && rooms.some((r) => r.room === room && r.link),
+    'contacts: over a contact link Bob learns Ann shares ' + room + ' with its call link: ' + JSON.stringify(shared));
+  // And the home asks Bob's install the same way, from his row.
+  await page.click('#contact-list li .shared-rooms');
+  const line = await waitFor(async () => {
+    const t = await text(page, '#contact-list li .contact-shared');
+    return t && t !== 'Asking...' ? t : null;
+  }, 'contacts: the home shows the rooms Bob shares', 30000, 250);
+  check(line.startsWith('No rooms you share') || line.startsWith('Rooms you share'),
+    'contacts: the home asked Bob over a contact link: ' + line);
   await card.locator('.untrust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 0, 'contacts: the room no longer trusts Bob', 15000);
   check(true, 'contacts: trust taken back on the room card');

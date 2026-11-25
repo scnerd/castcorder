@@ -103,6 +103,8 @@ pub struct App {
     pub persons: crate::person::Persons,
     /// This install's contacts (`/contacts...`, `/contact`).
     pub contacts: crate::contact::Contacts,
+    /// Contact links (`/contacts/rooms`), with a rendezvous.
+    pub contact_links: Option<crate::contact_link::Links>,
 }
 
 /// `GET /person`: the person as the home shows it (never the key).
@@ -738,7 +740,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             }
         }
         // Contacts and room trust for a person: the host machine's own page.
-        ("GET", "/contacts")
+        ("GET", "/contacts" | "/contacts/rooms")
         | (
             "POST",
             "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
@@ -747,6 +749,23 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             403,
             "contacts are only available to the host machine's own page",
         ),
+        // The rooms a contact shares, asked over contact links.
+        ("GET", "/contacts/rooms") => {
+            let Some(person) = query_param(&req.query, "person") else {
+                return text(400, "no person");
+            };
+            if app.contacts.get(&person).is_none() {
+                return text(404, "not a contact");
+            }
+            match app.contact_links.as_ref() {
+                Some(links) => json(
+                    200,
+                    serde_json::to_string(&links.shared_rooms(&app.contacts, &person))
+                        .unwrap_or_default(),
+                ),
+                None => text(409, "contact links need a rendezvous"),
+            }
+        }
         ("GET", "/contacts") => {
             if query_param(&req.query, "look").as_deref() == Some("1") {
                 app.contacts.look(crate::wall_ms());
@@ -1081,6 +1100,7 @@ mod tests {
             lan_links: Vec::new(),
             persons: test_persons(),
             contacts: test_contacts(),
+            contact_links: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1137,6 +1157,7 @@ mod tests {
             lan_links: vec!["https://192.168.1.5:27800/".into()],
             persons: test_persons(),
             contacts: test_contacts(),
+            contact_links: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1177,6 +1198,7 @@ mod tests {
             lan_links: Vec::new(),
             persons: test_persons(),
             contacts: test_contacts(),
+            contact_links: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

@@ -582,6 +582,7 @@ pub fn request_link(
                 kind,
             }),
             contact: None,
+            contact_link: false,
             presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
@@ -749,6 +750,7 @@ mod tests {
                 kind,
             }),
             contact: None,
+            contact_link: false,
             presence: None,
         }
     }

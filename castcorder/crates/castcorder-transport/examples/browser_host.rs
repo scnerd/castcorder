@@ -234,7 +234,7 @@ impl Call {
                         message: "no recording profile in this example".into(),
                     },
                     // The example has one call.
-                    Request::OfferCallTrack { .. } => Response::Error {
+                    Request::OfferCallTrack { .. } | Request::SharedRooms => Response::Error {
                         kind: ErrorKind::NotAllowed,
                         message: "one call only in this example".into(),
                     },

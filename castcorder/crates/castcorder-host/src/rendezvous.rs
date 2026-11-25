@@ -711,6 +711,27 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         Ok((_, o)) if o.presence.is_some() => {
             AnswerPlain::Presence(cfg.contacts.answer_presence(&o, crate::wall_ms())?)
         }
+        // A contact link: like a presence ping, only a contact's install is
+        // answered (castcorder-host `contact_link`), then the host thread
+        // accepts it as a sync-only connection.
+        Ok((_, o)) if o.contact_link => {
+            let peer = cfg.contacts.answer_link(&o, crate::wall_ms())?;
+            info!(guest_conn = from, device = %peer.device, person = %peer.person, "contact link offer through the rendezvous");
+            let (reply_tx, rx) = mpsc::channel();
+            let sent = tx.send(Command::ContactLink {
+                peer,
+                offer_sdp: o.sdp,
+                reply: reply_tx,
+            });
+            match sent
+                .ok()
+                .and_then(|_| rx.recv_timeout(Duration::from_secs(10)).ok())
+            {
+                Some(Ok(sdp)) => AnswerPlain::Sdp(sdp),
+                Some(Err(e)) => AnswerPlain::Rejected(e),
+                None => AnswerPlain::Rejected("host thread not answering".into()),
+            }
+        }
         // A contact request needs no call secret either: the contact code
         // is its own.
         Ok((_, o)) if o.contact.is_some() => {
@@ -957,6 +978,7 @@ mod tests {
                 cert: None,
                 link: None,
                 contact: None,
+                contact_link: false,
                 presence: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
@@ -1167,6 +1189,7 @@ mod tests {
             cert: None,
             link: None,
             contact: None,
+            contact_link: false,
             presence: None,
         };
         let (sealed, guest) =
