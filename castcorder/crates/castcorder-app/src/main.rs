@@ -92,7 +92,11 @@ fn main() {
             host: host.clone(),
             smoke: args.smoke,
         })
-        .invoke_handler(tauri::generate_handler![contact_code, contact_add])
+        .invoke_handler(tauri::generate_handler![
+            contact_code,
+            contact_add,
+            joined_rooms_save
+        ])
         .setup(move |app| {
             setup(app.handle(), &args);
             Ok(())
@@ -547,7 +551,8 @@ fn bridge(app: &AppHandle, host: &HostControl) {
         .window(CALL)
         .remote(format!("{origin}/*"))
         .permission("allow-contact-code")
-        .permission("allow-contact-add");
+        .permission("allow-contact-add")
+        .permission("allow-joined-rooms-save");
     match app.add_capability(capability) {
         Ok(()) => tracing::info!(%origin, "the call window may reach the contacts"),
         Err(e) => tracing::warn!(error = %e, "the call window cannot reach the contacts"),
@@ -579,6 +584,17 @@ fn contact_code(
 #[tauri::command]
 fn contact_add(webview: Webview, shell: State<'_, Shell>, code: String) -> Result<(), String> {
     bridged(&webview, &shell)?.add_contact(&code)
+}
+
+/// The call window's list of rooms it joined on other hosts, for the home to
+/// show (cast-n56.9).
+#[tauri::command]
+fn joined_rooms_save(
+    webview: Webview,
+    shell: State<'_, Shell>,
+    rooms: String,
+) -> Result<(), String> {
+    bridged(&webview, &shell)?.save_joined_rooms(&rooms)
 }
 
 /// Percent-encode everything but unreserved characters.

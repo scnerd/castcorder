@@ -16,6 +16,7 @@ pub mod contact;
 pub mod contact_link;
 mod http;
 pub mod invite;
+pub mod joined;
 mod local;
 #[cfg(feature = "native-capture")]
 mod native;
@@ -333,6 +334,12 @@ impl Running {
     /// This install's person as the home shows it (never the key's secret).
     pub fn person(&self) -> person::View {
         self.persons.view(wall_ms())
+    }
+
+    /// Keep the rooms the app's call window joined elsewhere (a JSON array)
+    /// for the home to list (cast-n56.9).
+    pub fn save_joined_rooms(&self, json: &str) -> Result<(), String> {
+        joined::save(&self.library, json)
     }
 
     /// Rename the person or this device (`None` keeps it).

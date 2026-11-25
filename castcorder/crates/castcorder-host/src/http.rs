@@ -886,7 +886,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 None => gone(),
             }
         }
-        ("GET", "/native" | "/rooms" | "/person" | "/settings")
+        ("GET", "/native" | "/rooms" | "/person" | "/settings" | "/joined-rooms")
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
@@ -917,6 +917,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         }
         ("GET", "/person") => json(200, person_json(app)),
         ("GET", "/settings") => json(200, settings_json(app)),
+        ("GET", "/joined-rooms") => json(200, crate::joined::read(&app.library)),
         (
             "POST",
             "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
@@ -1230,6 +1231,9 @@ mod tests {
             // Settings (the folder's path, the host's addresses) likewise.
             let (status, body) = request_with(addr, "/settings", headers);
             assert_eq!(status, 403, "{headers}: {body}");
+            // So do the rooms the app's call window joined elsewhere.
+            let (status, body) = request_with(addr, "/joined-rooms", headers);
+            assert_eq!(status, 403, "{headers}: {body}");
         }
         stop.store(true, Ordering::SeqCst);
     }
@@ -1289,6 +1293,39 @@ mod tests {
         );
         assert_eq!(v["lan"][0], "https://10.0.0.2:1/", "{body}");
         stop.store(true, Ordering::SeqCst);
+    }
+
+    /// `GET /joined-rooms` (cast-n56.9) gives the host machine's own page the
+    /// list the app's call window last saved, `[]` before one.
+    #[test]
+    fn joined_rooms_are_read_back_for_the_host_machine_s_page() {
+        let (tx, _rx) = mpsc::channel();
+        let library = std::env::temp_dir().join(format!("cc-joined-http-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&library);
+        let app = Arc::new(App {
+            tx: Mutex::new(tx.clone()),
+            dist: std::env::temp_dir(),
+            host_id: "h".into(),
+            native: Arc::new(crate::participant::NativeCtl::for_test(tx)),
+            library: library.clone(),
+            call_links: test_links(),
+            lan_links: vec![],
+            persons: test_persons(),
+            contacts: test_contacts(),
+            contact_links: None,
+        });
+        let local = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = local.local_addr().unwrap();
+        let stop: Arc<AtomicBool> = Default::default();
+        serve(local, app, None, true, stop.clone());
+        let headers = "Host: localhost:1\r\nX-Castcorder-Native: 1\r\n";
+        let (status, body) = request_with(addr, "/joined-rooms", headers);
+        assert_eq!((status, body.as_str()), (200, "[]"));
+        crate::joined::save(&library, r#"[{"room":"Late-show"}]"#).unwrap();
+        let (status, body) = request_with(addr, "/joined-rooms", headers);
+        assert_eq!((status, body.as_str()), (200, r#"[{"room":"Late-show"}]"#));
+        stop.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(&library);
     }
 
     /// `GET /role` carries the call link and the LAN links on the host

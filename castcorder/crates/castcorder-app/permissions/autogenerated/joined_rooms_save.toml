@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-joined-rooms-save"
+description = "Enables the joined_rooms_save command without any pre-configured scope."
+commands.allow = ["joined_rooms_save"]
+
+[[permission]]
+identifier = "deny-joined-rooms-save"
+description = "Denies the joined_rooms_save command without any pre-configured scope."
+commands.deny = ["joined_rooms_save"]

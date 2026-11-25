@@ -41,13 +41,13 @@ pub(super) fn can_pair(ui: Ui) -> bool {
 
 /// The app's bridge to its install, in the app's call window (Tauri's IPC):
 /// None in a browser.
-fn bridge() -> Option<JsValue> {
+pub(super) fn bridge() -> Option<JsValue> {
     let t = get(&window().into(), "__TAURI_INTERNALS__");
     t.is_object().then_some(t)
 }
 
 /// Call the app command `cmd` with `args` through the bridge.
-async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, String> {
+pub(super) async fn invoke(cmd: &str, args: JsValue) -> Result<JsValue, String> {
     let t = bridge().ok_or("not in the app")?;
     let p = call(&t, "invoke", &[&JsValue::from_str(cmd), &args]).map_err(|e| describe(&e))?;
     JsFuture::from(Promise::from(p))
