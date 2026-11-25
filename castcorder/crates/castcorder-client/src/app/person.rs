@@ -21,7 +21,7 @@ use castcorder_link::wire::{
 use serde::Deserialize;
 
 use super::native::NATIVE_HEADER;
-use super::view::{Mark, ThemeToggle};
+use super::view::{Icon, Mark, ThemeToggle};
 use super::*;
 
 /// A device linked from this install, as `GET /person` says.
@@ -298,9 +298,10 @@ impl ContactItem {
             Some(at) => {
                 let mins = ((now_ms - at as f64) / 60_000.0).max(0.0) as u64;
                 match mins {
-                    0 => "Offline, seen just now".into(),
-                    1..=59 => format!("Offline, seen {mins} min ago"),
-                    m => format!("Offline, seen {} h ago", m / 60),
+                    0 => "Last seen just now".into(),
+                    1..=59 => format!("Last seen {mins} min ago"),
+                    60..=2879 => format!("Last seen {} h ago", mins / 60),
+                    m => format!("Last seen {} days ago", m / 1440),
                 }
             }
             None => "Offline".into(),
@@ -325,6 +326,9 @@ struct SharedRoomItem {
     live: bool,
     #[serde(default)]
     in_call: Vec<String>,
+    /// Its call link, where the contact's install trusts this one.
+    #[serde(default)]
+    link: Option<String>,
 }
 
 /// One install's answer (`GET /contacts/rooms`).
@@ -372,6 +376,15 @@ impl SharedView {
     }
 }
 
+/// An invite this install sent (`GET /contacts`, `invited`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct SentItem {
+    person: String,
+    room: String,
+    #[serde(default)]
+    delivered: bool,
+}
+
 /// `GET /contacts`.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct ContactsView {
@@ -384,18 +397,58 @@ struct ContactsView {
     /// This app appears offline to its contacts.
     #[serde(default)]
     appear_offline: bool,
+    /// Invites this install sent (cast-40e.5).
+    #[serde(default)]
+    invited: Vec<SentItem>,
 }
 
-/// The contacts on the host machine's home (docs/design.md "Contacts"):
-/// make a contact code to send, use one someone sent, accept or decline
-/// requests, nickname and remove contacts. `list` is shared with the rooms'
-/// trust pickers.
+/// Up to two initials of `label`, for its avatar.
+fn initials(label: &str) -> String {
+    let s: String = label
+        .split_whitespace()
+        .filter_map(|w| w.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect();
+    if s.is_empty() { "?".into() } else { s }
+}
+
+/// A round avatar with initials and, when known, a presence dot.
+fn avatar(label: &str, online: Option<bool>, big: bool) -> impl IntoView + use<> {
+    let dot = online.map(|on| {
+        view! { <span class="pres" class:on=on aria-hidden="true"></span> }
+    });
+    view! { <span class="avatar" class:big=big aria-hidden="true">{initials(label)}{dot}</span> }
+}
+
+/// What the detail pane knows of the rooms a contact shares.
+#[derive(Clone, Debug)]
+enum Shared {
+    Asking,
+    Known(SharedView),
+    Failed(String),
+}
+
+/// Home > Contacts (docs/design.md "Contacts", cast-40e.13): requests to
+/// accept or decline, contacts grouped Online and Offline with presence and
+/// Invite, a detail pane for the picked one (invite to a room, join their
+/// live call, nickname, rooms you share, remove), and Add contact (copy my
+/// contact link, or paste one). `list` is shared with the rooms' trust
+/// pickers; `rooms` are this install's rooms, to invite to.
 #[component]
-pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
+pub(super) fn ContactsCard(
+    list: RwSignal<Vec<ContactItem>>,
+    rooms: leptos::prelude::Signal<Vec<String>>,
+) -> impl IntoView {
     let data = RwSignal::new(ContactsView::default());
     let message = RwSignal::new(String::new());
     let links = RwSignal::new(Vec::<String>::new());
     let code = RwSignal::new(String::new());
+    let adding_open = RwSignal::new(false);
+    let selected = RwSignal::new(None::<String>);
+    let nick = RwSignal::new(String::new());
+    let shared = RwSignal::new(None::<(String, Shared)>);
+    let inviting = RwSignal::new(false);
     let refresh = move || {
         spawn_local(async move {
             // While someone is looking at the home (visible and focused: the
@@ -425,6 +478,15 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                             if changed {
                                 list.set(v.contacts.clone());
                             }
+                            if let Some(id) = selected.get_untracked()
+                                && !v.contacts.iter().any(|c| c.id == id)
+                            {
+                                selected.set(None);
+                            }
+                            // A new request: close Add contact, so it shows.
+                            if v.requests.len() > data.with_untracked(|d| d.requests.len()) {
+                                adding_open.set(false);
+                            }
                             data.set(v);
                         }
                     }
@@ -450,23 +512,29 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
             refresh();
         })
     };
-    let make_code = move |_| {
+    let copy_link = move |_| {
         spawn_local(async move {
             match person_request("/contacts/code", Some("{}".into())).await {
                 Ok(t) => {
                     let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
-                    links.set(
-                        v["links"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|x| x.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    );
+                    let all: Vec<String> = v["links"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Some(first) = all.first() {
+                        let clip = get(&window().navigator(), "clipboard");
+                        quiet(
+                            call(&clip, "writeText", &[&JsValue::from_str(first)]),
+                            "copy contact link",
+                        );
+                    }
+                    links.set(all);
                     message.set(
-                        "Send this to the person you want to add. It works once, for 10 minutes. Then accept their request here."
+                        "Copied. Send it to the person you want to add: it works once, for 10 minutes. Then accept their request here."
                             .into(),
                     );
                 }
@@ -483,116 +551,275 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
             "Asked: they accept it on their side.",
         )
     };
-    view! {
-        <section id="contacts" class="room-card">
-            <div class="room-head">
-                <h2>"Contacts"</h2>
-                <span class="small muted">"People you both agreed to add. Being a contact does not let anyone into your rooms."</span>
-            </div>
-            <div class="row">
-                <button id="add-contact" class="btn primary" on:click=make_code>"Add a contact"</button>
-                <span id="contacts-message" class="small muted">{move || message.get()}</span>
-            </div>
-            <ul id="contact-codes" class="list">
-                <For each=move || links.get() key=|l| l.clone() let:l>
-                    <li class="linkbar"><code class="contact-code">{l}</code></li>
-                </For>
-            </ul>
-            <div class="row">
-                <label class="sr-only" for="contact-code-input">"Contact code someone sent you"</label>
-                <input id="contact-code-input" placeholder="Paste a contact code someone sent you" prop:value=move || code.get()
-                    on:input=move |ev| code.set(event_target_value(&ev)) />
-                <button id="use-contact-code" class="btn" disabled=move || code.get().trim().is_empty() on:click=add>"Add"</button>
-                <span id="contact-adding" class="small muted">{move || match data.get().adding {
-                    Some(j) if j.state == "waiting" => "Waiting for them to accept".to_string(),
-                    Some(j) if j.state == "added" => format!("Added {} as a contact", j.detail.unwrap_or_default()),
-                    Some(j) => format!("Not added: {}", j.detail.unwrap_or_default()),
-                    None => String::new(),
-                }}</span>
-            </div>
-            <ul id="contact-requests" class="list">
-                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
-                    {
-                        let (d1, d2) = (r.device.clone(), r.device.clone());
-                        let who = if r.name.is_empty() { "Someone".to_string() } else { r.name.clone() };
-                        view! {
-                            <li class="call-row" data-device=r.device.clone()>
-                                <span>{format!("{who} wants to add you as a contact")}</span>
-                                <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
-                                <span class="call-actions">
-                                    <button class="btn tiny primary accept-contact"
-                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d1.clone(), "accept": true }), "Contact added.")>"Accept"</button>
-                                    <button class="btn tiny outline decline-contact"
-                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d2.clone(), "accept": false }), "Declined.")>"Decline"</button>
-                                </span>
-                            </li>
-                        }
-                    }
-                </For>
-            </ul>
-            <ul id="contact-list" class="list">
-                <For each=move || data.get().contacts key=|c| format!("{}|{}|{}", c.id, c.name, c.nickname) let:c>
-                    {
-                        let nick = RwSignal::new(c.nickname.clone());
-                        let (p1, p2) = (c.id.clone(), c.id.clone());
-                        let (p3, p4) = (c.id.clone(), c.id.clone());
-                        let shared = RwSignal::new(String::new());
-                        let look_shared = move |_| {
-                            let person = p4.clone();
-                            shared.set("Asking...".into());
-                            spawn_local(async move {
-                                let path = format!(
-                                    "/contacts/rooms?person={}",
-                                    String::from(js_sys::encode_uri_component(&person))
-                                );
-                                let line = match person_request(&path, None).await {
-                                    Ok(t) => serde_json::from_str::<SharedView>(&t)
-                                        .map(|v| v.line())
-                                        .unwrap_or_else(|e| format!("bad answer: {e}")),
-                                    Err(e) => e,
-                                };
-                                shared.set(line);
-                            });
-                        };
-                        let presence = move || {
-                            let v = data.get();
-                            if !v.presence {
-                                return String::new();
-                            }
-                            v.contacts
-                                .iter()
-                                .find(|x| x.id == p3)
-                                .map(|x| x.presence(js_sys::Date::now()))
-                                .unwrap_or_default()
-                        };
-                        view! {
-                            <li class="call-row contact" data-person=c.id.clone()>
+    // Ask the contact's installs which rooms they share, over contact links.
+    let ask_shared = move |person: String| {
+        shared.set(Some((person.clone(), Shared::Asking)));
+        spawn_local(async move {
+            let path = format!(
+                "/contacts/rooms?person={}",
+                String::from(js_sys::encode_uri_component(&person))
+            );
+            let got = match person_request(&path, None).await {
+                Ok(t) => serde_json::from_str::<SharedView>(&t)
+                    .map(Shared::Known)
+                    .unwrap_or_else(|e| Shared::Failed(format!("bad answer: {e}"))),
+                Err(e) => Shared::Failed(e),
+            };
+            // Only if the same contact is still picked.
+            if shared.with_untracked(|s| s.as_ref().is_some_and(|(p, _)| *p == person)) {
+                shared.set(Some((person, got)));
+            }
+        });
+    };
+    let pick = move |c: &ContactItem, invite: bool| {
+        if selected.get_untracked().as_deref() != Some(c.id.as_str()) {
+            selected.set(Some(c.id.clone()));
+            nick.set(c.nickname.clone());
+            ask_shared(c.id.clone());
+        }
+        inviting.set(invite);
+    };
+    let current = move || {
+        let id = selected.get()?;
+        data.with(|v| v.contacts.iter().find(|c| c.id == id).cloned())
+    };
+    let presence_on = move || data.with(|v| v.presence);
+    // One group of contact rows.
+    let rows = move |online: Option<bool>| {
+        let v = data.get();
+        let sel = selected.get();
+        v.contacts
+            .iter()
+            .filter(|c| online.is_none_or(|on| on == !c.online.is_empty()))
+            .map(|c| {
+                let (c1, c2) = (c.clone(), c.clone());
+                let line = if v.presence {
+                    c.presence(js_sys::Date::now())
+                } else {
+                    String::new()
+                };
+                let dot = v.presence.then_some(!c.online.is_empty());
+                view! {
+                    <li class="contact-row" class:on=sel.as_deref() == Some(c.id.as_str()) data-person=c.id.clone()>
+                        <button class="contact-pick" on:click=move |_| pick(&c1, false)
+                            aria-pressed=if sel.as_deref() == Some(c.id.as_str()) { "true" } else { "false" }>
+                            {avatar(&c.label(), dot, false)}
+                            <span class="contact-text">
                                 <span class="contact-name">{c.label()}</span>
-                                <span class="small muted contact-presence">{presence}</span>
-                                <span class="small muted contact-shared">{move || shared.get()}</span>
-                                <span class="call-actions">
-                                    <input class="contact-nickname" placeholder="Nickname (only you see it)" prop:value=move || nick.get()
+                                <span class="small muted contact-presence">{line}</span>
+                            </span>
+                        </button>
+                        <button class="btn tiny outline invite-contact" on:click=move |_| pick(&c2, true)>"Invite"</button>
+                    </li>
+                }
+            })
+            .collect_view()
+    };
+    let count = move |online: bool| {
+        data.with(|v| {
+            v.contacts
+                .iter()
+                .filter(|c| online == !c.online.is_empty())
+                .count()
+        })
+    };
+    view! {
+        <section id="contacts" class="contacts-page">
+            <header class="contacts-head">
+                <h2>"Contacts"</h2>
+                <span class="small muted">"People you record with. You see when they are online and can invite them straight into a room. Being a contact does not let anyone into your rooms."</span>
+                <div class="add-contact-wrap">
+                    <button id="add-contact" class="btn primary" aria-expanded=move || if adding_open.get() { "true" } else { "false" }
+                        aria-controls="add-contact-panel" on:click=move |_| adding_open.update(|o| *o = !*o)>
+                        <Icon name="people" small=true/>"Add contact"
+                    </button>
+                    <div id="add-contact-panel" class="add-contact-panel" role="dialog" aria-label="Add a contact" hidden=move || !adding_open.get()>
+                        <strong>"Add a contact"</strong>
+                        <span class="small muted">"Send them your contact link. It works once, for 10 minutes."</span>
+                        <button id="copy-contact-link" class="btn" on:click=copy_link>
+                            <Icon name="link" small=true/>"Copy my contact link"
+                        </button>
+                        <ul id="contact-codes" class="list">
+                            <For each=move || links.get() key=|l| l.clone() let:l>
+                                <li class="linkbar"><code class="contact-code">{l}</code></li>
+                            </For>
+                        </ul>
+                        <span class="or-rule small muted">"or"</span>
+                        <label class="field" for="contact-code-input">"Paste a link someone sent you"</label>
+                        <div class="row">
+                            <input id="contact-code-input" placeholder="Castcorder contact link" prop:value=move || code.get()
+                                on:input=move |ev| code.set(event_target_value(&ev)) />
+                            <button id="use-contact-code" class="btn" disabled=move || code.get().trim().is_empty() on:click=add>"Add"</button>
+                        </div>
+                    </div>
+                </div>
+            </header>
+            <span id="contacts-message" class="small muted" role="status">{move || message.get()}</span>
+            <span id="contact-adding" class="small muted">{move || match data.get().adding {
+                Some(j) if j.state == "waiting" => "Waiting for them to accept".to_string(),
+                Some(j) if j.state == "added" => format!("Added {} as a contact", j.detail.unwrap_or_default()),
+                Some(j) => format!("Not added: {}", j.detail.unwrap_or_default()),
+                None => String::new(),
+            }}</span>
+            <div class="contacts-cols">
+                <div class="contacts-lists">
+                    <Show when=move || !data.with(|v| v.requests.is_empty())>
+                        <section class="contact-requests-card" aria-label="Requests">
+                            <span class="group-label accent">"Requests"</span>
+                            <ul id="contact-requests" class="list">
+                                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
+                                    {
+                                        let (d1, d2) = (r.device.clone(), r.device.clone());
+                                        let who = if r.name.is_empty() { "Someone".to_string() } else { r.name.clone() };
+                                        view! {
+                                            <li class="contact-request" data-device=r.device.clone()>
+                                                {avatar(&who, None, false)}
+                                                <span class="contact-text">
+                                                    <span>{format!("{who} wants to add you as a contact")}</span>
+                                                    <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
+                                                </span>
+                                                <span class="call-actions">
+                                                    <button class="btn tiny outline decline-contact"
+                                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d2.clone(), "accept": false }), "Declined.")>"Decline"</button>
+                                                    <button class="btn tiny primary accept-contact"
+                                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d1.clone(), "accept": true }), "Contact added.")>"Accept"</button>
+                                                </span>
+                                            </li>
+                                        }
+                                    }
+                                </For>
+                            </ul>
+                        </section>
+                    </Show>
+                    <div id="contact-list">
+                        <Show when=presence_on fallback=move || view! {
+                            <section aria-label="Contacts">
+                                <span class="group-label">{move || format!("Contacts \u{b7} {}", data.with(|v| v.contacts.len()))}</span>
+                                <ul class="list contact-group">{move || rows(None)}</ul>
+                            </section>
+                        }>
+                            <section aria-label="Online">
+                                <span class="group-label">{move || format!("Online \u{b7} {}", count(true))}</span>
+                                <ul id="contacts-online" class="list contact-group">{move || rows(Some(true))}</ul>
+                            </section>
+                            <section aria-label="Offline">
+                                <span class="group-label">{move || format!("Offline \u{b7} {}", count(false))}</span>
+                                <ul id="contacts-offline" class="list contact-group">{move || rows(Some(false))}</ul>
+                            </section>
+                        </Show>
+                    </div>
+                    <Show when=move || data.with(|v| v.contacts.is_empty())>
+                        <span class="small muted">"No contacts yet. Add one with Add contact."</span>
+                    </Show>
+                    <Show when=presence_on>
+                        <label class="small muted">
+                            <input id="appear-offline" type="checkbox" prop:checked=move || data.get().appear_offline
+                                on:change=move |ev| post("/contacts/presence", serde_json::json!({ "appear_offline": event_target_checked(&ev) }), "Saved.") />
+                            " Appear offline to your contacts"
+                        </label>
+                    </Show>
+                </div>
+                <Show when=move || current().is_some()>
+                    {move || current().map(|c| {
+                        let online = !c.online.is_empty();
+                        let label = c.label();
+                        let presence = if presence_on() {
+                            if online {
+                                match c.online.len() {
+                                    1 => format!("Online on {}", c.online[0]),
+                                    n => format!("Online on {n} devices: {}", c.online.join(", ")),
+                                }
+                            } else {
+                                c.presence(js_sys::Date::now())
+                            }
+                        } else {
+                            String::new()
+                        };
+                        let (p1, p2, p3, p4, p5) = (c.id.clone(), c.id.clone(), c.id.clone(), c.id.clone(), c.id.clone());
+                        let first = c.name.split_whitespace().next().unwrap_or("them").to_string();
+                        let dot = presence_on().then_some(online);
+                        view! {
+                            <aside id="contact-detail" class="contact-detail" aria-label=label.clone() data-person=c.id.clone()>
+                                <div class="contact-detail-head">
+                                    {avatar(&label, dot, true)}
+                                    <span class="contact-text">
+                                        <strong class="contact-detail-name">{label.clone()}</strong>
+                                        <span class="small muted">{presence}</span>
+                                    </span>
+                                </div>
+                                <div class="row">
+                                    <button class="btn primary invite-toggle-contact" aria-expanded=move || if inviting.get() { "true" } else { "false" }
+                                        on:click=move |_| inviting.update(|o| *o = !*o)>"Invite to a room..."</button>
+                                    {move || shared.with(|s| match s {
+                                        Some((p, Shared::Known(v))) if *p == p4 => v.installs.iter().flat_map(|i| i.rooms.iter())
+                                            .find(|r| r.live && r.link.is_some())
+                                            .and_then(|r| r.link.clone()),
+                                        _ => None,
+                                    }).map(|link| view! {
+                                        <a class="btn join-their-call" href=super::home::app_link(&link)>"Join their call"</a>
+                                    })}
+                                </div>
+                                <Show when=move || inviting.get()>
+                                    <ul class="list invite-rooms" aria-label="Your rooms">
+                                        {
+                                            let p1 = p1.clone();
+                                            move || {
+                                                let sent = data.with(|v| v.invited.clone());
+                                                let person = p1.clone();
+                                                let all = rooms.get();
+                                                if all.is_empty() {
+                                                    return view! { <li class="small muted">"No rooms yet: make one under Rooms."</li> }.into_any();
+                                                }
+                                                all.into_iter().map(|room| {
+                                                    let state = match sent.iter().find(|s| s.person == person && s.room == room) {
+                                                        Some(s) if s.delivered => "Invited",
+                                                        Some(_) => "Gets it when back online",
+                                                        None => "",
+                                                    };
+                                                    let (r1, who) = (room.clone(), person.clone());
+                                                    view! {
+                                                        <li class="invite-room" data-room=room.clone()>
+                                                            <span>{room.clone()}</span>
+                                                            <span class="small muted invite-room-state">{state}</span>
+                                                            <button class="btn tiny send-invite-room"
+                                                                on:click=move |_| post("/contacts/invite", serde_json::json!({ "person": who.clone(), "room": r1.clone() }), "Invite sent.")>
+                                                                {if state.is_empty() { "Invite" } else { "Invite again" }}
+                                                            </button>
+                                                        </li>
+                                                    }
+                                                }).collect_view().into_any()
+                                            }
+                                        }
+                                    </ul>
+                                </Show>
+                                <label class="field" for="contact-nickname">"Nickname (only you see it)"</label>
+                                <div class="row">
+                                    <input id="contact-nickname" class="contact-nickname" prop:value=move || nick.get()
                                         on:input=move |ev| nick.set(event_target_value(&ev)) />
                                     <button class="btn tiny save-nickname"
-                                        on:click=move |_| post("/contacts/nickname", serde_json::json!({ "person": p1.clone(), "nickname": nick.get_untracked() }), "Saved.")>"Save"</button>
-                                    <button class="btn tiny outline shared-rooms"
-                                        on:click=look_shared>"Shared rooms"</button>
-                                    <button class="btn tiny outline remove-contact"
-                                        on:click=move |_| post("/contacts/remove", serde_json::json!({ "person": p2.clone() }), "Removed.")>"Remove"</button>
-                                </span>
-                            </li>
+                                        on:click=move |_| post("/contacts/nickname", serde_json::json!({ "person": p2.clone(), "nickname": nick.get_untracked() }), "Saved.")>"Save"</button>
+                                </div>
+                                <div class="contact-shared-box">
+                                    <span class="group-label">"Rooms you share"</span>
+                                    <span class="small contact-shared">{move || shared.with(|s| match s {
+                                        Some((_, Shared::Asking)) => "Asking...".to_string(),
+                                        Some((_, Shared::Known(v))) => v.line(),
+                                        Some((_, Shared::Failed(e))) => e.clone(),
+                                        None => String::new(),
+                                    })}</span>
+                                    <button class="btn tiny outline shared-rooms" on:click=move |_| ask_shared(p3.clone())>"Ask again"</button>
+                                </div>
+                                <div class="contact-shared-box">
+                                    <span class="group-label">"Recordings on the way"</span>
+                                    <span class="small muted">{format!("Files {first} records in your rooms arrive whenever you are both online.")}</span>
+                                </div>
+                                <button class="btn ghost remove-contact"
+                                    on:click=move |_| { selected.set(None); post("/contacts/remove", serde_json::json!({ "person": p5.clone() }), "Removed.") }>"Remove contact"</button>
+                            </aside>
                         }
-                    }
-                </For>
-            </ul>
-            <Show when=move || data.get().contacts.is_empty()><span class="small muted">"No contacts yet."</span></Show>
-            <Show when=move || data.get().presence>
-                <label class="small muted">
-                    <input id="appear-offline" type="checkbox" prop:checked=move || data.get().appear_offline
-                        on:change=move |ev| post("/contacts/presence", serde_json::json!({ "appear_offline": event_target_checked(&ev) }), "Saved.") />
-                    " Appear offline to your contacts"
-                </label>
-            </Show>
+                    })}
+                </Show>
+            </div>
         </section>
     }
 }

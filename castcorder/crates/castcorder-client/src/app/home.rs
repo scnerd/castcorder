@@ -115,11 +115,14 @@ struct Invites {
     invites: Vec<InviteIn>,
     #[serde(default)]
     invited: Vec<InviteOut>,
+    /// Contact requests waiting (only counted, for the nav).
+    #[serde(default)]
+    requests: Vec<serde_json::Value>,
 }
 
 /// The app's own link for a call link: `castcorder://` in place of the
 /// scheme, which opens the app's call window on that room's lobby.
-fn app_link(link: &str) -> String {
+pub(super) fn app_link(link: &str) -> String {
     match link.split_once("://") {
         Some((_, rest)) => format!("castcorder://{rest}"),
         None => link.to_string(),
@@ -307,12 +310,24 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             "Reachable on this network only"
         }
     };
+    let room_names = leptos::prelude::Signal::derive(move || {
+        data.with(|d| d.rooms.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
+    });
+    // Contact requests waiting, as a badge on Contacts.
+    let asks = move || invites.with(|v| v.requests.len());
     let nav = move |p: Place, id: &'static str, label: &'static str, icon: &'static str| {
+        let badge = (p == Place::Contacts).then(|| {
+            view! {
+                <Show when=move || asks() != 0>
+                    <span class="nav-badge" title="Contact requests">{asks}</span>
+                </Show>
+            }
+        });
         view! {
             <button id=id class="home-nav-item" class:on=move || place.get() == p
                 aria-current=move || if place.get() == p { "page" } else { "false" }
                 on:click=move |_| place.set(p)>
-                <Icon name=icon small=true/>{label}
+                <Icon name=icon small=true/>{label}{badge}
             </button>
         }
     };
@@ -389,7 +404,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                         </div>
                     </section>
                     <section id="home-contacts" class="home-place" hidden=move || place.get() != Place::Contacts>
-                        <super::person::ContactsCard list=contacts/>
+                        <super::person::ContactsCard list=contacts rooms=room_names/>
                     </section>
                     <section id="home-settings" class="home-place" hidden=move || place.get() != Place::Settings>
                         <div class="home-head"><h1>"Settings"</h1></div>

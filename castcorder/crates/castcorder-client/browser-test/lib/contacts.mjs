@@ -56,7 +56,9 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   // Contacts is a place of the home's left nav (cast-n56.1).
   await page.click('#nav-contacts');
   await page.waitForSelector('#add-contact');
+  // Add contact opens a panel: copy my contact link (cast-40e.13).
   await page.click('#add-contact');
+  await page.click('#copy-contact-link');
   const link = await waitFor(async () => {
     const all = await page.locator('#contact-codes code').allTextContents();
     return all.find((l) => l.startsWith('http://' + rendezvous + '/'));
@@ -67,6 +69,7 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   await call(HTTP2, '/contacts/add', { code: link });
   await page.waitForSelector('#contact-requests li .accept-contact', { timeout: 30000 });
   const asked = await text(page, '#contact-requests li');
+  await waitFor(async () => (await text(page, '#nav-contacts .nav-badge')) === '1', 'contacts: the nav counts the request', 10000);
   check(asked.includes('Bob Guest wants to add you as a contact') && asked.includes(bob.fingerprint),
     'contacts: the request reached the home through the mailbox, by name and fingerprint: ' + asked);
   check((await call(HTTP2, '/contacts')).adding.state === 'waiting', 'contacts: Bob waits for Ann to accept');
@@ -84,7 +87,7 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   // Presence (cast-40e.3): sealed pings through the mailbox, sent once they
   // pair, show each online to the other; the home says so on Bob's row.
   const seen = await waitFor(async () => {
-    const t = await text(page, '#contact-list li .contact-presence');
+    const t = await text(page, '#contacts-online li .contact-presence');
     return t.startsWith('Online on ') ? t : null;
   }, 'contacts: the home shows Bob online', 30000, 250);
   check(seen === 'Online on ' + bob.device_name, 'contacts: Bob online by his device name: ' + seen);
@@ -101,8 +104,11 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   check(true, 'contacts: appear offline toggles on the home');
 
   // A nickname, given on the home.
-  await page.fill('#contact-list li .contact-nickname', 'Bobby');
-  await page.click('#contact-list li .save-nickname');
+  // Picking Bob opens his detail pane, which asks for the rooms you share.
+  await page.click('#contact-list li .contact-pick');
+  await page.waitForSelector('#contact-detail .contact-shared');
+  await page.fill('#contact-detail .contact-nickname', 'Bobby');
+  await page.click('#contact-detail .save-nickname');
   await waitFor(async () => (await text(page, '#contact-list li .contact-name')) === 'Bobby (Bob Guest)',
     'contacts: the home shows the nickname', 10000);
   check(true, 'contacts: the nickname shows beside the name');
@@ -127,9 +133,9 @@ export async function contactsChecks({ HTTP, rendezvous }) {
     'contacts: over a contact link Bob learns Ann shares ' + room + ' with its call link: ' + JSON.stringify(shared));
   // And the home asks Bob's install the same way, from his row.
   await page.click('#nav-contacts');
-  await page.click('#contact-list li .shared-rooms');
+  await page.click('#contact-detail .shared-rooms');
   const line = await waitFor(async () => {
-    const t = await text(page, '#contact-list li .contact-shared');
+    const t = await text(page, '#contact-detail .contact-shared');
     return t && t !== 'Asking...' ? t : null;
   }, 'contacts: the home shows the rooms Bob shares', 30000, 250);
   check(line.startsWith('No rooms you share') || line.startsWith('Rooms you share'),
@@ -151,6 +157,19 @@ export async function contactsChecks({ HTTP, rendezvous }) {
     'contacts: the room card says Bob is invited', 15000);
   await call(HTTP2, '/contacts/invite/dismiss', { id: invited.id });
   check((await call(HTTP2, '/contacts')).invites.length === 0, 'contacts: Bob dismissed the invite');
+  // And from Contacts: Bob's row's Invite, then the room in his pane.
+  await page.click('#nav-contacts');
+  await page.click('#contact-list li .invite-contact');
+  await page.click('#contact-detail .invite-room[data-room="' + room + '"] .send-invite-room');
+  const invitedAgain = await waitFor(async () => {
+    const v = await call(HTTP2, '/contacts');
+    return v.invites.length === 1 ? v.invites[0] : null;
+  }, 'contacts: the invite from Contacts reaches Bob', 30000, 500);
+  await waitFor(async () => (await text(page, '#contact-detail .invite-room[data-room="' + room + '"] .invite-room-state')) === 'Invited',
+    'contacts: Bob\x27s pane says he is invited', 15000);
+  check(invitedAgain.room === room, 'contacts: invited from the Contacts page too');
+  await call(HTTP2, '/contacts/invite/dismiss', { id: invitedAgain.id });
+  await page.click('#nav-rooms');
   await card.locator('.untrust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 0, 'contacts: the room no longer trusts Bob', 15000);
   check(true, 'contacts: trust taken back on the room card');
