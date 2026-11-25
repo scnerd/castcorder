@@ -28,6 +28,9 @@ env:
   # must run on any user's CPU, and the macOS universal build cross-compiles,
   # where -mcpu=native fails. Build for the portable baseline instead.
   GGML_NATIVE: "OFF"
+  # macOS 11 at least (tauri.bundle.conf.json says so too): whisper.cpp needs
+  # std::filesystem (10.15). Set here as well so every compile sees it.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
 
 jobs:
   verify:
