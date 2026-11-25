@@ -655,6 +655,7 @@ async fn add_backup(ui: Ui, device: String) {
             return;
         }
     };
+    handle_worker_errors(&worker, "backup");
     let src = source.clone();
     let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
         on_backup_message(ui, &src, &e.data());

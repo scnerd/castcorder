@@ -562,8 +562,28 @@ fn worker_cmd(cmd: &str) -> JsValue {
     o
 }
 
+/// A worker's own error event (its script failed to load, or threw). Left
+/// alone it reaches the page as an uncaught error: Firefox reports
+/// NS_BINDING_ABORTED for a script request it cancelled, which fails an
+/// otherwise good page. It is logged here instead (cast-uou).
+fn handle_worker_errors(worker: &Worker, what: &'static str) {
+    let onerror = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+        ev.prevent_default();
+        let message = string(&ev, "message");
+        let file = string(&ev, "filename");
+        if message.contains("NS_BINDING_ABORTED") {
+            info!(worker = what, file = %file, "worker script request was cancelled");
+        } else {
+            warn!(worker = what, file = %file, error = %message, "worker error");
+        }
+    });
+    worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    onerror.forget();
+}
+
 fn start_worker(ui: Ui) -> Result<(), JsValue> {
     let worker = Worker::new_with_options("./worker_loader.js", &WorkerOptions::new())?;
+    handle_worker_errors(&worker, "storage");
     let onmsg = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
         let d = e.data();
         match string(&d, "type").as_str() {
