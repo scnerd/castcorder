@@ -129,6 +129,19 @@ impl HostControl {
         self.running.lock().ok()?.as_ref()?.live_status()
     }
 
+    /// The newest invite to a call from a contact ("Ann invites you to
+    /// show"), and how many are shown, if the host is running.
+    pub fn invites(&self) -> Option<(usize, Option<String>)> {
+        let running = self.running.lock().ok()?;
+        let v = running.as_ref()?.contacts();
+        let newest = v
+            .invites
+            .iter()
+            .max_by_key(|i| i.at_ms)
+            .map(|i| format!("{} invites you to {}", i.from, i.room));
+        Some((v.invites.len(), newest))
+    }
+
     /// Rotate the call secret (the old call link stops admitting anyone) and
     /// return the new call link, if the host is reachable through a rendezvous.
     pub fn regenerate_link(&self) -> Result<Option<String>, String> {

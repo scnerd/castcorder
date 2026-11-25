@@ -158,6 +158,10 @@ struct ContactRequest {
     nickname: Option<String>,
     #[serde(default)]
     appear_offline: bool,
+    #[serde(default)]
+    room: Option<String>,
+    #[serde(default)]
+    id: Option<u64>,
 }
 
 /// `POST /rooms/trust`.
@@ -206,6 +210,20 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
                 .set_nickname(&p, r.nickname.as_deref().unwrap_or_default())
         })),
         "/contacts/presence" => done(app.contacts.set_appear_offline(r.appear_offline)),
+        "/contacts/invite" => done(person().and_then(|p| {
+            let room = r.room.clone().ok_or("no room")?;
+            let in_call = ask(app, |reply| Command::InCall {
+                room: room.clone(),
+                reply,
+            })
+            .unwrap_or_default();
+            let invite = crate::invite::make(&app.call_links, &room, in_call)?;
+            app.contacts.invite(&p, invite, crate::wall_ms())
+        })),
+        "/contacts/invite/dismiss" => done(
+            r.id.ok_or_else(|| "no invite".to_string())
+                .and_then(|id| app.contacts.dismiss_invite(id)),
+        ),
         _ => done(person().and_then(|p| app.contacts.remove(&p))),
     }
 }
@@ -743,8 +761,15 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/contacts" | "/contacts/rooms")
         | (
             "POST",
-            "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
-            | "/contacts/remove" | "/contacts/presence" | "/rooms/trust",
+            "/contacts/code"
+            | "/contacts/decide"
+            | "/contacts/add"
+            | "/contacts/nickname"
+            | "/contacts/remove"
+            | "/contacts/presence"
+            | "/contacts/invite"
+            | "/contacts/invite/dismiss"
+            | "/rooms/trust",
         ) if !native_allowed(req, producer) => text(
             403,
             "contacts are only available to the host machine's own page",
@@ -774,8 +799,14 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         }
         (
             "POST",
-            "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
-            | "/contacts/remove" | "/contacts/presence",
+            "/contacts/code"
+            | "/contacts/decide"
+            | "/contacts/add"
+            | "/contacts/nickname"
+            | "/contacts/remove"
+            | "/contacts/presence"
+            | "/contacts/invite"
+            | "/contacts/invite/dismiss",
         ) => {
             let r = match serde_json::from_slice::<ContactRequest>(&req.body) {
                 Ok(r) => r,

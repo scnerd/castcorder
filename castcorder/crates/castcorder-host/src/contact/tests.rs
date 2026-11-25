@@ -494,3 +494,53 @@ fn only_a_contacts_install_gets_a_contact_link_and_never_while_appearing_offline
     assert!(link_as(&a, &b.host, b.persons.cert(), now).is_err());
     assert!(a.contacts.online_installs(&b.persons.id(), now).is_empty());
 }
+
+#[test]
+fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
+    let (a, b) = paired(44);
+    let now = crate::wall_ms();
+    let peer = link_as(&a, &b.host, b.persons.cert(), now).unwrap();
+    let link = format!(
+        "https://rv.test/v/1/#{}",
+        castcorder_link::CallLink {
+            host: b.host.id(),
+            secret: castcorder_link::CallSecret([5; 16]),
+        }
+        .fragment()
+    );
+    let invite = |link: &str| castcorder_protocol::RoomInvite {
+        room: "show".into(),
+        link: link.into(),
+        in_call: vec!["Bob".into()],
+    };
+    let script = format!("javascript:alert(1)//{}", &link[link.find('#').unwrap()..]);
+    for bad in ["https://rv.test/no-fragment", script.as_str(), ""] {
+        assert!(
+            a.contacts.receive_invite(&peer, invite(bad), now).is_err(),
+            "{bad}"
+        );
+    }
+    a.contacts
+        .receive_invite(&peer, invite(&link), now)
+        .unwrap();
+    let shown = a.contacts.view(now).invites;
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        (shown[0].from.as_str(), shown[0].link.as_str()),
+        ("Bob", link.as_str())
+    );
+    // Removed since: not shown, and what was shown goes with them.
+    a.contacts.remove(&b.persons.id()).unwrap();
+    assert!(a.contacts.view(now).invites.is_empty());
+    assert!(
+        a.contacts
+            .receive_invite(&peer, invite(&link), now)
+            .is_err()
+    );
+    // Only a contact can be invited.
+    assert!(
+        a.contacts
+            .invite(&b.persons.id(), invite(&link), now)
+            .is_err()
+    );
+}

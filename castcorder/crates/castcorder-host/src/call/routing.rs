@@ -70,6 +70,8 @@ pub struct Rooms {
     /// This install's person: whose certificate makes a device the rooms'
     /// owner's (castcorder-host `person`).
     pub persons: crate::person::Persons,
+    /// This install's contacts (invites arrive over contact links).
+    pub contacts: crate::contact::Contacts,
 }
 
 /// The Ed25519 key a device proof presents, if well-formed.

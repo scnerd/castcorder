@@ -387,16 +387,28 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     // Poll the host once a second; touch the OS only when something changed.
     std::thread::spawn(move || {
         let mut last = None;
+        let mut invites = (0, None);
         loop {
             std::thread::sleep(Duration::from_secs(1));
+            // An invite from a contact brings the home (which shows it with
+            // Join and Dismiss) to the front, and the tray says so.
+            let now = app.state::<Shell>().host.invites().unwrap_or_default();
+            let changed = now != invites;
+            if now.0 > invites.0 {
+                show(&app, MAIN);
+            }
+            invites = now;
             let Some(live) = app.state::<Shell>().host.live_status() else {
                 continue;
             };
-            if last == Some(live) {
+            if last == Some(live) && !changed {
                 continue;
             }
             last = Some(live);
-            let text = tray_text(&live);
+            let text = match &invites.1 {
+                Some(invite) => format!("{}; {invite}", tray_text(&live)),
+                None => tray_text(&live),
+            };
             let _ = status_item.set_text(&text);
             let _ = tray.set_tooltip(Some(format!("Castcorder: {text}")));
             let _ = tray.set_title(live.recording.map(|t| format!("REC {t}")));

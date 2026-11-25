@@ -8,9 +8,10 @@
 //!   ([`castcorder_transport::Host::accept_sync`]: data channels only). Like
 //!   a sync-only connection it is not a participant and never counts as
 //!   anyone in a call.
-//! - Its one request so far is `SharedRooms`: the rooms of this install the
-//!   contact shares ([`Call::shared_rooms`]). Track delivery and invites are
-//!   not on it yet (cast-40e.5 and later).
+//! - Its requests: `SharedRooms`, the rooms of this install the contact
+//!   shares ([`Call::shared_rooms`]); `Invite`, an invite to the contact's
+//!   call, shown on the home (castcorder-host `invite`). Track delivery is
+//!   not on it.
 //! - Closed by this side after [`LINK_IDLE_MS`] without a request (the
 //!   opening side closes it sooner, when it has nothing left to ask).
 
@@ -80,15 +81,26 @@ impl Call {
                 };
                 l.last_ms = now;
                 let (device, person) = (l.peer.device.clone(), l.peer.person.clone());
+                let peer = l.peer.clone();
                 let response = match request {
                     Request::SharedRooms => {
                         Response::SharedRooms(self.shared_rooms(&device, &person))
+                    }
+                    Request::Invite(invite) => {
+                        match self.rooms.contacts.receive_invite(&peer, invite, now) {
+                            Ok(()) => Response::Done,
+                            Err(message) => Response::Error {
+                                kind: ErrorKind::NotAllowed,
+                                message,
+                            },
+                        }
                     }
                     other => {
                         info!(guest = id.0, request = ?other, "request refused on a contact link");
                         Response::Error {
                             kind: ErrorKind::NotAllowed,
-                            message: "a contact link only tells shared rooms".into(),
+                            message: "a contact link only tells shared rooms and carries invites"
+                                .into(),
                         }
                     }
                 };
@@ -110,6 +122,22 @@ impl Call {
         if let Some(l) = self.links.remove(&id) {
             info!(guest = id.0, device = %l.peer.device, reason = ?reason, "contact link gone");
         }
+    }
+
+    /// Who is in `room`'s call now, by name (empty unless it is the live
+    /// room).
+    pub(super) fn in_call(&self, room: &str) -> Vec<String> {
+        if !(self.is_live() && room == self.room_name) {
+            return Vec::new();
+        }
+        let mut names: Vec<String> = self
+            .participant
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(self.rpc.keys().filter_map(|g| self.names.get(g).cloned()))
+            .collect();
+        names.sort();
+        names
     }
 
     /// The rooms the contact install `device` of `person` shares with this
@@ -137,18 +165,7 @@ impl Call {
                 None => continue,
             };
             let room_live = live && name == self.room_name;
-            let in_call = if room_live {
-                let mut names: Vec<String> = self
-                    .participant
-                    .iter()
-                    .map(|p| p.name.clone())
-                    .chain(self.rpc.keys().filter_map(|g| self.names.get(g).cloned()))
-                    .collect();
-                names.sort();
-                names
-            } else {
-                Vec::new()
-            };
+            let in_call = self.in_call(&name);
             crate::room::decision(
                 device,
                 "contact",

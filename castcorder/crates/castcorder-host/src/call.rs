@@ -86,6 +86,11 @@ pub enum Command {
         /// (`waiting:`, `kicked:`, `locked:`, `wrong_password:`, ...).
         reply: mpsc::Sender<Result<String, String>>,
     },
+    /// Who is in `room`'s call now, by name (empty unless it is live).
+    InCall {
+        room: String,
+        reply: mpsc::Sender<Vec<String>>,
+    },
     /// A contact link (castcorder-host `contact_link`): an admitted offer
     /// from a contact's app install, accepted as a sync-only connection.
     /// The answer SDP.
@@ -1445,10 +1450,10 @@ impl Call {
                         self.offer_call_track(id, &call, &offer)
                     }
                     Request::ClockPing { .. } => unreachable!("answered above"),
-                    // Only a contact link asks this (`sync`).
-                    Request::SharedRooms => Response::Error {
+                    // Only a contact link asks these (`link`).
+                    Request::SharedRooms | Request::Invite(_) => Response::Error {
                         kind: ErrorKind::NotAllowed,
-                        message: "shared rooms are only told over a contact link".into(),
+                        message: "only a contact link asks this".into(),
                     },
                     Request::ListSources => Response::Sources(vec![]),
                     Request::GetTakeStatus => Response::TakeStatus(self.status),
@@ -1736,6 +1741,9 @@ impl Call {
                     "at the host machine",
                 );
                 let _ = reply.send(self.stop_take());
+            }
+            Command::InCall { room, reply } => {
+                let _ = reply.send(self.in_call(&room));
             }
             Command::ContactLink {
                 peer,

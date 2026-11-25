@@ -9,7 +9,10 @@
 //!   that Bob shares "show" with her, with its call link, and not "other".
 //! - Asked again, the same link answers.
 //! - Bob stops trusting her: "show" is no longer shared.
-//! - Bob appears offline: Ann has no install of his to ask.
+//! - Ann invites Bob to her room's call: the invite reaches his install with
+//!   her room's call link and is delivered; he dismisses it.
+//! - Bob appears offline: Ann has no install of his to ask, and a new invite
+//!   waits until he is back online.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -90,7 +93,7 @@ fn online(of: &Running) -> Vec<String> {
 }
 
 #[test]
-fn a_contact_link_tells_the_rooms_a_contact_shares() {
+fn contact_links_tell_shared_rooms_and_carry_invites() {
     let root = std::env::temp_dir().join(format!(
         "castcorder-app-contact-link-{}",
         std::process::id()
@@ -147,11 +150,45 @@ fn a_contact_link_tells_the_rooms_a_contact_shares() {
     assert!(none.failed.is_empty(), "{:?}", none.failed);
     assert!(none.installs[0].rooms.is_empty(), "{:?}", none.installs);
 
-    // Bob appears offline: no install of his to ask.
+    // Ann invites Bob to her room's call: it reaches his install over a
+    // contact link, with her room's call link.
+    wait("Ann's call link", || a.room_link("show").is_some());
+    a.invite(&bob, "show").unwrap();
+    wait("the invite at Bob", || b.contacts().invites.len() == 1);
+    let got = b.contacts().invites[0].clone();
+    assert_eq!(
+        (got.from.as_str(), got.room.as_str(), got.person.as_str()),
+        ("Ann", "show", ann.as_str())
+    );
+    assert_eq!(Some(got.link), a.room_link("show"));
+    wait("Ann to see it delivered", || {
+        a.contacts().invited.first().is_some_and(|i| i.delivered)
+    });
+    b.dismiss_invite(got.id).unwrap();
+    assert!(b.contacts().invites.is_empty());
+    assert!(
+        a.invite(&ann, "show").is_err(),
+        "only a contact can be invited"
+    );
+
+    // Bob appears offline: no install of his to ask, and an invite waits.
     b.set_appear_offline(true).unwrap();
     wait("Ann to see Bob offline", || online(&a).is_empty());
     let gone = a.shared_rooms(&bob).unwrap();
     assert!(gone.installs.is_empty() && gone.failed.is_empty());
+    a.invite(&bob, "show").unwrap();
+    sleep(Duration::from_secs(2));
+    assert!(
+        !a.contacts().invited[0].delivered,
+        "not while Bob is offline"
+    );
+    assert!(b.contacts().invites.is_empty());
+    // Back online, he gets it.
+    b.set_appear_offline(false).unwrap();
+    wait("the waiting invite at Bob", || {
+        b.contacts().invites.len() == 1
+    });
+    assert!(a.contacts().invited[0].delivered);
 
     a.stop();
     b.stop();
