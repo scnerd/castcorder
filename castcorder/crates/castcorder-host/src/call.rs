@@ -1770,8 +1770,18 @@ impl Call {
                     .rooms
                     .persons
                     .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
-                let _ =
-                    reply.send(self.host_status(&device, proof.as_ref(), &nonce, &audience, owner));
+                let person = crate::person::cert_person(
+                    cert.as_ref(),
+                    routing::proof_key(proof.as_ref()).as_ref(),
+                );
+                let _ = reply.send(self.host_status(
+                    &device,
+                    proof.as_ref(),
+                    &nonce,
+                    &audience,
+                    owner,
+                    person,
+                ));
             }
             Command::Live { reply } => {
                 let _ = reply.send(self.live());

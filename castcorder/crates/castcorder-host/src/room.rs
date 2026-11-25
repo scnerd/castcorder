@@ -830,16 +830,21 @@ impl Room {
     /// was ever in this room, and as what; `None` for a device the room never
     /// saw, which a status query then treats as unknown.
     pub fn membership(&self, device: &str, alias: Option<&str>) -> Option<Membership> {
-        self.membership_as(device, alias, false)
+        self.membership_as(device, alias, false, None)
     }
 
     /// [`membership`](Self::membership); an `owner` device (one of the
-    /// room owner's) is a trusted producer of every room, seen or not.
+    /// room owner's) is a trusted producer of every room, seen or not, and a
+    /// device whose certificate vouches for `person` (verified) has that
+    /// person's trust here: a trusted person's device is a trusted member
+    /// even if it never joined, and a producer when the person is one
+    /// (cast-40e.11). Kicking the device still removes it.
     pub fn membership_as(
         &self,
         device: &str,
         alias: Option<&str>,
         owner: bool,
+        person: Option<&[u8; 32]>,
     ) -> Option<Membership> {
         if owner {
             return Some(Membership {
@@ -848,17 +853,27 @@ impl Room {
                 producer: true,
             });
         }
+        let removed = self.banned(device, alias);
         let rec = self
             .record_for(device, alias)
             .or_else(|| self.saved.devices.get(device));
-        rec.map(|d| {
-            let removed = self.banned(device, alias);
-            Membership {
-                removed,
-                trusted: d.trusted && !removed,
-                producer: d.producer && d.trusted && !removed,
+        let by_person = self.person_trusted(person).then(|| {
+            let id = castcorder_link::person::person_id(person.expect("trusted, so present"));
+            self.saved.producer_persons.contains(&id)
+        });
+        match (rec, by_person) {
+            (None, None) => None,
+            (rec, by_person) => {
+                let trusted = rec.is_some_and(|d| d.trusted) || by_person.is_some();
+                let producer =
+                    rec.is_some_and(|d| d.producer && trusted) || by_person == Some(true);
+                Some(Membership {
+                    removed,
+                    trusted: trusted && !removed,
+                    producer: producer && !removed,
+                })
             }
-        })
+        }
     }
 
     /// The transport accepted an admitted offer as `conn`: bind its device.

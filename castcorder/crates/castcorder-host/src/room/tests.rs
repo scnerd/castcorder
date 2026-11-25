@@ -792,7 +792,7 @@ fn an_owner_device_is_a_trusted_producer_but_not_the_host_machine() {
                 .is_err()
     );
     assert_eq!(room.admit_sync("dev-o", None, owner), Ok(()));
-    let m = room.membership_as("dev-never", None, true).unwrap();
+    let m = room.membership_as("dev-never", None, true, None).unwrap();
     assert!(m.producer && m.trusted && !m.removed);
     assert!(room.membership("dev-never", None).is_none());
     assert!(!room.to_json().contains("owner"));
@@ -917,4 +917,69 @@ fn a_producer_person_s_devices_join_as_producers() {
     room.trust_person(&bob_id, false).unwrap();
     assert!(!room.role(2).producer);
     assert!(room.producer_persons().is_empty());
+}
+
+/// A status query counts the room's trust of a whole person (cast-40e.11):
+/// a device whose certificate vouches for a trusted person is a trusted
+/// member even if it never joined, or joined while no producer was there,
+/// and a producer when the person is one; any other person's device is not;
+/// kicking the device still removes it.
+#[test]
+fn a_trusted_person_s_devices_count_in_status_queries() {
+    let bob = [42u8; 32];
+    let bob_id = castcorder_link::person::person_id(&bob);
+    let carol = [43u8; 32];
+    let member = |trusted, producer| {
+        Some(Membership {
+            removed: false,
+            trusted,
+            producer,
+        })
+    };
+    let mut room = Room::new(true);
+    // Joined an open room with nobody else there: not trusted on its own.
+    enter(&mut room, 2, "dev-bob", false, None).unwrap();
+    assert_eq!(room.membership("dev-bob", None), member(false, false));
+    room.trust_person(&bob_id, true).unwrap();
+    assert_eq!(
+        room.membership_as("dev-bob", None, false, Some(&bob)),
+        member(true, false)
+    );
+    assert_eq!(
+        room.membership_as("dev-bob-phone", None, false, Some(&bob)),
+        member(true, false)
+    );
+    assert_eq!(room.membership_as("dev-bob-phone", None, false, None), None);
+    assert_eq!(
+        room.membership_as("dev-bob-phone", None, false, Some(&carol)),
+        None
+    );
+    room.set_person_producer(&bob_id, true).unwrap();
+    assert_eq!(
+        room.membership_as("dev-bob-phone", None, false, Some(&bob)),
+        member(true, true)
+    );
+    let h = host_page(&mut room);
+    room.apply(
+        h,
+        &RoomAction::Kick {
+            participant: ParticipantId(2),
+        },
+        SALT,
+    )
+    .unwrap();
+    assert_eq!(
+        room.membership_as("dev-bob", None, false, Some(&bob)),
+        Some(Membership {
+            removed: true,
+            trusted: false,
+            producer: false,
+        })
+    );
+    // Trust withdrawn: the device that never joined is unknown again.
+    room.trust_person(&bob_id, false).unwrap();
+    assert_eq!(
+        room.membership_as("dev-bob-phone", None, false, Some(&bob)),
+        None
+    );
 }
