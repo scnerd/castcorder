@@ -101,7 +101,6 @@ jobs:
           pactl set-default-sink ci
 
       - name: Camera toggle stress
-        working-directory: castcorder
         run: task test:browser:camtoggle
 
   # The workspace's formatting, clippy and tests on the other desktop platforms.
@@ -132,7 +131,6 @@ jobs:
           key: nightly-${{ matrix.os }}
 
       - name: Check (format, clippy, tests)
-        working-directory: castcorder
         run: task check
 
   # Tier 3 relay run on a degraded network: Linux tc netem on the loopback adds latency,
@@ -198,7 +196,6 @@ jobs:
           tc qdisc show dev lo
 
       - name: Relay test on the degraded network
-        working-directory: castcorder
         run: task test:relay
 
   # A failing scheduled run files an issue pointing at it.
