@@ -983,3 +983,49 @@ fn a_trusted_person_s_devices_count_in_status_queries() {
         None
     );
 }
+
+/// A device its person revoked (cast-40e.6) loses its trust and producer
+/// role in the room, also under its pre-key id; a kick stays.
+#[test]
+fn a_revoked_device_drops_its_trust_and_producer_role() {
+    let mut room = Room::new(true);
+    let h = host_page(&mut room);
+    enter(&mut room, 2, "dev-p", false, None).unwrap();
+    enter(&mut room, 3, "dev-c", false, None).unwrap();
+    room.apply(
+        h,
+        &RoomAction::SetProducer {
+            participant: ParticipantId(2),
+            producer: true,
+        },
+        SALT,
+    )
+    .unwrap();
+    room.apply(
+        h,
+        &RoomAction::Kick {
+            participant: ParticipantId(3),
+        },
+        SALT,
+    )
+    .unwrap();
+    assert!(room.drop_trust("dev-p", None));
+    assert!(!room.drop_trust("dev-p", None), "nothing left to drop");
+    let none = Some(Membership {
+        removed: false,
+        trusted: false,
+        producer: false,
+    });
+    assert_eq!(room.membership("dev-p", None), none);
+    // It is saved with the room.
+    let again = Room::from_json(&room.to_json()).unwrap();
+    assert_eq!(again.membership("dev-p", None), none);
+    room.drop_trust("dev-c", None);
+    assert!(room.membership("dev-c", None).unwrap().removed);
+    // An upgraded device is judged by its old id's record.
+    let uuid = "99999999-2222-3333-4444-555555555555";
+    let mut room = with_old_device(uuid, true);
+    let key = castcorder_link::identity::device_id(&[7; 32]);
+    assert!(room.drop_trust(&key, Some(uuid)));
+    assert_eq!(room.membership(&key, Some(uuid)), none);
+}

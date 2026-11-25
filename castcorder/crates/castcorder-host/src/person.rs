@@ -279,6 +279,18 @@ impl Persons {
         }
     }
 
+    /// The person `cert` vouches for the device whose key is `device`, unless
+    /// that device was revoked (by this person or a contact's): a room's
+    /// trust of a person does not reach a revoked install.
+    pub fn person_of(
+        &self,
+        cert: Option<&DeviceCert>,
+        device: Option<&[u8; 32]>,
+    ) -> Option<[u8; 32]> {
+        let p = cert_person(cert, device)?;
+        (!self.is_revoked(&device_id(device?))).then_some(p)
+    }
+
     /// Revoke one of this person's devices (cast-40e.6), by device id: it is
     /// no longer the owner's anywhere this install decides, it leaves the
     /// devices linked from here, and the revocation goes to contacts with
@@ -930,5 +942,54 @@ mod tests {
         assert!(b2.owns(Some(&a.cert()), Some(&host_a.id().0)));
         let _ = std::fs::remove_dir_all(dir_a);
         let _ = std::fs::remove_dir_all(dir_b);
+    }
+
+    #[test]
+    fn a_revoked_device_is_no_longer_owned_here_or_on_apps_linked_later() {
+        let dir_a = tmp("revoke-a");
+        let dir_c = tmp("revoke-c");
+        let host_a = HostKey::from_secret([1; 32]);
+        let host_c = HostKey::from_secret([3; 32]);
+        let laptop = HostKey::from_secret([5; 32]);
+        let a = Persons::load_or_create(&dir_a, &host_a, NOW).unwrap();
+        let code = a.new_code(NOW).unwrap();
+        a.answer(&ask(&code, &laptop, DeviceKind::Browser, NOW), NOW);
+        a.decide(&device_id(&laptop.id().0), true).unwrap();
+        let LinkAnswer::Granted(g) = a.answer(&ask(&code, &laptop, DeviceKind::Browser, NOW), NOW)
+        else {
+            panic!("not granted")
+        };
+        let lid = device_id(&laptop.id().0);
+        assert!(a.owns(Some(&g.cert), Some(&laptop.id().0)));
+        assert_eq!(
+            a.person_of(Some(&g.cert), Some(&laptop.id().0)),
+            Some(a.public())
+        );
+        assert!(a.revoke(&device_id(&host_a.id().0), NOW).is_err());
+        a.revoke(&lid, NOW + 1).unwrap();
+        assert!(!a.owns(Some(&g.cert), Some(&laptop.id().0)));
+        assert_eq!(a.person_of(Some(&g.cert), Some(&laptop.id().0)), None);
+        assert!(a.view(NOW).devices.is_empty());
+        // Revoking twice signs once.
+        a.revoke(&lid, NOW + 2).unwrap();
+        assert_eq!(a.revocations().len(), 1);
+        assert_eq!(verify_revocation(&a.revocations()[0]), Ok(a.public()));
+        // It survives a restart.
+        let a2 = Persons::load_or_create(&dir_a, &host_a, NOW).unwrap();
+        assert!(!a2.owns(Some(&g.cert), Some(&laptop.id().0)));
+        // An app linked later learns it with its grant.
+        let code = a2.new_code(NOW).unwrap();
+        a2.answer(&ask(&code, &host_c, DeviceKind::App, NOW), NOW);
+        a2.decide(&device_id(&host_c.id().0), true).unwrap();
+        let LinkAnswer::Granted(gc) = a2.answer(&ask(&code, &host_c, DeviceKind::App, NOW), NOW)
+        else {
+            panic!("not granted")
+        };
+        let c = Persons::load_or_create(&dir_c, &host_c, NOW).unwrap();
+        c.adopt(&gc).unwrap();
+        assert!(c.owns(Some(&a2.cert()), Some(&host_a.id().0)));
+        assert!(!c.owns(Some(&g.cert), Some(&laptop.id().0)));
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_c);
     }
 }

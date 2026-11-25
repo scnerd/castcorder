@@ -292,6 +292,11 @@ fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
                 .ok_or_else(|| "no device".to_string())
                 .and_then(|d| app.persons.decide(&d, r.approve)),
         ),
+        "/person/revoke" => done(
+            r.device
+                .ok_or_else(|| "no device".to_string())
+                .and_then(|d| app.persons.revoke(&d, now)),
+        ),
         _ => done(
             r.code
                 .ok_or_else(|| "no link code".to_string())
@@ -881,7 +886,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/rooms" | "/rooms/link"
-            | "/rooms/call" | "/person" | "/person/code" | "/person/decide" | "/person/join",
+            | "/rooms/call" | "/person" | "/person/code" | "/person/decide" | "/person/join"
+            | "/person/revoke",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -907,7 +913,10 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         }
         ("GET", "/person") => json(200, person_json(app)),
         ("GET", "/settings") => json(200, settings_json(app)),
-        ("POST", "/person" | "/person/code" | "/person/decide" | "/person/join") => {
+        (
+            "POST",
+            "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
+        ) => {
             let r = match serde_json::from_slice::<PersonRequest>(&req.body) {
                 Ok(r) => r,
                 Err(e) => return text(400, format!("bad json: {e}")),

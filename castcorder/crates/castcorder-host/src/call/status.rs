@@ -29,7 +29,7 @@ use castcorder_link::DeviceProof;
 use castcorder_link::wire::{CallStatus, HostStatus, RoomStatus};
 
 use super::Call;
-use crate::room::NOT_CURRENT;
+use crate::room::{Membership, NOT_CURRENT};
 use crate::rooms;
 
 /// The devices listed in a call folder's `devices.jsonl` (none if absent).
@@ -58,6 +58,7 @@ impl Call {
             .verify(device, proof, audience, nonce, crate::wall_ms())
             .map_err(|r| r.message().to_string())?;
         let alias = proof.and_then(|p| p.alias.clone());
+        let revoked = self.rooms.persons.is_revoked(&device);
         let now = self.rooms.now_ms();
         let live = self.is_live();
         let mut out = HostStatus::default();
@@ -67,6 +68,19 @@ impl Call {
             }
             let m = self.judge(&name, |r| {
                 r.membership_as(&device, alias.as_deref(), owner, person.as_ref())
+            });
+            // A revoked device keeps no trust (dropped from the room itself
+            // when it next offers).
+            let m = m.map(|m| {
+                if revoked {
+                    Membership {
+                        trusted: false,
+                        producer: false,
+                        ..m
+                    }
+                } else {
+                    m
+                }
             });
             let (allowed, why) = match m {
                 None => (false, "never in this room"),

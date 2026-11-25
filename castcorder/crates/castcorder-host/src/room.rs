@@ -654,6 +654,29 @@ impl Room {
         }
     }
 
+    /// Drop the trust and producer role of `device` (and of the pre-key id
+    /// `alias` it binds), revoked by its person (cast-40e.6): it is an
+    /// ordinary guest here from now on. A kick stays. Whether anything
+    /// changed (the room is then dirty).
+    pub fn drop_trust(&mut self, device: &str, alias: Option<&str>) -> bool {
+        let old = alias.filter(|old| self.alias_check(old, device) == Ok(true));
+        let mut changed = false;
+        for id in std::iter::once(device).chain(old) {
+            if let Some(d) = self.saved.devices.get_mut(id)
+                && (d.trusted || d.producer)
+            {
+                d.trusted = false;
+                d.producer = false;
+                changed = true;
+            }
+        }
+        if changed {
+            self.dirty = true;
+            info!(device, "revoked device: room trust dropped");
+        }
+        changed
+    }
+
     /// Bind a pre-key device id to the key-derived id `new`, once (see the
     /// module docs); logs the outcome. Whether `old` is bound to `new` now.
     /// Called only once the offer that signed `old` has been admitted and

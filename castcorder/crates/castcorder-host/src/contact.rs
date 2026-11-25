@@ -98,10 +98,8 @@ fn learn_revoked(c: &mut Contact, list: &[Revocation]) -> Vec<String> {
         new.push(r.device.clone());
     }
     if !new.is_empty() {
-        c.devices.retain(|d| {
-            d.device_key()
-                .is_none_or(|k| !new.contains(&device_id(&k)))
-        });
+        c.devices
+            .retain(|d| d.device_key().is_none_or(|k| !new.contains(&device_id(&k))));
         info!(person = %c.id, devices = ?new, "a contact revoked devices");
     }
     new

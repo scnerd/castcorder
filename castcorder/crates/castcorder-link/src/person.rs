@@ -395,14 +395,26 @@ mod tests {
         let r = p.revoke("kabc", 7);
         assert_eq!(verify_revocation(&r), Ok(p.public()));
         for bad in [
-            Revocation { device: "kabd".into(), ..r.clone() },
-            Revocation { revoked_ms: 8, ..r.clone() },
-            Revocation { person: b64(&PersonKey::from_secret([4; 32]).public()), ..r.clone() },
+            Revocation {
+                device: "kabd".into(),
+                ..r.clone()
+            },
+            Revocation {
+                revoked_ms: 8,
+                ..r.clone()
+            },
+            Revocation {
+                person: b64(&PersonKey::from_secret([4; 32]).public()),
+                ..r.clone()
+            },
         ] {
             assert_eq!(verify_revocation(&bad), Err(CertError::BadSignature));
         }
         assert_eq!(
-            verify_revocation(&Revocation { sig: "x".into(), ..r }),
+            verify_revocation(&Revocation {
+                sig: "x".into(),
+                ..r
+            }),
             Err(CertError::Malformed)
         );
     }

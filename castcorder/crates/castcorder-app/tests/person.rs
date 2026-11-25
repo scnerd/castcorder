@@ -11,6 +11,7 @@
 //!   its certificate it waits for a producer like any guest; with it, it
 //!   enters as one of the room owner's devices and starts a take, though
 //!   nobody else is in the call.
+//! - A revokes B (cast-40e.6): B's key, with its certificate, waits again.
 
 #[path = "../../castcorder-transport/tests/support/mod.rs"]
 mod support;
@@ -146,6 +147,38 @@ fn call(guest: &Shared, rpc: &mut RpcClient<End>, req: Request) -> Response {
     }
 }
 
+/// A status query to `host` from the install key `secret` with `cert`: the
+/// rooms it is told about, as (room, producer).
+fn status(
+    host: &Running,
+    secret: &[u8; 32],
+    cert: &castcorder_link::DeviceCert,
+) -> Vec<(String, bool)> {
+    let nonce = format!("nonce-{}", now_ms());
+    let proof = identity::sign_offer(secret, host.host_id(), None, now_ms(), &nonce);
+    let body = serde_json::json!({
+        "type": "offer",
+        "status": true,
+        "sdp": nonce,
+        "proof": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&proof)
+        ).unwrap(),
+        "cert": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(cert)
+        ).unwrap(),
+    });
+    let (code, text) = lan_post(
+        &host.lan_links()[0],
+        "/offer?name=q",
+        "application/json",
+        &body.to_string(),
+    )
+    .unwrap();
+    assert_eq!(code, 200, "{text}");
+    let st: castcorder_link::wire::HostStatus = serde_json::from_str(&text).unwrap();
+    st.rooms.into_iter().map(|r| (r.room, r.producer)).collect()
+}
+
 #[test]
 fn a_linked_app_install_is_a_producer_in_the_other_installs_room() {
     let root = std::env::temp_dir().join(format!("castcorder-app-person-{}", std::process::id()));
@@ -221,6 +254,78 @@ fn a_linked_app_install_is_a_producer_in_the_other_installs_room() {
     b.stop();
     let b = start(&root, "b");
     assert_eq!(b.person().id, id);
+
+    // A revokes B (cast-40e.6): its certificate no longer makes it one of
+    // the room owner's devices, and its record from the take above no
+    // longer makes it a trusted producer, so it waits like any guest.
+    wait("B's guest to leave", || {
+        a.live_status().is_some_and(|s| s.guests == 0)
+    });
+    a.revoke_device(&req.device).unwrap();
+    assert!(a.person().devices.is_empty());
+    let refused = connect(&a, &secret, Some(&b.person_cert()))
+        .err()
+        .expect("not admitted");
+    assert_eq!(refused.0, 503, "{}", refused.1);
+    assert!(refused.1.starts_with("waiting:"), "{}", refused.1);
+    a.stop();
+    b.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A revoked device (cast-40e.6) keeps no trust in the owner's rooms: in a
+/// locked room where it was a trusted producer, its key with its
+/// certificate is kept out once revoked.
+#[test]
+fn a_revoked_device_loses_its_trust_in_a_locked_room() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-revoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let b = start(&root, "b");
+    let bid = b.person().device;
+    // A's room is locked; B's key was a trusted producer there.
+    std::fs::create_dir_all(root.join("a").join("show")).unwrap();
+    std::fs::write(
+        root.join("a").join("show").join("room.json"),
+        serde_json::json!({
+            "open": true,
+            "locked": true,
+            "devices": { bid.clone(): { "name": "Laptop", "trusted": true, "producer": true } },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let a = start(&root, "a");
+    let links = a.link_code().unwrap();
+    b.join_person(&links[0]).unwrap();
+    wait("the link request at A", || a.person().requests.len() == 1);
+    a.decide_link(&bid, true).unwrap();
+    wait("B to be linked", || {
+        b.person().joining == Some(Joining::Linked)
+    });
+    let secret = host_secret(&b);
+    drop(connect(&a, &secret, Some(&b.person_cert())).expect("admitted"));
+    wait("B's guest to leave", || {
+        a.live_status().is_some_and(|s| s.guests == 0)
+    });
+    assert_eq!(
+        status(&a, &secret, &b.person_cert()),
+        vec![("show".to_string(), true)]
+    );
+    a.revoke_device(&bid).unwrap();
+    // A status query no longer tells it it is trusted or a producer there.
+    assert_eq!(
+        status(&a, &secret, &b.person_cert()),
+        vec![("show".to_string(), false)]
+    );
+    let refused = connect(&a, &secret, Some(&b.person_cert()))
+        .err()
+        .expect("not admitted");
+    assert_eq!(refused.0, 403, "{}", refused.1);
+    assert!(refused.1.starts_with("locked:"), "{}", refused.1);
+    // The room forgot it for good: saved without its trust.
+    let saved = std::fs::read_to_string(root.join("a").join("show").join("room.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["devices"][&bid]["trusted"], false, "{saved}");
     a.stop();
     b.stop();
     let _ = std::fs::remove_dir_all(&root);

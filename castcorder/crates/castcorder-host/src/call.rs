@@ -1639,10 +1639,10 @@ impl Call {
                     .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
                 // The person it vouches for (any person): a room may trust
                 // a whole person.
-                let person = crate::person::cert_person(
-                    cert.as_ref(),
-                    routing::proof_key(proof.as_ref()).as_ref(),
-                );
+                let person = self
+                    .rooms
+                    .persons
+                    .person_of(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
                 let seat = crate::room::Seat {
                     at_host,
                     owner,
@@ -1681,6 +1681,13 @@ impl Call {
                 let device = verified.clone().unwrap_or(device);
                 // The old id the signature covers (migration from pre-key ids).
                 let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
+                // A device its person revoked keeps no trust here.
+                if let Ok(d) = &verified
+                    && self.rooms.persons.is_revoked(d)
+                    && self.room.drop_trust(d, alias)
+                {
+                    self.save_room();
+                }
                 let admitted = verified.and_then(|d| {
                     self.room
                         .admit_offer_as(&d, alias, seat, password.as_deref())
@@ -1770,10 +1777,10 @@ impl Call {
                     .rooms
                     .persons
                     .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
-                let person = crate::person::cert_person(
-                    cert.as_ref(),
-                    routing::proof_key(proof.as_ref()).as_ref(),
-                );
+                let person = self
+                    .rooms
+                    .persons
+                    .person_of(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
                 let _ = reply.send(self.host_status(
                     &device,
                     proof.as_ref(),

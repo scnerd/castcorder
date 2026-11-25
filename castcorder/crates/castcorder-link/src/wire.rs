@@ -541,6 +541,7 @@ mod tests {
                 cert,
                 person_name: "Ann".into(),
                 person_secret: None,
+                revoked: Vec::new(),
             }))),
             r#"{"link":{"granted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"person_name":"Ann"}}}"#
         );
@@ -589,16 +590,34 @@ mod tests {
         assert_eq!(
             ping.presence,
             Some(PresencePing {
-                device: "Laptop".into()
+                device: "Laptop".into(),
+                revoked: Vec::new(),
             })
         );
         let pa = AnswerPlain::Presence(PresenceAnswer {
             name: "Ann".into(),
             device: "Desk".into(),
+            revoked: Vec::new(),
         });
         assert_eq!(
             to_json(&pa),
             r#"{"presence":{"name":"Ann","device":"Desk"}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
+        // With a revocation (cast-40e.6).
+        let pa = AnswerPlain::Presence(PresenceAnswer {
+            name: "Ann".into(),
+            device: "Desk".into(),
+            revoked: vec![crate::person::Revocation {
+                person: "P".into(),
+                device: "D".into(),
+                revoked_ms: 7,
+                sig: "S".into(),
+            }],
+        });
+        assert_eq!(
+            to_json(&pa),
+            r#"{"presence":{"name":"Ann","device":"Desk","revoked":[{"person":"P","device":"D","revoked_ms":7,"sig":"S"}]}}"#
         );
         assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
         // An offer from an older page (no device, no password) still parses.
