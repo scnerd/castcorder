@@ -27,6 +27,32 @@ pub struct HostStatus {
     pub call_link: Option<String>,
 }
 
+/// One room in the tray's Rooms menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrayRoom {
+    pub name: String,
+    /// Its call is the live one.
+    pub live: bool,
+    /// It has a call link through a rendezvous.
+    pub linked: bool,
+}
+
+/// The tray menu item that copies a room's call link (the live room marked;
+/// without a link yet it says so).
+pub fn tray_room_label(r: &TrayRoom) -> String {
+    let live = if r.live { " (live)" } else { "" };
+    if r.linked {
+        format!("Copy call link: {}{live}", r.name)
+    } else {
+        format!("{}{live}: no call link yet", r.name)
+    }
+}
+
+/// The room a tray menu item id (`room_copy:<name>`) copies, if it is one.
+pub fn tray_room_of(id: &str) -> Option<&str> {
+    id.strip_prefix("room_copy:")
+}
+
 /// Starts and stops the in-process host for one [`Config`].
 pub struct HostControl {
     config: Config,
@@ -186,6 +212,32 @@ impl HostControl {
             .add_contact(code)
     }
 
+    /// Every room as the tray lists it (cast-7jv): name, whether it is the
+    /// live one, and whether it has a call link to copy yet.
+    pub fn tray_rooms(&self) -> Vec<TrayRoom> {
+        let Ok(running) = self.running.lock() else {
+            return vec![];
+        };
+        running
+            .as_ref()
+            .map(|r| {
+                r.rooms()
+                    .into_iter()
+                    .map(|v| TrayRoom {
+                        name: v.name,
+                        live: v.live,
+                        linked: v.link.is_some(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A room's call link, once the host is registered with a rendezvous.
+    pub fn room_link(&self, room: &str) -> Option<String> {
+        self.running.lock().ok()?.as_ref()?.room_link(room)
+    }
+
     /// Keep the call window's list of joined rooms for the home.
     pub fn save_joined_rooms(&self, json: &str) -> Result<(), String> {
         let running = self.running.lock().map_err(|_| "host lock poisoned")?;
@@ -293,6 +345,29 @@ pub fn tray_text(live: &LiveStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rooms_menu_names_each_room_marks_the_live_one_and_says_when_there_is_no_link() {
+        let room = |name: &str, live, linked| TrayRoom {
+            name: name.into(),
+            live,
+            linked,
+        };
+        assert_eq!(
+            tray_room_label(&room("main-show", false, true)),
+            "Copy call link: main-show"
+        );
+        assert_eq!(
+            tray_room_label(&room("Late show", true, true)),
+            "Copy call link: Late show (live)"
+        );
+        assert_eq!(
+            tray_room_label(&room("lan", false, false)),
+            "lan: no call link yet"
+        );
+        assert_eq!(tray_room_of("room_copy:Late show"), Some("Late show"));
+        assert_eq!(tray_room_of("copy_link"), None);
+    }
 
     #[test]
     fn tray_text_says_guests_take_and_sync() {

@@ -3,7 +3,9 @@
 //! the window, where the person at the host joins the call explicitly.
 //! Closing the window hides it to the tray; the host keeps serving the call
 //! until Quit in the tray menu, which finishes the open files and stops it.
-//! "Start at login" in the tray menu is off until turned on there.
+//! "Start at login" in the tray menu is off until turned on there. The tray
+//! lists every room with its own "Copy call link"; replacing a link is in the
+//! room's menu on the home, which asks first (cast-7jv).
 //! `castcorder://` links (at startup, or handed over by a second launch) open
 //! the https call link in a call window. Closing that window leaves the call
 //! and hides it, so its page goes on delivering the recordings over a
@@ -24,10 +26,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use castcorder_app::AppArgs;
-use castcorder_app::host_control::{Badge, HostControl, bridge_allows, tray_badge, tray_text};
+use castcorder_app::host_control::{
+    Badge, HostControl, TrayRoom, bridge_allows, tray_badge, tray_room_label, tray_room_of,
+    tray_text,
+};
 use castcorder_app::{deeplink, remembered};
 use tauri::ipc::CapabilityBuilder;
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
 use tauri::{
@@ -301,18 +306,12 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     )?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit (stop hosting)", true, None::<&str>)?;
     let status_item = MenuItem::with_id(app, "status", "Starting", false, None::<&str>)?;
-    let copy = MenuItem::with_id(app, "copy_link", "Copy call link", true, None::<&str>)?;
+    // One "Copy call link" per room (cast-7jv); filled by the poll below.
+    let rooms_menu = Submenu::with_id(app, "rooms", "Rooms", true)?;
     let folder = MenuItem::with_id(
         app,
         "open_folder",
         "Open recordings folder",
-        true,
-        None::<&str>,
-    )?;
-    let regen = MenuItem::with_id(
-        app,
-        "regen_link",
-        "Regenerate call link",
         true,
         None::<&str>,
     )?;
@@ -323,8 +322,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &open,
             &folder,
-            &copy,
-            &regen,
+            &rooms_menu,
             &login,
             &PredefinedMenuItem::separator(app)?,
             &quit_item,
@@ -349,23 +347,17 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
                 }
                 let _ = login.set_checked(autostart.is_enabled().unwrap_or(false));
             }
-            "copy_link" => copy_link(app),
             "open_folder" => {
                 if let Err(e) = app.state::<Shell>().host.open_recordings_folder() {
                     tracing::warn!(error = %e, "recordings folder not opened");
                 }
             }
-            "regen_link" => {
-                let app = app.clone();
-                // The host answers on its own thread; not on the event loop.
-                std::thread::spawn(move || match app.state::<Shell>().host.regenerate_link() {
-                    Ok(Some(link)) => write_clipboard(&app, &link),
-                    Ok(None) => tracing::warn!("no call link: the host has no rendezvous"),
-                    Err(e) => tracing::warn!(error = %e, "call link not regenerated"),
-                });
-            }
             "quit" => quit(app),
-            _ => {}
+            id => {
+                if let Some(room) = tray_room_of(id) {
+                    copy_room_link(app, room);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -397,8 +389,22 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
     std::thread::spawn(move || {
         let mut last = None;
         let mut invites = (0, None);
+        let mut listed: Vec<TrayRoom> = Vec::new();
+        let mut tick = 0u32;
         loop {
             std::thread::sleep(Duration::from_secs(1));
+            // The rooms menu follows the host's rooms (every few seconds: the
+            // host answers on its own thread).
+            tick = tick.wrapping_add(1);
+            if tick % 4 == 1 {
+                let rooms = app.state::<Shell>().host.tray_rooms();
+                if rooms != listed {
+                    if let Err(e) = fill_rooms_menu(&app, &rooms_menu, &rooms) {
+                        tracing::warn!(error = %e, "the tray's rooms menu was not updated");
+                    }
+                    listed = rooms;
+                }
+            }
             // An invite from a contact brings the home (which shows it with
             // Join and Dismiss) to the front, and the tray says so.
             let now = app.state::<Shell>().host.invites().unwrap_or_default();
@@ -454,11 +460,46 @@ fn badge_variant(icon: &tauri::image::Image<'_>, rgb: [u8; 3]) -> tauri::image::
 }
 
 /// Put the running host's call link on the clipboard.
-fn copy_link(app: &AppHandle) {
-    match app.state::<Shell>().host.status().and_then(|s| s.call_link) {
+/// Copy `room`'s call link (the tray's Rooms menu).
+fn copy_room_link(app: &AppHandle, room: &str) {
+    match app.state::<Shell>().host.room_link(room) {
         Some(link) => write_clipboard(app, &link),
-        None => tracing::warn!("no call link yet: the host is not registered with a rendezvous"),
+        None => tracing::warn!(
+            room,
+            "no call link yet: the host is not registered with a rendezvous"
+        ),
     }
+}
+
+/// Replace the Rooms submenu's items with one per room.
+fn fill_rooms_menu(
+    app: &AppHandle,
+    menu: &Submenu<tauri::Wry>,
+    rooms: &[TrayRoom],
+) -> tauri::Result<()> {
+    for item in menu.items()? {
+        menu.remove(&item)?;
+    }
+    if rooms.is_empty() {
+        menu.append(&MenuItem::with_id(
+            app,
+            "no_rooms",
+            "No rooms yet",
+            false,
+            None::<&str>,
+        )?)?;
+    }
+    for r in rooms {
+        let id = format!("room_copy:{}", r.name);
+        menu.append(&MenuItem::with_id(
+            app,
+            id,
+            tray_room_label(r),
+            r.linked,
+            None::<&str>,
+        )?)?;
+    }
+    Ok(())
 }
 
 fn write_clipboard(app: &AppHandle, text: &str) {
