@@ -342,11 +342,14 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
     let code = RwSignal::new(String::new());
     let refresh = move || {
         spawn_local(async move {
-            // While the home is visible, the host also pings contacts (at
-            // most every few minutes) so presence is fresh.
-            let visible =
-                string(&window().document().expect("document"), "visibilityState") == "visible";
-            let path = if visible {
+            // While someone is looking at the home (visible and focused: the
+            // app hides its window to the tray, which may still count as
+            // visible), the host also pings contacts, at most every few
+            // minutes, so presence is fresh.
+            let doc = window().document().expect("document");
+            let looking = string(&doc, "visibilityState") == "visible"
+                && call(&doc, "hasFocus", &[]).is_ok_and(|f| f.as_bool() == Some(true));
+            let path = if looking {
                 "/contacts?look=1"
             } else {
                 "/contacts"
@@ -355,7 +358,17 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                 Ok(t) => match serde_json::from_str::<ContactsView>(&t) {
                     Ok(v) => {
                         if data.get_untracked() != v {
-                            list.set(v.contacts.clone());
+                            // The trust pickers only need who: presence
+                            // changes alone must not re-render them.
+                            let who = |c: &ContactItem| {
+                                (c.id.clone(), c.name.clone(), c.nickname.clone())
+                            };
+                            let changed = list.with_untracked(|l| {
+                                l.iter().map(who).ne(v.contacts.iter().map(who))
+                            });
+                            if changed {
+                                list.set(v.contacts.clone());
+                            }
                             data.set(v);
                         }
                     }
