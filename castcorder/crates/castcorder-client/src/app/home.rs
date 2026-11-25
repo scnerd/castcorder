@@ -1,10 +1,13 @@
 //! The host machine's home: what its own page (the desktop app's window,
-//! `http://localhost:<port>/` with no query) shows before anyone joins. Every
-//! room with its call link (Copy, New link), its past calls (date, takes,
-//! Open folder, Continue this call), Start new call, and Join, which opens
-//! the room's lobby (`/?room=NAME`: this page's microphone or the machine's
-//! own). Talks to the host's `/rooms` endpoints, which answer only this
-//! machine's own page (castcorder-host `http`).
+//! `http://localhost:<port>/` with no query) shows before anyone joins
+//! (docs/design.md "UI layout v2", cast-n56.1). A left nav (Rooms, Contacts,
+//! Settings) with the person and how reachable this install is at its foot.
+//! Rooms: per room one primary Join (the room's lobby, `/?room=NAME`), a
+//! copy-link icon and a ... menu (Start a fresh call, People and settings,
+//! Open recordings folder, Replace link), live status, and past calls folded
+//! under a disclosure (Continue this call, Open folder). Talks to the host's
+//! `/rooms` endpoints, which answer only this machine's own page
+//! (castcorder-host `http`).
 
 use serde::Deserialize;
 
@@ -75,6 +78,54 @@ async fn home_request(method: &str, path: &str, body: Option<String>) -> Result<
     }
 }
 
+/// `GET /person`, as far as the nav's foot needs it.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct Who {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    device_name: String,
+}
+
+/// Where the home is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Place {
+    Rooms,
+    Contacts,
+    Settings,
+}
+
+/// A call's day as this machine's local short date ("Mon, Nov 17").
+fn day(ms: u64) -> String {
+    let d = js_sys::Date::new(&JsValue::from_f64(ms as f64));
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    format!(
+        "{}, {} {}",
+        DAYS[d.get_day() as usize % 7],
+        MONTHS[d.get_month() as usize % 12],
+        d.get_date()
+    )
+}
+
+/// "N take(s)".
+fn takes(n: u32) -> String {
+    format!("{n} take{}", if n == 1 { "" } else { "s" })
+}
+
+/// The line under a room's name: live, or its last call, or none yet.
+fn room_line(r: &HomeRoom) -> String {
+    if r.live {
+        return "Live now".into();
+    }
+    match r.calls.iter().max_by_key(|c| c.started_ms) {
+        Some(c) => format!("Last call {} - {}", day(c.started_ms), takes(c.takes)),
+        None => "No calls yet".into(),
+    }
+}
+
 /// A call's start as this machine's local date and time.
 pub(super) fn when(ms: u64) -> String {
     let d = js_sys::Date::new(&JsValue::from_f64(ms as f64));
@@ -124,6 +175,14 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let message = RwSignal::new(String::new());
     let new_name = RwSignal::new(String::new());
     let contacts = RwSignal::new(Vec::<super::person::ContactItem>::new());
+    let who = RwSignal::new(Who::default());
+    let place = RwSignal::new(Place::Rooms);
+    // Which rooms show their people and their past calls: kept across the
+    // re-render a changed room gets.
+    let open = Opened {
+        people: RwSignal::new(Default::default()),
+        past: RwSignal::new(Default::default()),
+    };
     let refresh = move || {
         spawn_local(async move {
             match home_request("GET", "/rooms", None).await {
@@ -136,6 +195,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     Err(e) => message.set(format!("rooms not readable: {e}")),
                 },
                 Err(e) => message.set(e),
+            }
+            if let Ok(t) = home_request("GET", "/person", None).await
+                && let Ok(w) = serde_json::from_str::<Who>(&t)
+                && who.get_untracked() != w
+            {
+                who.set(w);
             }
         })
     };
@@ -174,107 +239,223 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             copied.set(String::new());
         });
     };
+    // Through the rendezvous once any room has a link there; else the LAN.
+    let reach = move || {
+        if data.get().rooms.iter().any(|r| r.link.is_some()) {
+            "Reachable from anywhere"
+        } else {
+            "Reachable on this network only"
+        }
+    };
+    let nav = move |p: Place, id: &'static str, label: &'static str, icon: &'static str| {
+        view! {
+            <button id=id class="home-nav-item" class:on=move || place.get() == p
+                aria-current=move || if place.get() == p { "page" } else { "false" }
+                on:click=move |_| place.set(p)>
+                <Icon name=icon small=true/>{label}
+            </button>
+        }
+    };
     view! {
         <div class="lobby home">
-            <div class="brand"><Mark/> "Castcorder"<ThemeToggle ui=ui/></div>
-            <div class="home-main">
-                <div class="home-head">
-                    <h1>"Your rooms"</h1>
-                    <span class="small muted">"Each room keeps one call link. Joining it continues the room's call, or starts a new one if nobody has been in it for a while."</span>
-                    // The rooms this app joined on other hosts live in its
-                    // call window's lobby (docs/design.md "Rejoining").
-                    <span class="small muted">"Calls you joined on other hosts: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |ev: web_sys::MouseEvent| {
-                        // Firefox leaves the page ignoring later clicks after a
-                        // navigation to a custom scheme (cast-qhv), so it stays
-                        // put and the message below says what the link opens.
-                        if is_firefox() {
-                            ev.prevent_default();
-                        }
-                        // The link opens the app's call window; say so, and what
-                        // an empty answer means, where the click happened.
-                        message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
-                        super::person::show_element("home-message");
-                    }>"Rooms you joined"</a></span>
+            <div class="home-shell">
+                <nav class="home-nav" aria-label="Home">
+                    <div class="brand"><Mark/> "Castcorder"</div>
+                    {nav(Place::Rooms, "nav-rooms", "Rooms", "folder")}
+                    {nav(Place::Contacts, "nav-contacts", "Contacts", "people")}
+                    {nav(Place::Settings, "nav-settings", "Settings", "sliders")}
+                    <div class="home-nav-foot">
+                        <span id="home-who" class="home-who">{move || {
+                            let w = who.get();
+                            if w.name.is_empty() { "You".to_string() } else { w.name }
+                        }}</span>
+                        <span class="small muted">{move || who.get().device_name}</span>
+                        <span id="reachability" class="small muted">{reach}</span>
+                    </div>
+                </nav>
+                <div class="home-main">
+                    <section id="home-rooms" class="home-place" hidden=move || place.get() != Place::Rooms>
+                        <div class="home-head">
+                            <h1>"Rooms"</h1>
+                            <span class="small muted">"Each room keeps one link. Guests join with it; joining continues the room's call, or starts a new one if nobody has been in it for a while."</span>
+                        </div>
+                        <div class="row">
+                            <label class="sr-only" for="new-room-name">"New room name"</label>
+                            <input id="new-room-name" placeholder="New room name" prop:value=move || new_name.get()
+                                on:input=move |ev| new_name.set(event_target_value(&ev)) />
+                            <button id="create-room" class="btn" disabled=move || new_name.get().trim().is_empty() on:click=create>"New room"</button>
+                            <span id="home-message" class="small muted">{move || message.get()}</span>
+                        </div>
+                        <ul id="rooms" class="list">
+                            <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
+                                {room_card(r, data, contacts, open, copied, copy, act)}
+                            </For>
+                        </ul>
+                        <div class="home-head joined">
+                            <h2>"Rooms you joined"</h2>
+                            // The rooms this app joined on other hosts live in its
+                            // call window's lobby (docs/design.md "Rejoining").
+                            <span class="small muted">"On other people's computers: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |ev: web_sys::MouseEvent| {
+                                // Firefox leaves the page ignoring later clicks after a
+                                // navigation to a custom scheme (cast-qhv), so it stays
+                                // put and the message below says what the link opens.
+                                if is_firefox() {
+                                    ev.prevent_default();
+                                }
+                                // The link opens the app's call window; say so, and what
+                                // an empty answer means, where the click happened.
+                                message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
+                                super::person::show_element("home-message");
+                            }>"Rooms you joined"</a></span>
+                        </div>
+                    </section>
+                    <section id="home-contacts" class="home-place" hidden=move || place.get() != Place::Contacts>
+                        <super::person::ContactsCard list=contacts/>
+                    </section>
+                    <section id="home-settings" class="home-place" hidden=move || place.get() != Place::Settings>
+                        <div class="home-head"><h1>"Settings"</h1></div>
+                        <super::person::PersonCard/>
+                        <div class="room-card">
+                            <div class="room-head"><h2>"Appearance"</h2><ThemeToggle ui=ui/></div>
+                        </div>
+                    </section>
                 </div>
-                <div class="row">
-                    <label class="sr-only" for="new-room-name">"New room name"</label>
-                    <input id="new-room-name" placeholder="New room name" prop:value=move || new_name.get()
-                        on:input=move |ev| new_name.set(event_target_value(&ev)) />
-                    <button id="create-room" class="btn" disabled=move || new_name.get().trim().is_empty() on:click=create>"Create room"</button>
-                    <span id="home-message" class="small muted">{move || message.get()}</span>
-                </div>
-                <super::person::PersonCard/>
-                <super::person::ContactsCard list=contacts/>
-                <ul id="rooms" class="list">
-                    <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
-                        {
-                            let name = r.name.clone();
-                            let link = room_link(&r, &data.get_untracked().lan);
-                            let (n1, n2, n3, l1) = (name.clone(), name.clone(), name.clone(), link.clone());
-                            let current = r.current.clone();
-                            let live = r.live;
-                            let no_calls = r.calls.is_empty();
-                            let summary = format!("{}{}{}",
-                                if r.open { "Always open" } else { "Producer-gated" },
-                                if r.locked { ", locked" } else { "" },
-                                if r.password { ", password" } else { "" });
-                            let mut calls = r.calls.clone();
-                            calls.reverse();
-                            view! {
-                                <li class="room-card" data-room=name.clone() class:live=live>
-                                    <div class="room-head">
-                                        <h2>{name.clone()}</h2>
-                                        <Show when=move || live><span class="chip ok">"Live"</span></Show>
-                                        <span class="small muted">{summary}</span>
-                                    </div>
-                                    <div class="linkbar">
-                                        <span class="small muted">"Call link"</span>
-                                        <code class="room-link" title="The link guests open to join this room">{link.clone()}</code>
-                                        <button class="btn tiny copy-room-link" on:click=move |_| copy(n1.clone(), l1.clone())>
-                                            <Icon name="link" small=true/>{let n = name.clone(); move || if copied.get() == n { "Copied" } else { "Copy" }}</button>
-                                        <button class="btn tiny outline regen-room-link" title="The old link stops working; people in the call stay"
-                                            on:click=move |_| act("/rooms/link", serde_json::json!({ "room": n2.clone() }), "New call link made; the old one no longer works.")>"New link"</button>
-                                    </div>
-                                    <div class="row">
-                                        <a class="btn primary join-room" href=format!("/?room={}", name)>"Join"</a>
-                                        <button class="btn new-call" on:click=move |_| act("/rooms/call", serde_json::json!({ "room": n3.clone(), "call": null }), "New call started: the next to join lands in it.")>"Start new call"</button>
-                                        <span class="small muted next-call">{match &current {
-                                            Some(c) if live => format!("Live in the call of {c}"),
-                                            Some(c) => format!("Joining continues the call of {c}"),
-                                            None => "Joining starts a new call".to_string(),
-                                        }}</span>
-                                    </div>
-                                    <ul class="list calls">
-                                        {calls.into_iter().map(|c| {
-                                            let (room_a, room_b, id_a, id_b) = (name.clone(), name.clone(), c.id.clone(), c.id.clone());
-                                            let next = current.as_deref() == Some(c.id.as_str());
-                                            let clive = c.live;
-                                            view! {
-                                                <li class="call-row" data-call=c.id.clone() class:next=next>
-                                                    <span class="call-when">{when(c.started_ms)}</span>
-                                                    <span class="small muted call-id">{c.id.clone()}</span>
-                                                    <span class="small call-takes">{format!("{} take{}", c.takes, if c.takes == 1 { "" } else { "s" })}</span>
-                                                    <Show when=move || clive><span class="chip ok">"Live"</span></Show>
-                                                    <Show when=move || next && !clive><span class="chip">"Next join"</span></Show>
-                                                    <span class="call-actions">
-                                                        <button class="btn tiny continue-call" disabled=next
-                                                            on:click=move |_| act("/rooms/call", serde_json::json!({ "room": room_a.clone(), "call": id_a.clone() }), "This call continues: the next to join lands in it.")>"Continue this call"</button>
-                                                        <button class="btn tiny outline open-call-folder"
-                                                            on:click=move |_| act("/folder/open", serde_json::json!({ "room": room_b.clone(), "call": id_b.clone() }), "Folder opened.")>"Open folder"</button>
-                                                    </span>
-                                                </li>
-                                            }
-                                        }).collect_view()}
-                                    </ul>
-                                    <Show when=move || no_calls><span class="small muted empty-calls">"No calls yet."</span></Show>
-                                    <super::person::RoomTrust room=name.clone() trusted=r.persons.clone() contacts=contacts/>
-                                </li>
-                            }
-                        }
-                    </For>
-                </ul>
             </div>
         </div>
+    }
+}
+
+/// Which rooms show their people and their past calls, by name.
+#[derive(Clone, Copy)]
+struct Opened {
+    people: RwSignal<std::collections::BTreeSet<String>>,
+    past: RwSignal<std::collections::BTreeSet<String>>,
+}
+
+/// Show or hide `room` in `set`.
+fn flip(set: RwSignal<std::collections::BTreeSet<String>>, room: &str, on: bool) {
+    if set.with_untracked(|s| s.contains(room)) != on {
+        set.update(|s| {
+            if on {
+                s.insert(room.to_string());
+            } else {
+                s.remove(room);
+            }
+        });
+    }
+}
+
+/// One room on the home.
+fn room_card(
+    r: HomeRoom,
+    data: RwSignal<HomeData>,
+    contacts: RwSignal<Vec<super::person::ContactItem>>,
+    open: Opened,
+    copied: RwSignal<String>,
+    copy: impl Fn(String, String) + Copy + Send + Sync + 'static,
+    act: impl Fn(&'static str, serde_json::Value, &'static str) + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let name = r.name.clone();
+    let link = room_link(&r, &data.get_untracked().lan);
+    let (n1, n2, n3, n4, l1) = (
+        name.clone(),
+        name.clone(),
+        name.clone(),
+        name.clone(),
+        link.clone(),
+    );
+    let current = r.current.clone();
+    let live = r.live;
+    let line = room_line(&r);
+    let summary = format!(
+        "{}{}{}",
+        if r.open {
+            "Always open"
+        } else {
+            "Producer-gated"
+        },
+        if r.locked { ", locked" } else { "" },
+        if r.password { ", password" } else { "" }
+    );
+    let mut calls = r.calls.clone();
+    calls.reverse();
+    let count = calls.len();
+    let (p1, p2, p3, p4) = (name.clone(), name.clone(), name.clone(), name.clone());
+    let people = move || open.people.with(|s| s.contains(&p1));
+    let menu = NodeRef::<leptos::html::Details>::new();
+    let close_menu = move || {
+        if let Some(d) = menu.get_untracked() {
+            d.set_open(false);
+        }
+    };
+    view! {
+        <li class="room-card" data-room=name.clone() class:live=live>
+            <div class="room-head">
+                <div class="room-title">
+                    <h2>{name.clone()}</h2>
+                    <Show when=move || live><span class="chip ok">"Live"</span></Show>
+                </div>
+                <span class="small muted room-line">{line}</span>
+                <span class="room-actions">
+                    <a class="btn primary join-room" href=format!("/?room={}", name)>"Join"</a>
+                    <button class="btn icon copy-room-link" title="Copy the call link" on:click=move |_| copy(n1.clone(), l1.clone())>
+                        <Icon name="link" small=true/>
+                        <span class="sr-only">{let n = name.clone(); move || if copied.get() == n { "Copied" } else { "Copy link" }}</span>
+                    </button>
+                    <details class="room-menu" node_ref=menu>
+                        <summary class="btn icon" title="More for this room" aria-label="More for this room">"..."</summary>
+                        <div class="room-menu-items">
+                            <button class="menu-item new-call" on:click=move |_| { close_menu(); act("/rooms/call", serde_json::json!({ "room": n2.clone(), "call": null }), "New call started: the next to join lands in it."); }>"Start a fresh call"</button>
+                            <button class="menu-item room-people-toggle" on:click=move |_| { close_menu(); flip(open.people, &p2, !open.people.with_untracked(|s| s.contains(&p2))); }>"People and settings..."</button>
+                            <button class="menu-item open-room-folder" on:click=move |_| { close_menu(); act("/folder/open", serde_json::json!({ "room": n3.clone() }), "Folder opened."); }>"Open recordings folder"</button>
+                            <button class="menu-item regen-room-link" title="The old link stops working; people in the call stay"
+                                on:click=move |_| { close_menu(); act("/rooms/link", serde_json::json!({ "room": n4.clone() }), "New call link made; the old one no longer works."); }>"Replace link (old one stops working)"</button>
+                        </div>
+                    </details>
+                </span>
+            </div>
+            <span class="small muted next-call">{match &current {
+                Some(c) if live => format!("Live in the call of {c}"),
+                Some(c) => format!("Joining continues the call of {c}"),
+                None => "Joining starts a new call".to_string(),
+            }}</span>
+            <div class="room-people" hidden=move || !people()>
+                <div class="linkbar">
+                    <span class="small muted">"Call link"</span>
+                    <code class="room-link" title="The link guests open to join this room">{link.clone()}</code>
+                </div>
+                <span class="small muted">{summary}</span>
+                <super::person::RoomTrust room=name.clone() trusted=r.persons.clone() contacts=contacts/>
+            </div>
+            <Show when=move || count != 0>
+                <details class="past-calls" prop:open={let p = p3.clone(); move || open.past.with(|s| s.contains(&p))}
+                    on:toggle={let p = p4.clone(); move |ev| flip(open.past, &p, event_target::<web_sys::HtmlDetailsElement>(&ev).open())}>
+                    <summary class="small">{format!("Past calls ({count})")}</summary>
+                    <ul class="list calls">
+                        {calls.clone().into_iter().map(|c| {
+                            let (room_a, room_b, id_a, id_b) = (r.name.clone(), r.name.clone(), c.id.clone(), c.id.clone());
+                            let next = current.as_deref() == Some(c.id.as_str());
+                            let clive = c.live;
+                            view! {
+                                <li class="call-row" data-call=c.id.clone() class:next=next>
+                                    <span class="call-when" title=when(c.started_ms)>{day(c.started_ms)}</span>
+                                    <span class="small call-takes">{takes(c.takes)}</span>
+                                    <span class="small muted call-id">{c.id.clone()}</span>
+                                    <Show when=move || clive><span class="chip ok">"Live"</span></Show>
+                                    <Show when=move || next && !clive><span class="chip">"Next join"</span></Show>
+                                    <span class="call-actions">
+                                        <button class="btn tiny continue-call" disabled=next
+                                            on:click=move |_| act("/rooms/call", serde_json::json!({ "room": room_a.clone(), "call": id_a.clone() }), "This call continues: the next to join lands in it.")>"Continue this call"</button>
+                                        <button class="btn tiny outline open-call-folder"
+                                            on:click=move |_| act("/folder/open", serde_json::json!({ "room": room_b.clone(), "call": id_b.clone() }), "Folder opened.")>"Open folder"</button>
+                                    </span>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                </details>
+            </Show>
+        </li>
     }
 }
 

@@ -145,6 +145,8 @@ export async function roomsChecks() {
 
   // The home lists both calls with their takes, the newest first.
   await P.goto(HTTP7 + '/');
+  // Past calls are folded under a disclosure (cast-n56.1).
+  await P.locator('#rooms li[data-room="' + ROOM + '"] .past-calls summary').click();
   const rows = P.locator('#rooms li[data-room="' + ROOM + '"] .call-row');
   await waitFor(async () => (await rows.count()) === 2, 'the home lists both calls', 10000);
   const takes = await rows.locator('.call-takes').allTextContents();

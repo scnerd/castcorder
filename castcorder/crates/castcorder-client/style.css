@@ -341,4 +341,48 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .call-when { font-weight: 600; font-variant-numeric: tabular-nums; }
 .call-actions { margin-left: auto; display: inline-flex; gap: 6px; }
 .chip.ok { color: var(--ok-text); border-color: var(--ok); }
+
+/* Home layout v2 (cast-n56.1): a left nav, then the place it picks. */
+.home-shell { flex: 1; display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 0; }
+.home-nav { display: flex; flex-direction: column; gap: 4px; padding: 16px 12px; border-right: 1px solid var(--border);
+  background: var(--surface); position: sticky; top: 0; align-self: start; min-height: 100vh; box-sizing: border-box; }
+.home-nav .brand { padding: 0 8px 12px; }
+.home-nav-item { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-radius: 10px;
+  border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 14px; font-weight: 500;
+  cursor: pointer; text-align: left; }
+.home-nav-item:hover { background: var(--surface2); color: var(--text); }
+.home-nav-item.on { background: var(--surface2); color: var(--accent); font-weight: 600; }
+.home-nav-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px 0;
+  border-top: 1px solid var(--border); }
+.home-who { font-weight: 600; overflow-wrap: anywhere; }
+.home-place { display: flex; flex-direction: column; gap: 16px; }
+.home-place[hidden] { display: none; }
+.home-head.joined { margin-top: 8px; }
+.room-title { display: flex; align-items: center; gap: 10px; }
+.room-line { flex: 1 1 auto; }
+.room-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.btn.icon { width: 40px; padding: 0; justify-content: center; }
+.room-menu { position: relative; }
+.room-menu > summary { list-style: none; cursor: pointer; }
+.room-menu > summary::-webkit-details-marker { display: none; }
+.room-menu-items { position: absolute; right: 0; top: 44px; z-index: 5; min-width: 300px; display: flex;
+  flex-direction: column; padding: 6px; border-radius: 10px; background: var(--surface);
+  border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18); }
+.menu-item { text-align: left; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent;
+  color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+.menu-item:hover { background: var(--surface2); }
+.menu-item.regen-room-link { color: var(--warn); }
+.room-people { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.room-people[hidden] { display: none; }
+.past-calls > summary { cursor: pointer; color: var(--muted); }
+.past-calls[open] > summary { margin-bottom: 6px; }
+
+@media (max-width: 760px) {
+  .home-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; align-content: start; }
+  .home-nav { flex-direction: row; flex-wrap: wrap; align-items: center; min-height: 0; position: static;
+    border-right: 0; border-bottom: 1px solid var(--border); padding: 8px 12px; }
+  .home-nav .brand { padding: 0 8px 0 0; }
+  .home-nav-foot { display: none; }
+  .room-actions { margin-left: 0; }
+}
 .lobby-room a { color: var(--accent); }
