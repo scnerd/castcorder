@@ -85,6 +85,14 @@ fn a_guest_hears_the_host_machines_native_participant() {
     c.udp_port = 0;
     c.align = None;
     let host = castcorder_host::start(c, |_| {}).unwrap();
+    // An open room: a guest may enter before any producer is there.
+    let room_json = root.join("library").join("show").join("room.json");
+    let mut v: serde_json::Value = std::fs::read_to_string(&room_json)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["open"] = true.into();
+    std::fs::write(&room_json, v.to_string()).unwrap();
 
     // A guest joins the room through the LAN listener.
     let socket = UdpDatagramSocket::bind_loopback().unwrap();
