@@ -170,11 +170,16 @@ pub(super) fn PersonCard() -> impl IntoView {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    let none = l.is_empty();
                     links.set(l);
-                    message.set(
+                    message.set(if none {
+                        "No link to share: this app has no network address another device can reach."
+                            .into()
+                    } else {
                         "Open this link on the new device within 10 minutes, then approve it here."
-                            .into(),
-                    );
+                            .into()
+                    });
+                    show_element("person-message");
                 }
                 Err(e) => message.set(e),
             }
@@ -510,6 +515,17 @@ pub(super) fn RoomTrust(
             <span class="small muted">{move || message.get()}</span>
         </div>
     }
+}
+
+/// Scroll the element with `id` into view once it is drawn, so a click's
+/// result is never left below the fold.
+pub(super) fn show_element(id: &'static str) {
+    let cb = Closure::once_into_js(move || {
+        if let Some(el) = window().document().and_then(|d| d.get_element_by_id(id)) {
+            let _ = call(&el, "scrollIntoView", &[]);
+        }
+    });
+    let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 50);
 }
 
 /// The link code this page was opened with, if any.

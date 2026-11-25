@@ -183,7 +183,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     <span class="small muted">"Each room keeps one call link. Joining it continues the room's call, or starts a new one if nobody has been in it for a while."</span>
                     // The rooms this app joined on other hosts live in its
                     // call window's lobby (docs/design.md "Rejoining").
-                    <span class="small muted">"Calls you joined on other hosts: " <a id="joined-rooms" href="castcorder://rooms">"Rooms you joined"</a></span>
+                    <span class="small muted">"Calls you joined on other hosts: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |_| {
+                        // The link opens the app's call window; say so, and what
+                        // an empty answer means, where the click happened.
+                        message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
+                        super::person::show_element("home-message");
+                    }>"Rooms you joined"</a></span>
                 </div>
                 <div class="row">
                     <label class="sr-only" for="new-room-name">"New room name"</label>

@@ -80,6 +80,10 @@
 //    offline; Rejoin, Rejoin this call, a refused past call, a producer's
 //    Continue, and a kicked device: see rejoinChecks() in lib/rejoin.mjs.
 //
+// 13. (chromium, firefox) The home's You card and linking a browser profile to a
+//    person over the LAN; "Link a device" and "Rooms you joined" show a visible
+//    result: see homeLinkChecks() in lib/homelink.mjs.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
@@ -107,6 +111,7 @@ import { rejoinChecks } from './lib/rejoin.mjs';
 import { joinFailChecks } from './lib/joinfail.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
 import { devicesChecks } from './lib/devices.mjs';
+import { homeLinkChecks } from './lib/homelink.mjs';
 import { inCallChecks } from './lib/incall.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { phoneLeaveChecks } from './lib/phone.mjs';
@@ -188,7 +193,7 @@ let passed = false;
 try {
   // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
   // sections (security, identity, cap, names, takeinfo, rooms, rejoin,
-  // devices, incall, joinfail), each on its own host, skipping guests A and B (for iterating).
+  // devices, homelink, incall, joinfail), each on its own host, skipping guests A and B (for iterating).
   const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
   const want = (s) => ONLY.length === 0 || ONLY.includes(s);
   if (ONLY.length === 0) {
@@ -365,6 +370,7 @@ try {
   if (FULL && want('joinfail')) await joinFailChecks();
   // Every mode: in fallback the backups take the AudioWorklet path too.
   if (want('devices')) await devicesChecks();
+  if (MODE !== 'fallback' && want('homelink')) await homeLinkChecks();
   if (MODE !== 'fallback' && want('incall')) await inCallChecks();
   passed = checks.every((c) => c.ok);
 
@@ -383,6 +389,7 @@ try {
   if (ctx.rv8) ctx.rv8.kill();
   if (ctx.host9) ctx.host9.kill();
   if (ctx.host10) ctx.host10.kill();
+  if (ctx.host11) ctx.host11.kill();
 }
 writeFileSync(join(RESULTS, 'host' + (FULL ? '' : '-' + MODE) + '.log'), ctx.hostLog);
 if (ctx.host2) writeFileSync(join(RESULTS, 'host-security.log'), ctx.host2Log);
@@ -392,6 +399,7 @@ if (ctx.host7) writeFileSync(join(RESULTS, 'host-rooms-' + MODE + '.log'), ctx.h
 if (ctx.host8) writeFileSync(join(RESULTS, 'host-rejoin.log'), ctx.host8Log || '');
 if (ctx.host9) writeFileSync(join(RESULTS, 'host-devices-' + MODE + '.log'), ctx.host9Log || '');
 if (ctx.host10) writeFileSync(join(RESULTS, 'host-incall-' + MODE + '.log'), ctx.host10Log || '');
+if (ctx.host11) writeFileSync(join(RESULTS, 'host-homelink-' + MODE + '.log'), ctx.host11Log || '');
 for (const n of ['X', 'Y']) if (logs[n]) writeFileSync(join(RESULTS, 'guest-devices-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
 for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '' : '-' + MODE) + '.log'), logs[n].join('\n'));
 // Every later section's guests too (one name may serve several sections; its
