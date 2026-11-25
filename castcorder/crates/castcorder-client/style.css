@@ -390,3 +390,57 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   .room-actions { margin-left: 0; }
 }
 .lobby-room a { color: var(--accent); }
+
+/* Home > Contacts (cast-40e.13). */
+.nav-badge { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box; border-radius: 10px;
+  background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center; }
+.contacts-page { display: flex; flex-direction: column; gap: 12px; }
+.contacts-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.contacts-head h2 { margin: 0; }
+.contacts-head > .muted { flex: 1 1 280px; }
+.add-contact-wrap { position: relative; margin-left: auto; }
+.add-contact-panel { position: absolute; right: 0; top: 48px; z-index: 6; width: min(360px, calc(100vw - 32px)); box-sizing: border-box;
+  padding: 16px; display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 16px 40px rgba(0, 0, 0, .25); }
+.add-contact-panel[hidden] { display: none; }
+.add-contact-panel .row input { flex: 1; min-width: 0; }
+.add-contact-panel code { word-break: break-all; }
+.or-rule { display: flex; align-items: center; gap: 10px; }
+.or-rule::before, .or-rule::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.field { font-size: 13px; font-weight: 600; }
+.contacts-cols { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 20px; }
+.contacts-lists { flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.contacts-lists section { display: flex; flex-direction: column; gap: 4px; }
+.group-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 4px 4px; }
+.group-label.accent { color: var(--accent); }
+.contact-requests-card { padding: 14px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); }
+.contact-request { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.contact-request .contact-text { flex: 1 1 200px; }
+.contact-group { gap: 2px; }
+.contact-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: 10px; }
+.contact-row.on { background: var(--surface2); }
+.contact-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 6px; border: 0; background: none;
+  color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 8px; }
+.contact-pick:hover { background: var(--surface2); }
+.contact-text { display: flex; flex-direction: column; min-width: 0; }
+.contact-text > * { overflow: hidden; text-overflow: ellipsis; }
+.contact-name { font-weight: 600; }
+.avatar { position: relative; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--tile-avatar); color: #fff;
+  font-size: 14px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
+.avatar.big { width: 56px; height: 56px; font-size: 18px; }
+.avatar .pres { position: absolute; right: -1px; bottom: -1px; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--surface); background: var(--muted); }
+.avatar .pres.on { background: var(--ok); }
+.contact-detail { flex: 1 1 320px; max-width: 440px; min-width: 0; box-sizing: border-box; padding: 20px; display: flex; flex-direction: column;
+  gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.contact-detail-head { display: flex; align-items: center; gap: 14px; }
+.contact-detail-name { font-size: 20px; }
+.contact-detail .row input { flex: 1; min-width: 0; }
+.contact-shared-box { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.invite-rooms { gap: 6px; }
+.invite-room { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.invite-room > span:first-child { font-weight: 600; }
+.invite-room .send-invite-room { margin-left: auto; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--muted); align-self: flex-start; padding-left: 0; }
+#contact-list { display: flex; flex-direction: column; gap: 16px; }
