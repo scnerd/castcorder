@@ -469,6 +469,34 @@ impl Running {
                 room: room.to_string(),
                 person: person.to_string(),
                 trust,
+                producer: None,
+                reply,
+            })
+            .map_err(|_| "the host is not running".to_string())?;
+        rx.recv()
+            .map_err(|_| "the host is not running".to_string())?
+    }
+
+    /// Make a person trusted in `room` a producer there, or a guest again
+    /// (Room settings > People). Producer trusts them if they are not yet
+    /// (only a contact can be).
+    pub fn set_person_producer(
+        &self,
+        room: &str,
+        person: &str,
+        producer: bool,
+    ) -> Result<(), String> {
+        if producer && self.contacts.get(person).is_none() {
+            return Err("only a contact can be trusted in a room".into());
+        }
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::TrustPerson {
+                room: room.to_string(),
+                person: person.to_string(),
+                trust: true,
+                producer: Some(producer),
                 reply,
             })
             .map_err(|_| "the host is not running".to_string())?;

@@ -78,6 +78,10 @@ pub struct DeviceRecord {
     /// A producer kicked it: it cannot rejoin.
     #[serde(default)]
     pub banned: bool,
+    /// The person its certificate named when it last joined (verified), if
+    /// any: Room settings > People offers to trust that person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +144,10 @@ struct Saved {
     /// devices is trusted here, whether or not it joined with a producer.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     persons: BTreeSet<String>,
+    /// Trusted persons the host machine made producers here: each of their
+    /// devices joins as a producer.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    producer_persons: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +441,7 @@ impl Room {
         let changed = if trust {
             self.saved.persons.insert(id.to_string())
         } else {
+            self.saved.producer_persons.remove(id);
             self.saved.persons.remove(id)
         };
         if changed {
@@ -455,6 +464,50 @@ impl Room {
     /// The persons trusted in this room, by id.
     pub fn trusted_persons(&self) -> Vec<String> {
         self.saved.persons.iter().cloned().collect()
+    }
+
+    /// Make a trusted person a producer here, or a guest again: each of
+    /// their devices joins with that role. Only the host machine does this.
+    /// Whether it changed anything.
+    pub fn set_person_producer(&mut self, id: &str, producer: bool) -> Result<bool, String> {
+        if producer && !self.saved.persons.contains(id) {
+            return Err(format!("{id} is not trusted in this room"));
+        }
+        let changed = if producer {
+            self.saved.producer_persons.insert(id.to_string())
+        } else {
+            self.saved.producer_persons.remove(id)
+        };
+        if changed {
+            self.dirty = true;
+            decision(
+                id,
+                "person",
+                if producer {
+                    "make producer"
+                } else {
+                    "make guest"
+                },
+                true,
+                "by the host machine",
+            );
+        }
+        Ok(changed)
+    }
+
+    /// The trusted persons who are producers here, by id.
+    pub fn producer_persons(&self) -> Vec<String> {
+        self.saved.producer_persons.iter().cloned().collect()
+    }
+
+    /// The devices remembered in this room (joined with its link), with the
+    /// person each last named.
+    pub fn devices(&self) -> Vec<(String, DeviceRecord)> {
+        self.saved
+            .devices
+            .iter()
+            .map(|(id, d)| (id.clone(), d.clone()))
+            .collect()
     }
 
     /// Whether the person key `person` (verified) is trusted in this room.
@@ -485,12 +538,15 @@ impl Room {
     }
 
     fn conn_role(&self, c: &Conn) -> Role {
-        let granted =
-            self.saved.devices.get(&c.device).is_some_and(|d| {
-                d.producer && (d.trusted || self.conn_person_trusted(c)) && !d.banned
-            });
+        let rec = self.saved.devices.get(&c.device);
+        let granted = rec
+            .is_some_and(|d| d.producer && (d.trusted || self.conn_person_trusted(c)) && !d.banned);
+        // A producer person: every device of theirs, unless kicked.
+        let by_person = c.person.as_ref().is_some_and(|p| {
+            self.saved.producer_persons.contains(p) && self.saved.persons.contains(p)
+        }) && !rec.is_some_and(|d| d.banned);
         Role {
-            producer: c.at_host || c.owner || granted,
+            producer: c.at_host || c.owner || granted || by_person,
             host_machine: c.at_host,
         }
     }
@@ -845,6 +901,10 @@ impl Room {
         let rec = self.saved.devices.entry(c.device.clone()).or_default();
         if rec.name != name {
             rec.name = name.to_string();
+            self.dirty = true;
+        }
+        if c.person.is_some() && rec.person != c.person {
+            rec.person = c.person.clone();
             self.dirty = true;
         }
         let mut reason = "joined";

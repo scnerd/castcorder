@@ -873,3 +873,48 @@ fn a_trusted_person_s_devices_are_trusted_in_the_room() {
     );
     assert!(!room.to_json().contains("persons"));
 }
+
+/// A trusted person made a producer in the room (cast-40e.14): each of their
+/// devices joins as a producer, with nobody at the host machine to grant it;
+/// a guest again, or no longer trusted, it is not. A kicked device of theirs
+/// stays out of the role. The device's person is remembered with it (Room
+/// settings > People lists it). Saved in room.json.
+#[test]
+fn a_producer_person_s_devices_join_as_producers() {
+    let bob = [42u8; 32];
+    let bob_id = castcorder_link::person::person_id(&bob);
+    let mut room = Room::new(true);
+    let seat = Seat {
+        person: Some(bob),
+        ..Seat::default()
+    };
+    assert!(
+        room.set_person_producer(&bob_id, true).is_err(),
+        "only a trusted person can be a producer"
+    );
+    room.trust_person(&bob_id, true).unwrap();
+    assert_eq!(room.set_person_producer(&bob_id, true), Ok(true));
+    assert_eq!(room.producer_persons(), vec![bob_id.clone()]);
+    room.accepted_as(2, "dev-bob", seat);
+    assert!(room.join(2, "Bob").unwrap().producer);
+    assert_eq!(room.devices()[0].1.person.as_deref(), Some(bob_id.as_str()));
+    // Another device without a certificate is not.
+    room.accepted_as(3, "dev-anon", Seat::default());
+    assert!(!room.join(3, "Anon").unwrap().producer);
+    // Survives a restart.
+    let again = Room::from_json(&room.to_json()).unwrap();
+    assert_eq!(again.producer_persons(), vec![bob_id.clone()]);
+    assert_eq!(
+        again.device("dev-bob").and_then(|d| d.person.clone()),
+        Some(bob_id.clone())
+    );
+    // A guest again.
+    assert_eq!(room.set_person_producer(&bob_id, false), Ok(true));
+    assert!(!room.role(2).producer);
+    // Producer once more, then no longer trusted: neither.
+    room.set_person_producer(&bob_id, true).unwrap();
+    assert!(room.role(2).producer);
+    room.trust_person(&bob_id, false).unwrap();
+    assert!(!room.role(2).producer);
+    assert!(room.producer_persons().is_empty());
+}
