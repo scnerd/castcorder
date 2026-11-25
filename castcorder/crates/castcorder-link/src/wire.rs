@@ -248,6 +248,62 @@ pub struct PresencePing {
     /// contact to learn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<crate::person::Revocation>,
+    /// Between two app installs of the same person only: the asking
+    /// install's contacts, to merge (cast-40e.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<OwnSync>,
+}
+
+/// A person's contacts as one of its app installs keeps them, sent to its
+/// other app installs with presence pings and answers (cast-40e.9).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnSync {
+    /// The contacts it keeps.
+    #[serde(default)]
+    pub contacts: Vec<SyncedContact>,
+    /// Contacts it removed, and when (ms since the Unix epoch).
+    #[serde(default)]
+    pub removed: Vec<Removed>,
+    /// The person's other app installs it knows, by host key (base64url).
+    #[serde(default)]
+    pub installs: Vec<String>,
+}
+
+/// One contact, as [`OwnSync`] carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncedContact {
+    /// Their person id.
+    pub id: String,
+    /// Their person public key, base64url.
+    pub key: String,
+    /// The name they gave.
+    #[serde(default)]
+    pub name: String,
+    /// The person's own name for them (empty: none).
+    #[serde(default)]
+    pub nickname: String,
+    /// Certificates of their app installs.
+    #[serde(default)]
+    pub devices: Vec<crate::person::DeviceCert>,
+    /// When they were added, ms since the Unix epoch.
+    #[serde(default)]
+    pub added_ms: u64,
+    /// When their name or nickname last changed here, ms since the Unix
+    /// epoch: the later change wins.
+    #[serde(default)]
+    pub updated_ms: u64,
+    /// Their devices their person revoked, by device id.
+    #[serde(default)]
+    pub revoked: Vec<String>,
+}
+
+/// A contact removed, as [`OwnSync`] carries it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Removed {
+    /// Their person id.
+    pub person: String,
+    /// When, ms since the Unix epoch.
+    pub removed_ms: u64,
 }
 
 /// The answer to a presence ping: the answering install is online.
@@ -260,6 +316,10 @@ pub struct PresenceAnswer {
     /// The answering person's device revocations (cast-40e.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<crate::person::Revocation>,
+    /// To another app install of the same person only: the answering
+    /// install's contacts, to merge (cast-40e.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync: Option<OwnSync>,
 }
 
 /// A person asks to become a contact of the person whose app install made a
@@ -592,12 +652,14 @@ mod tests {
             Some(PresencePing {
                 device: "Laptop".into(),
                 revoked: Vec::new(),
+                sync: None,
             })
         );
         let pa = AnswerPlain::Presence(PresenceAnswer {
             name: "Ann".into(),
             device: "Desk".into(),
             revoked: Vec::new(),
+            sync: None,
         });
         assert_eq!(
             to_json(&pa),
@@ -614,6 +676,7 @@ mod tests {
                 revoked_ms: 7,
                 sig: "S".into(),
             }],
+            sync: None,
         });
         assert_eq!(
             to_json(&pa),

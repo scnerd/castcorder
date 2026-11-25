@@ -144,3 +144,62 @@ fn contacts_see_each_other_online_through_the_rendezvous() {
     b.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A person's app installs share contacts (cast-40e.9) through the same
+/// sealed pings: Ann's second install, linked after she paired with Bob,
+/// learns Bob and pings him too; a nickname set there reaches Ann's first
+/// install; removing Bob there removes him on both.
+#[test]
+fn a_person_s_installs_share_contacts_through_the_rendezvous() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-ownsync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let rv = rendezvous();
+    let a = start(&root, "a", rv);
+    let b = start(&root, "b", rv);
+    let a2 = start(&root, "a2", rv);
+    a.set_person_names(Some("Ann"), Some("Desk")).unwrap();
+    b.set_person_names(Some("Bob"), Some("Laptop")).unwrap();
+    a2.set_person_names(None, Some("Tablet")).unwrap();
+    let bob = b.person().id;
+    wait("Ann's rendezvous link", || {
+        a.contact_code().unwrap().len() == 2
+    });
+    let links = a.contact_code().unwrap();
+    b.add_contact(links.iter().find(|l| !l.contains("/v/")).unwrap())
+        .unwrap();
+    wait("Bob's request at Ann", || a.contacts().requests.len() == 1);
+    a.decide_contact(&a.contacts().requests[0].device.clone(), true)
+        .unwrap();
+    wait("Bob to be added", || b.contacts().contacts.len() == 1);
+
+    // Ann links a second install, over her first one's LAN listener.
+    let link = a.link_code().unwrap();
+    a2.join_person(link.iter().find(|l| !l.contains("/v/")).unwrap())
+        .unwrap();
+    wait("the link request at Ann", || a.person().requests.len() == 1);
+    a.decide_link(&a.person().requests[0].device.clone(), true)
+        .unwrap();
+    wait("the second install to learn Bob", || {
+        a2.contacts().contacts.iter().any(|c| c.id == bob)
+    });
+    // It pings Bob as one of Ann's installs, and Bob keeps it.
+    wait("Bob to see both of Ann's installs", || {
+        let mut on = online(&b);
+        on.sort();
+        on == ["Desk", "Tablet"]
+    });
+    // A nickname set on the second install reaches the first.
+    a2.set_contact_nickname(&bob, "Bobby").unwrap();
+    wait("the nickname to reach Ann's first install", || {
+        a.contact(&bob).is_some_and(|c| c.nickname == "Bobby")
+    });
+    // Removing Bob there removes him on both.
+    a2.remove_contact(&bob).unwrap();
+    wait("the removal to reach Ann's first install", || {
+        a.contact(&bob).is_none()
+    });
+    a.stop();
+    b.stop();
+    a2.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
