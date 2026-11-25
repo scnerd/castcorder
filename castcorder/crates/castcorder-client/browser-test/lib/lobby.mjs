@@ -67,5 +67,21 @@ export async function lobbyChecks() {
   const testTracks = await L.evaluate((n) => window.__tracks.slice(0, n).every((t) => t.readyState === 'ended'), before);
   check(testTracks && (await text(L, '#test-devices')) === 'Test mic and camera',
     'lobby: Join closes the test before the call opens the microphone');
+
+  // Leave lands on "You left" (cast-n56.4), not the lobby; Rejoin goes back in.
+  await L.click('#leave');
+  await waitFor(() => L.isVisible('#left-call'), 'L sees the You left page', 10000);
+  const summary = await text(L, '#left-summary');
+  check(summary.startsWith('You were in the call for') && summary.includes('no takes recorded')
+    && !(await L.isVisible('#name')) && (await text(L, '#join')) === 'Rejoin',
+    'leaving shows You left with the time in the call and the takes, and Rejoin: ' + summary);
+  await L.click('#join');
+  await waitFor(async () => (await text(L, '#participant')).length > 0 && !(await L.isVisible('#left-call')), 'L rejoined from You left', 30000);
+  check(true, 'Rejoin on the You left page joins the call again');
+  await L.click('#leave');
+  await waitFor(() => L.isVisible('#left-call'), 'L left again', 10000);
+  await L.click('#left-settings');
+  check(await L.isVisible('#name') && (await L.inputValue('#name')) === 'Lee',
+    'Change name or devices goes back to the lobby with the name kept');
   await L.close();
 }

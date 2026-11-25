@@ -475,6 +475,7 @@ pub(super) fn start_msg(name: &str, meta: JsValue) -> JsValue {
 /// Start the main microphone's track for `take` (a new segment when the take
 /// already records: after a reopen or a microphone switch).
 pub(super) fn start_mic_track(ui: Ui, take: TakeId) {
+    super::left::recorded(take.0);
     let (ctx, raw, capture) = with_engine(|e| {
         e.recording = Some(take);
         (e.ctx.clone(), e.raw.clone(), e.capture.clone())

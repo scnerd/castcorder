@@ -44,6 +44,7 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
     set(&msg, "device", ctx.device.as_str());
     post_worker(&msg, None);
     ui.joined.set(true);
+    super::left::joined();
     ui.connection.set("opening microphones".into());
 
     let (raw, live) = match open_media().await {

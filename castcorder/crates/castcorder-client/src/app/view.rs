@@ -300,8 +300,10 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
 #[component]
 fn Lobby(ui: Ui) -> impl IntoView {
     let test = lobby::test_ui();
+    let gone = left::left_ui();
     let on_join = move |_| {
         lobby::stop();
+        gone.summary.set(None);
         ui.join_note.set(String::new());
         ui.join_retry.set(false);
         spawn_local(async move {
@@ -365,6 +367,7 @@ fn Lobby(ui: Ui) -> impl IntoView {
     view! {
         <div class="lobby" hidden=move || ui.joined.get()>
             <div class="brand"><Mark/> "Castcorder"</div>
+            <Show when=move || gone.summary.get().is_none() fallback=move || view! { <LeftPage ui=ui on_join=on_join sync_text=sync_text/> }>
             <div class="lobby-main">
                 <div class="lobby-preview">
                     <div class="preview-box">
@@ -452,7 +455,64 @@ fn Lobby(ui: Ui) -> impl IntoView {
                     </Show>
                 </div>
             </div>
+            </Show>
             <rejoin::MyRooms ui=ui/>
+        </div>
+    }
+}
+
+/// After Leave (cast-n56.4): what was left, the recordings on their way to
+/// the host, Rejoin and Your calls (the rooms list below).
+#[component]
+fn LeftPage(
+    ui: Ui,
+    on_join: impl Fn(web_sys::MouseEvent) + Copy + Send + Sync + 'static,
+    sync_text: impl Fn() -> String + Copy + Send + Sync + 'static,
+) -> impl IntoView {
+    let gone = left::left_ui();
+    let summary = move || gone.summary.get();
+    // The whole for the bar: the most files left at once since Leave.
+    Effect::new(move |_| {
+        let l = ui.sync_left.get();
+        if l > gone.most.get_untracked() {
+            gone.most.set(l);
+        }
+    });
+    let progress = move || crate::leftcall::progress(ui.sync_left.get(), gone.most.get());
+    let sending = move || ui.sync_left.get() > 0;
+    let your_calls = move |_| {
+        if let Some(el) = window()
+            .document()
+            .and_then(|d| d.get_element_by_id("my-rooms"))
+        {
+            el.scroll_into_view();
+        }
+    };
+    view! {
+        <div class="left-main" id="left-call">
+            <div class="left-card">
+                <span class="small muted">"You left"</span>
+                <h1>{move || summary().map(|s| if s.room.is_empty() { "the call".to_string() } else { s.room }).unwrap_or_default()}</h1>
+                <span class="muted" id="left-summary">{move || summary().map(|s| crate::leftcall::line(&s)).unwrap_or_default()}</span>
+                <div class="left-sync" hidden=move || sync_text().is_empty()>
+                    <div class="left-sync-head">
+                        <strong>{move || if sending() { "Sending your recordings to the host" } else { "Your recordings" }}</strong>
+                        <span hidden=move || !sending()>{move || format!("{}%", progress().2)}</span>
+                    </div>
+                    <div class="disk-bar" hidden=move || !sending() role="progressbar" aria-label="Recordings sent"
+                        aria-valuenow=move || progress().2.to_string() aria-valuemin="0" aria-valuemax="100">
+                        <span style:width=move || format!("{}%", progress().2)></span>
+                    </div>
+                    <span class="small muted" id="left-files" hidden=move || !sending()>
+                        {move || { let (sent, whole, _) = progress(); format!("{sent} of {whole} files sent. Keep this tab open until it says done.") }}</span>
+                    <span class="small" id="sync-state">{sync_text}</span>
+                </div>
+                <div class="row">
+                    <button id="join" class="btn primary" on:click=on_join>"Rejoin"</button>
+                    <button id="your-calls" class="btn outline" on:click=your_calls hidden=move || rejoin::load().is_empty()>"Your calls"</button>
+                    <button id="left-settings" class="btn ghost" on:click=move |_| gone.summary.set(None)>"Change name or devices"</button>
+                </div>
+            </div>
         </div>
     }
 }
@@ -745,7 +805,7 @@ fn Call(ui: Ui) -> impl IntoView {
                     </Show>
                 </div>
                 <div class="dock-side end">
-                    <button id="leave" class="btn outline big" disabled=move || !ui.joined.get() on:click=move |_| leave(ui)>
+                    <button id="leave" class="btn outline big" disabled=move || !ui.joined.get() on:click=move |_| left::leave(ui)>
                         <Icon name="leave"/>"Leave call"</button>
                 </div>
             </footer>
