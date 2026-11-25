@@ -30,7 +30,11 @@ def run(x):
 
 
 t = time.perf_counter(); run(pcm[: 16000 * 5]); first_s = time.perf_counter() - t
-t = time.perf_counter(); full = run(pcm); full_s = time.perf_counter() - t
+if "--chunks-only" in sys.argv:
+    # Variable-length models: peak RAM depends on input length, so measure live chunks alone.
+    full, full_s = "", 0.0
+else:
+    t = time.perf_counter(); full = run(pcm); full_s = time.perf_counter() - t
 r = dict(label=label, audio_s=len(pcm) / 16000, load_s=load_s, first_s=first_s, full_s=full_s,
          rtf=full_s / (len(pcm) / 16000), full_text=full)
 for secs in (5, 10):

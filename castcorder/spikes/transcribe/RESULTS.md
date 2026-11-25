@@ -15,9 +15,9 @@ prefer pure Rust, use the GPU when there is one and fall back to CPU, speed over
 - **Parakeet TDT 0.6B v2** (int8 ONNX, through onnxruntime) is the most accurate engine measured,
   and it was fast **on CPU alone**: 0.43 s per 5 s chunk with 4.3% chunked WER, against 9.6% for
   Whisper small.en. It is not pure Rust (the C++ onnxruntime, ~23 MB of DLLs), it needs ~640 MB of
-  model files and about 2 GB of RAM, it is English only, and it is licensed CC-BY-4.0. It is the
+  model files and about 1 GB of RAM in live-chunk use, it is English only, and it is licensed CC-BY-4.0. It is the
   strongest "quality" alternative.
-- **Fixed 5 s chunks cost about 4-5 WER points** against whole-clip decoding, because words are cut at
+- **Fixed 5 s chunks cost about 4-6 WER points** against whole-clip decoding, because words are cut at
   chunk edges. The live design should cut segments at pauses (VAD) or use overlap, not fixed windows.
 - **The pure-Rust engines (candle, burn) were not measured.** The machine's crate proxy was down; see
   "Skipped" below.
@@ -122,8 +122,19 @@ model. Lower is better everywhere.
 | onnx cpu moonshine-base int8 | 1.56 | 0.390 | 259.1 | 0.35/0.45 | 10.6 | 0.62/0.83 | 7.9 | 4110 | 0 |
 
 "wcpp" = whisper.cpp; cpu = 6 threads; vulkan and cuda = RTX 3090; igpu = Intel UHD 770 via
-Vulkan. "onnx" = sherpa-onnx 1.x Python wheel (onnxruntime CPU, 6 threads); its RAM figures include
-the Python interpreter.
+Vulkan. "onnx" = sherpa-onnx 2.0.3 Python wheel (onnxruntime CPU, 6 threads); its RAM figures include
+the Python interpreter. Their peak RAM is for the whole-clip pass: Parakeet and Moonshine use variable-length attention, so a 135 s input costs far more than a chunk. Rerun with `--chunks-only` (live chunks only): Parakeet 958 MB, Moonshine base 418 MB (Python baseline is about 20 MB). The Vulkan large-v3-turbo-q5_0 full RTF (0.051) is likely inflated by first-time shader compilation; q8_0 on the same device gave 0.014.
+
+## How much to trust the WER numbers
+
+The reference has 303 words, so one WER point is about 3 words. Differences of 1-2 points (tiny vs
+base, f16 vs q8_0 vs q5_1) are within noise. The differences that hold up are Parakeet vs Whisper
+small, large-v3-turbo vs small, and chunked vs whole-clip decoding. LibriSpeech is clean read speech;
+conversational podcast audio is harder and usually widens the gap between model sizes, which is why
+base (not tiny) is suggested for CPU hosts, on that expectation rather than on this data. The GPU tier
+was measured only on an RTX 3090 (every model about 0.1 s per 5 s chunk) and a weak iGPU; mid-range
+discrete GPUs and AMD/Intel Arc Vulkan are unmeasured, so the data cannot yet separate small.en from
+large-v3-turbo for a typical user's GPU.
 
 ## Model file sizes (what the installer would carry)
 
@@ -184,7 +195,7 @@ bigger again. It also requires a recent enough NVIDIA driver on the user's machi
 ## Skipped and why
 
 - **candle (pure Rust), and whisper-rs built through cargo:** not built. This machine's cargo
-  routes crates.io through a local kellnr proxy (192.168.0.65:11102), which was unreachable during
+  routes crates.io through a local kellnr proxy on the LAN, which was unreachable during
   the spike, and none of the needed crates (whisper-rs, candle-*, hound, tokenizers) were cached.
   Bypassing the proxy was not authorised. `wrs/` (the whisper-rs harness) and `common/bench.rs` are
   written and ready. The safetensors model files for candle are partly downloaded by
@@ -205,7 +216,7 @@ measured.
 
 If accuracy matters more than footprint, Parakeet TDT 0.6B v2 on onnxruntime (the `ort` or
 `sherpa-rs` crates) gave clearly better transcripts at CPU-real-time speed. The costs are ~650 MB of
-model, ~2 GB of RAM, English only, CC-BY-4.0 attribution, and onnxruntime DLLs. It is worth a
+model, ~1 GB of RAM, English only, CC-BY-4.0 attribution, and onnxruntime DLLs. It is worth a
 follow-up measurement with a GPU execution provider.
 
 candle should still be measured once the crate proxy is back, to see whether pure Rust is within
