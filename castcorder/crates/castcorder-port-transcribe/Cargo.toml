@@ -1,0 +1,12 @@
+[package]
+name = "castcorder-port-transcribe"
+description = "Transcription port: the Transcriber trait, a behavioural simulation and the contract both it and the real engine pass"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

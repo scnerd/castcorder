@@ -107,9 +107,28 @@ jobs:
         with:
           workspaces: castcorder
 
+      # The whisper.cpp contract (castcorder-transcribe) needs a model: CI uses the
+      # smallest English one, cached. Installers bundle theirs (cast-7hm.4).
+      - name: Cache whisper model
+        id: whisper-model
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/whisper-models
+          key: whisper-ggml-tiny.en-v1
+
+      - name: Fetch whisper model
+        if: steps.whisper-model.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ runner.temp }}/whisper-models
+          curl -fsSL --retry 4 -o ${{ runner.temp }}/whisper-models/ggml-tiny.en.bin \
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
+
       # Tiers 1-2 (unit, simulation). The system and browser tiers join here with M1.
       - name: Unit and simulation tests
         run: task check
+        env:
+          CASTCORDER_WHISPER_MODEL: ${{ runner.temp }}/whisper-models/ggml-tiny.en.bin
+          CASTCORDER_REQUIRE_WHISPER: "1"
 
   # The desktop app's Tauri shell (castcorder-app --features desktop): clippy, its
   # tests, and a smoke run under a virtual display. Kept out of `task check`
