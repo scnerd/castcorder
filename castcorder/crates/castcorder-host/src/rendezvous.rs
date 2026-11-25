@@ -389,6 +389,18 @@ pub fn exchange(
     to: &castcorder_link::HostId,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
+    exchange_within(base, to, sealed, Duration::from_secs(20))
+}
+
+/// [`exchange`], waiting at most `wait` for the answer (a presence ping,
+/// castcorder-host `presence`). An install that is not registered fails at
+/// once with the rendezvous's `host_offline`.
+pub fn exchange_within(
+    base: &str,
+    to: &castcorder_link::HostId,
+    sealed: &[u8],
+    wait: Duration,
+) -> Result<Vec<u8>, String> {
     let t = target(base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
     let url = castcorder_link::wire::mailbox_url(&t.ws_url, to);
@@ -403,7 +415,7 @@ pub fn exchange(
             sealed: b64(sealed),
         },
     )?;
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + wait;
     loop {
         match read_msg_until(&mut ws, Some(until), None)? {
             Some(ServerMsg::Answer { sealed }) => {
@@ -570,6 +582,9 @@ fn session(
     {
         f(&link);
     }
+    // Every registration (start, reconnect) pings every contact install:
+    // they may have missed us while we were away.
+    cfg.contacts.presence_registered();
     loop {
         let Some(msg) = read_msg_until(&mut ws, renew_at, Some(stop))? else {
             info!("renewing relay credentials: reconnecting to the rendezvous");
@@ -673,7 +688,8 @@ fn resolve_udp(hostport: &str) -> Option<SocketAddr> {
 }
 
 /// Open one guest's offer and produce the sealed answer (or `None` if it
-/// cannot be opened, so no answer can be sealed either).
+/// cannot be opened, so no answer can be sealed either, or if it is a
+/// presence ping that gets no answer).
 fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> Option<String> {
     let Some((plain, reply)) = unb64(sealed).and_then(|s| cfg.key.open_offer(&s).ok()) else {
         warn!(
@@ -690,7 +706,13 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         Ok((_, o)) if o.link.is_some() => {
             AnswerPlain::Link(cfg.persons.answer(&o, crate::wall_ms()))
         }
-        // So does a contact request: the contact code is its own.
+        // A presence ping: only a contact's install is answered, and anyone
+        // else hears nothing at all (castcorder-host `presence`).
+        Ok((_, o)) if o.presence.is_some() => {
+            AnswerPlain::Presence(cfg.contacts.answer_presence(&o, crate::wall_ms())?)
+        }
+        // A contact request needs no call secret either: the contact code
+        // is its own.
         Ok((_, o)) if o.contact.is_some() => {
             AnswerPlain::Contact(cfg.contacts.answer(&o, crate::wall_ms()))
         }
@@ -930,6 +952,7 @@ mod tests {
                 cert: None,
                 link: None,
                 contact: None,
+                presence: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -1139,6 +1162,7 @@ mod tests {
             cert: None,
             link: None,
             contact: None,
+            presence: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())

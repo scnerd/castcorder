@@ -582,6 +582,7 @@ pub fn request_link(
                 kind,
             }),
             contact: None,
+            presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
         let (sealed, guest) = GuestSeal::seal(&code.host, eph, to_json(&plain).as_bytes())
@@ -601,7 +602,10 @@ pub fn request_link(
             AnswerPlain::Link(LinkAnswer::Refused(why)) | AnswerPlain::Rejected(why) => {
                 return Err(why);
             }
-            AnswerPlain::Sdp(_) | AnswerPlain::Status(_) | AnswerPlain::Contact(_) => {
+            AnswerPlain::Sdp(_)
+            | AnswerPlain::Status(_)
+            | AnswerPlain::Contact(_)
+            | AnswerPlain::Presence(_) => {
                 return Err("the other device is too old to link devices".into());
             }
         }
@@ -745,6 +749,7 @@ mod tests {
                 kind,
             }),
             contact: None,
+            presence: None,
         }
     }
 

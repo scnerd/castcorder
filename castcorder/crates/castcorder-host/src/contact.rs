@@ -29,7 +29,7 @@
 //!   answer is lost on the way, only the maker lists the other until they
 //!   pair again (pairing an existing contact updates it).
 //! - Removing a contact is local: the other side is not told (it stops
-//!   being answered once presence exists, cast-40e.3). Room trust granted to
+//!   being answered: presence, castcorder-host `presence`). Room trust granted to
 //!   a contact's person stays until revoked in the room: being a contact
 //!   grants no room access, and losing one takes none away.
 //! - Only app installs pair: a browser profile holds no person key and no
@@ -37,6 +37,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -45,14 +46,15 @@ use castcorder_link::person::{
     ContactCode, DeviceCert, DeviceKind, fingerprint, person_id, verify_cert,
 };
 use castcorder_link::wire::{
-    AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, b64, from_json, to_json,
-    unb64,
+    AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, PresenceAnswer, b64,
+    from_json, to_json, unb64,
 };
 use castcorder_link::{GuestSeal, HostKey};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::person::{Exchange, POLL, Persons, Route, WAIT, write_atomic};
+use crate::presence::{Board, Me, PresenceView, Timing};
 
 /// How long a contact code stays usable.
 pub const CODE_TTL_MS: u64 = crate::person::CODE_TTL_MS;
@@ -81,6 +83,9 @@ pub struct Contact {
 struct Saved {
     #[serde(default)]
     contacts: Vec<Contact>,
+    /// Appear offline: send no presence pings and answer none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    appear_offline: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +149,9 @@ pub struct ContactView {
     pub devices: usize,
     /// When they were added.
     pub added_ms: u64,
+    /// Which of their installs are online, and when one was last heard.
+    #[serde(flatten)]
+    pub presence: PresenceView,
 }
 
 /// The contacts as the host machine's page shows them.
@@ -157,6 +165,10 @@ pub struct View {
     pub codes: usize,
     /// Using someone's contact code, if started.
     pub adding: Option<Adding>,
+    /// Presence pings run (this install has a rendezvous).
+    pub presence: bool,
+    /// This install appears offline to its contacts.
+    pub appear_offline: bool,
 }
 
 struct Inner {
@@ -164,6 +176,7 @@ struct Inner {
     saved: Saved,
     codes: Vec<Code>,
     adding: Option<Adding>,
+    board: Board,
 }
 
 /// This install's contacts, shared by the HTTP listeners, the rendezvous
@@ -173,6 +186,8 @@ pub struct Contacts {
     inner: Arc<Mutex<Inner>>,
     persons: Persons,
     host: Arc<HostKey>,
+    timing: Timing,
+    presence_on: Arc<AtomicBool>,
 }
 
 impl Contacts {
@@ -199,9 +214,12 @@ impl Contacts {
                 saved,
                 codes: Vec::new(),
                 adding: None,
+                board: Board::default(),
             })),
             persons,
             host: Arc::new(HostKey::from_secret(host.secret())),
+            timing: Timing::default(),
+            presence_on: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -224,6 +242,7 @@ impl Contacts {
                     nickname: c.nickname.clone(),
                     devices: c.devices.len(),
                     added_ms: c.added_ms,
+                    presence: g.board.view(&c.id, now_ms, &self.timing),
                 })
                 .collect(),
             requests: g
@@ -240,6 +259,8 @@ impl Contacts {
                 .collect(),
             codes: g.codes.iter().filter(|c| c.claim.is_none()).count(),
             adding: g.adding.clone(),
+            presence: self.presence_on.load(Ordering::SeqCst),
+            appear_offline: g.saved.appear_offline,
         }
     }
 
@@ -320,8 +341,151 @@ impl Contacts {
         if g.saved.contacts.len() == before {
             return Err("no such contact".into());
         }
+        g.board.forget(id);
         info!(person = %id, "removed a contact");
         g.save().map_err(|e| e.to_string())
+    }
+
+    /// Use `timing` for presence (tests shorten it).
+    pub fn with_timing(mut self, timing: Timing) -> Self {
+        self.timing = timing;
+        self
+    }
+
+    /// Presence's timing.
+    pub fn timing(&self) -> Timing {
+        self.timing
+    }
+
+    /// Presence pings run from now on ([`crate::presence::spawn`]).
+    pub fn presence_started(&self) {
+        self.presence_on.store(true, Ordering::SeqCst);
+    }
+
+    /// Registered with the rendezvous: ping every contact install.
+    pub fn presence_registered(&self) {
+        self.lock().board.registered();
+    }
+
+    /// The home is open: ping every contact install, at most every
+    /// [`Timing::look`].
+    pub fn look(&self, now_ms: u64) {
+        self.lock().board.look(now_ms, &self.timing);
+    }
+
+    /// Appear offline (or stop): no pings out, none answered.
+    pub fn set_appear_offline(&self, on: bool) -> Result<(), String> {
+        let mut g = self.lock();
+        g.saved.appear_offline = on;
+        if !on {
+            g.board.sweep();
+        }
+        info!(appear_offline = on, "presence setting changed");
+        g.save().map_err(|e| e.to_string())
+    }
+
+    /// Who pings: this install.
+    pub fn me(&self) -> Me {
+        let name = self.persons.name();
+        let device = self.persons.view(crate::wall_ms()).device_name;
+        Me {
+            key: HostKey::from_secret(self.host.secret()),
+            cert: self.persons.cert(),
+            name,
+            device,
+        }
+    }
+
+    /// The contact installs to ping at `now_ms` (their key, their person
+    /// id), marked as pinged; none while appearing offline.
+    pub fn presence_due(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, String)> {
+        let mut g = self.lock();
+        if g.saved.appear_offline {
+            return Vec::new();
+        }
+        let mut keys = std::collections::HashMap::new();
+        let installs: Vec<(String, String)> = g
+            .saved
+            .contacts
+            .iter()
+            .flat_map(|c| c.devices.iter().map(move |d| (c.id.clone(), d)))
+            .filter_map(|(person, d)| {
+                let key: [u8; 32] = unb64(&d.device)?.try_into().ok()?;
+                let id = device_id(&key);
+                keys.insert(id.clone(), key);
+                Some((id, person))
+            })
+            .collect();
+        let due = g.board.due(&installs, now_ms, &self.timing);
+        due.into_iter()
+            .filter_map(|d| {
+                let person = installs.iter().find(|(i, _)| *i == d)?.1.clone();
+                Some((castcorder_link::HostId(*keys.get(&d)?), person))
+            })
+            .collect()
+    }
+
+    /// What a ping to `device` (of `person`) brought back at `now_ms`.
+    pub fn presence_result(
+        &self,
+        device: &str,
+        person: &str,
+        r: Result<PresenceAnswer, String>,
+        now_ms: u64,
+    ) {
+        let mut g = self.lock();
+        if !g.saved.contacts.iter().any(|c| c.id == person) {
+            return;
+        }
+        match r {
+            Ok(a) => g
+                .board
+                .heard(device, person, &crate::http::clean_label(&a.device), now_ms),
+            // Refused by the rendezvous's rate limit: nothing learned.
+            Err(e) if e.starts_with(castcorder_link::wire::code::RATE_LIMITED) => {}
+            Err(_) => g.board.gone(device, now_ms),
+        }
+    }
+
+    /// Answer a presence ping (an opened offer with `presence` set): only
+    /// from an app install of a current contact's person, and only while
+    /// not appearing offline; `None` means no answer at all. The asking
+    /// install is online; one not known yet is kept as the contact's.
+    pub fn answer_presence(&self, o: &OfferPlain, now_ms: u64) -> Option<PresenceAnswer> {
+        let ping = o.presence.as_ref()?;
+        let (key, person) = match crate::presence::verify_ping(o, &self.host.id().encode(), now_ms)
+        {
+            Ok(k) => k,
+            Err(why) => {
+                debug!(why = %why, "presence ping not answered");
+                return None;
+            }
+        };
+        let id = person_id(&person);
+        let me = self.me();
+        let mut g = self.lock();
+        if g.saved.appear_offline {
+            return None;
+        }
+        let c = g.saved.contacts.iter_mut().find(|c| c.id == id)?;
+        let cert = o.cert.clone()?;
+        if !c.devices.iter().any(|d| d.device == cert.device) {
+            c.devices.push(cert);
+            info!(person = %id, device = %device_id(&key), "learned another install of a contact");
+            if let Err(e) = g.save() {
+                warn!(error = %e, "could not save the contact's new install");
+            }
+        }
+        g.board.heard(
+            &device_id(&key),
+            &id,
+            &crate::http::clean_label(&ping.device),
+            now_ms,
+        );
+        Some(PresenceAnswer {
+            name: me.name,
+            device: me.device,
+        })
     }
 
     /// Open a sealed contact request (`POST /contact`) and seal the answer;
@@ -430,6 +594,7 @@ impl Contacts {
         }
         let mut g = self.lock();
         g.upsert(person, &grant.name, &grant.cert, now_ms);
+        g.board.sweep();
         g.save().map_err(|e| e.to_string())?;
         info!(person = %person_id(&person), "added a contact");
         Ok(grant.name.clone())
@@ -522,6 +687,7 @@ impl Inner {
             ClaimState::Accepted => {
                 self.codes.remove(i);
                 self.upsert(claim.person, &claim.name, &claim.cert, now_ms);
+                self.board.sweep();
                 if let Err(e) = self.save() {
                     warn!(error = %e, "could not save the new contact");
                 }
@@ -572,6 +738,7 @@ pub fn request_contact(
                 code: code.secret_text(),
                 name: name.to_string(),
             }),
+            presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
         let (sealed, guest) = GuestSeal::seal(&code.host, eph, to_json(&plain).as_bytes())
@@ -597,7 +764,10 @@ pub fn request_contact(
             AnswerPlain::Contact(ContactAnswer::Refused(why)) | AnswerPlain::Rejected(why) => {
                 return Err(why);
             }
-            AnswerPlain::Sdp(_) | AnswerPlain::Status(_) | AnswerPlain::Link(_) => {
+            AnswerPlain::Sdp(_)
+            | AnswerPlain::Status(_)
+            | AnswerPlain::Link(_)
+            | AnswerPlain::Presence(_) => {
                 return Err("the other app is too old to add contacts".into());
             }
         }

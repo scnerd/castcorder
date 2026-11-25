@@ -221,6 +221,29 @@ pub struct OfferPlain {
     /// answers [`AnswerPlain::Contact`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<ContactAsk>,
+    /// A presence ping, not an offer (ADR 0005): `secret` is ignored, `name`
+    /// is the asking person's name, `sdp` is a fresh random nonce the proof
+    /// signs, and `cert` must be the asking app install's certificate. Only
+    /// a contact's install is answered, with [`AnswerPlain::Presence`];
+    /// anyone else gets no answer at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PresencePing>,
+}
+
+/// A presence ping from one of a contact's app installs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresencePing {
+    /// The asking install's device name.
+    pub device: String,
+}
+
+/// The answer to a presence ping: the answering install is online.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceAnswer {
+    /// The answering person's name.
+    pub name: String,
+    /// The answering install's device name.
+    pub device: String,
 }
 
 /// A person asks to become a contact of the person whose app install made a
@@ -309,6 +332,8 @@ pub enum AnswerPlain {
     Link(LinkAnswer),
     /// The answer to a contact request ([`OfferPlain::contact`]).
     Contact(ContactAnswer),
+    /// The answer to a presence ping ([`OfferPlain::presence`]).
+    Presence(PresenceAnswer),
 }
 
 /// What a host tells a device about the rooms it was in (a status query).
@@ -532,6 +557,26 @@ mod tests {
         assert_eq!(asked.contact.unwrap().name, "Bob");
         let plain: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert!(!to_json(&plain).contains("contact"));
+        // Presence pings and their answers.
+        assert!(plain.presence.is_none() && !to_json(&plain).contains("presence"));
+        let ping: OfferPlain =
+            from_json(r#"{"secret":"","name":"Bob","sdp":"x","presence":{"device":"Laptop"}}"#)
+                .unwrap();
+        assert_eq!(
+            ping.presence,
+            Some(PresencePing {
+                device: "Laptop".into()
+            })
+        );
+        let pa = AnswerPlain::Presence(PresenceAnswer {
+            name: "Ann".into(),
+            device: "Desk".into(),
+        });
+        assert_eq!(
+            to_json(&pa),
+            r#"{"presence":{"name":"Ann","device":"Desk"}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
         // An offer from an older page (no device, no password) still parses.
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));

@@ -790,6 +790,7 @@ dependencies = [
  "castcorder-port-disk",
  "castcorder-port-net",
  "castcorder-protocol",
+ "castcorder-rendezvous",
  "castcorder-transfer",
  "castcorder-transport",
  "serde_json",
@@ -800,6 +801,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-deep-link",
  "tauri-plugin-single-instance",
+ "tokio",
  "tracing",
 ]
 
