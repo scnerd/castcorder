@@ -8,7 +8,8 @@
     "category": "Music",
     "licenseFile": "../../../LICENSE-MIT",
     "resources": {
-      "client": "client"
+      "client": "client",
+      "licenses/third-party": "licenses/third-party"
     },
     "windows": {
       "nsis": {

@@ -95,6 +95,20 @@ fn the_bundled_models_folder_gives_a_transcriber_that_keeps_the_contract() {
         std::fs::copy(&path, dir.join(name)).unwrap();
     }
     let mut w = castcorder_transcribe::load_best(&dir).unwrap();
+    let kept = w
+        .model()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    eprintln!("load_best kept {kept}");
+    // CASTCORDER_EXPECT_GPU=0 (CI: no GPU) or 1 (a machine with one) says
+    // which it must have kept.
+    match std::env::var("CASTCORDER_EXPECT_GPU").as_deref() {
+        Ok("0") => assert_eq!(kept, castcorder_transcribe::CPU_MODEL),
+        Ok("1") => assert_eq!(kept, castcorder_transcribe::GPU_MODEL),
+        _ => {}
+    }
     check(&mut w, &speech());
     let _ = std::fs::remove_dir_all(&dir);
 }

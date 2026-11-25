@@ -259,6 +259,13 @@ jobs:
       - name: Install tauri-cli
         run: cargo binstall tauri-cli --version "^2" --no-confirm --locked
 
+      - name: Install cargo-about
+        run: cargo binstall cargo-about --no-confirm --locked
+
+      # Every Rust crate's licence, beside the other notices the installers ship.
+      - name: Third-party licences
+        run: task app:licenses FEATURES=${{ matrix.features }}
+
       - name: Stage the bundled GStreamer (Windows, macOS)
         if: matrix.name != 'linux'
         run: task app:gst:stage
@@ -299,6 +306,9 @@ jobs:
           if (-not (Test-Path "$dir/client/index.html")) { throw 'client not installed' }
           if (-not (Test-Path "$dir/gstreamer-1.0-0.dll")) { throw 'GStreamer not installed' }
           if (-not (Test-Path "$dir/licenses/gstreamer/NOTICE.txt")) { throw 'GStreamer notice not installed' }
+          foreach ($n in 'rust-crates.html', 'whisper.cpp-and-ggml-LICENSE.txt', 'libopus-COPYING.txt', 'openai-whisper-models-LICENSE.txt') {
+            if (-not (Test-Path "$dir/licenses/third-party/$n")) { throw "licence notice $n not installed" }
+          }
           foreach ($m in 'ggml-small.en-q5_1.bin', 'ggml-base.en-q8_0.bin') {
             if (-not (Test-Path "$dir/models/$m")) { throw "transcription model $m not installed" }
           }

@@ -4,3 +4,4 @@
 /gstreamer/
 # The transcription models task app:models fetches for the installers.
 /models/
+/licenses/third-party/rust-crates.html

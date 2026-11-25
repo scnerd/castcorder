@@ -129,6 +129,7 @@ jobs:
         env:
           CASTCORDER_WHISPER_MODEL: ${{ runner.temp }}/whisper-models/ggml-base.en.bin
           CASTCORDER_REQUIRE_WHISPER: "1"
+          CASTCORDER_EXPECT_GPU: "0"
 
       # The installers' Vulkan build of whisper.cpp on a runner with no GPU: it
       # must fall back to the CPU, not abort (cast-7hm.4). CPU only by design.
@@ -141,6 +142,7 @@ jobs:
         env:
           CASTCORDER_WHISPER_MODEL: ${{ runner.temp }}/whisper-models/ggml-base.en.bin
           CASTCORDER_REQUIRE_WHISPER: "1"
+          CASTCORDER_EXPECT_GPU: "0"
 
   # The desktop app's Tauri shell (castcorder-app --features desktop): clippy, its
   # tests, and a smoke run under a virtual display. Kept out of `task check`

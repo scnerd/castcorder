@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Castcorder: third-party licences (Rust crates)</title>
+<style>body{font-family:sans-serif;max-width:60em;margin:2em auto;padding:0 1em}pre{white-space:pre-wrap;background:#f4f4f4;padding:1em}</style></head>
+<body>
+<h1>Third-party licences: Rust crates</h1>
+<p>Castcorder is MIT OR Apache-2.0. It links the crates below, each under the licence shown.
+whisper.cpp and ggml, libopus, the Whisper models and GStreamer have their own notices beside this file.</p>
+<p>Crates under the Mozilla Public License 2.0 (Tauri's CSS parsing: cssparser, cssparser-macros, selectors, dtoa-short; and option-ext) are used unmodified; their source code is available from crates.io, at https://crates.io/crates/&lt;name&gt;.</p>
+<ul>
+{{#each overview}}<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+{{#each licenses}}
+<h2 id="{{id}}">{{name}}</h2>
+<p>Used by:</p>
+<ul>{{#each used_by}}<li>{{crate.name}} {{crate.version}}</li>{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

@@ -263,6 +263,18 @@ tasks:
     cmds:
       - uv run ../scripts/fetch_models.py
 
+  app:licenses:
+    desc: Gather the licences of every Rust crate the desktop app links into crates/castcorder-app/licenses/third-party/rust-crates.html (cargo-about)
+    summary: |
+      The installers ship crates/castcorder-app/licenses/third-party (this file
+      plus the notices for whisper.cpp and ggml, libopus and the Whisper
+      models). Fails on a crate whose licence about.toml does not accept.
+      Needs cargo-about (cargo binstall cargo-about). Pass the build's FEATURES.
+    vars:
+      FEATURES: '{{.FEATURES | default "desktop,native-capture,project-rendezvous,vulkan"}}'
+    cmds:
+      - cd crates/castcorder-app && cargo about generate --locked --features {{.FEATURES}} --fail -o licenses/third-party/rust-crates.html about.hbs
+
   app:icons:
     desc: Render the app icons (crates/castcorder-app/icons) from their SVG sources in icons/src
     summary: |

@@ -98,19 +98,39 @@ const QUIET_RMS: f32 = 0.003;
 
 /// whisper.cpp with one loaded model; see the crate docs.
 pub struct Whisper {
-    // The state borrows nothing from the context in whisper-rs 0.16 (it
-    // holds its own reference), but keep the context alive beside it.
-    _ctx: WhisperContext,
-    state: WhisperState,
+    /// The state, then its context (dropped in that order, under [`ENGINE`]).
+    inner: Option<(WhisperState, WhisperContext)>,
     threads: i32,
+    model: std::path::PathBuf,
+}
+
+/// whisper.cpp is used by one thread at a time in this process: two models
+/// running at once on the Vulkan backend crash it (an access violation, seen
+/// on Windows with an RTX 3090). Loading, transcribing and freeing all hold
+/// this. The host runs one transcriber anyway; this keeps tests and any
+/// later second one safe.
+static ENGINE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn engine() -> std::sync::MutexGuard<'static, ()> {
+    ENGINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Drop for Whisper {
+    fn drop(&mut self) {
+        let _one = engine();
+        drop(self.inner.take());
+    }
 }
 
 impl Whisper {
     /// Load the ggml model at `path`.
     pub fn load(path: &Path, device: Device) -> Result<Self, String> {
+        let _one = engine();
         whisper_rs::install_logging_hooks();
         let mut params = WhisperContextParameters::default();
-        params.use_gpu(device == Device::Auto && cfg!(feature = "vulkan"));
+        params.use_gpu(device == Device::Auto && cfg!(any(feature = "vulkan", feature = "metal")));
         let path_str = path
             .to_str()
             .ok_or_else(|| format!("model path is not UTF-8: {}", path.display()))?;
@@ -123,10 +143,15 @@ impl Whisper {
             .map(|n| n.get().clamp(1, 8) as i32)
             .unwrap_or(4);
         Ok(Whisper {
-            _ctx: ctx,
-            state,
+            inner: Some((state, ctx)),
             threads,
+            model: path.to_path_buf(),
         })
+    }
+
+    /// The model file this runs.
+    pub fn model(&self) -> &Path {
+        &self.model
     }
 }
 
@@ -182,12 +207,14 @@ impl Transcriber for Whisper {
         // for a short utterance (much faster; a little padding for safety).
         let secs = audio.len() as f32 / SAMPLE_RATE as f32;
         p.set_audio_ctx(((secs * 50.0) as i32 + 64).min(1500));
-        self.state
+        let _one = engine();
+        let state = &mut self.inner.as_mut().ok_or("the model is closed")?.0;
+        state
             .full(p, audio)
             .map_err(|e| format!("transcription failed: {e}"))?;
         let len_ms = pcm.len() as u64 * 1000 / u64::from(SAMPLE_RATE);
         let mut out = Vec::new();
-        for seg in self.state.as_iter() {
+        for seg in state.as_iter() {
             if seg.no_speech_probability() >= NO_SPEECH {
                 continue;
             }
