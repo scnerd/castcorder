@@ -1209,11 +1209,28 @@ impl Call {
         info!(room = %self.room_name, call = ?self.call_id, take = take.0, host_us, video, "take started");
         self.calls_dirty = true;
         self.touch_due_us = 0;
-        let dir = match self.library.as_mut().map(|l| l.take_dir(take).cloned()) {
-            Some(Ok(d)) => Ok(d),
-            Some(Err(e)) => Err(e),
-            None => Err(std::io::Error::other("no call is open")),
-        };
+        // Tell the guests first: they start recording when this arrives, and
+        // creating the take directory (mkdir, manifest, directory fsync) took
+        // 80-137 ms on a loaded machine. The host's own capture and safety
+        // tracks start once the directory is ready, as they always did; the
+        // stamped host_us is unchanged. If the directory cannot be made the
+        // take still runs for guests (their tracks arrive later) and the host
+        // says so below.
+        let dir = announce_then_prepare(
+            self,
+            |c| {
+                c.broadcast();
+                info!(
+                    take = take.0,
+                    after_start_us = c.timeline.now_us() - host_us,
+                    "take start broadcast"
+                );
+            },
+            |c| match c.library.as_mut().map(|l| l.take_dir(take).cloned()) {
+                Some(r) => r,
+                None => Err(std::io::Error::other("no call is open")),
+            },
+        );
         match dir {
             Ok(dir) => {
                 self.safety.start_take(take.0, dir.clone());
@@ -1228,12 +1245,6 @@ impl Call {
                 warn!(take = take.0, error = %e, "no take directory; safety tracks and host microphone not recorded")
             }
         }
-        self.broadcast();
-        info!(
-            take = take.0,
-            after_start_us = self.timeline.now_us() - host_us,
-            "take start broadcast"
-        );
         // Everyone is Starting until their device acks: said at once, so
         // producers see it however soon the acks come.
         self.recorders.take_started(take);
@@ -1822,5 +1833,68 @@ impl Call {
                 }
             }
         }
+    }
+}
+
+/// Announce a take to the guests, then do the disk work it needs. The order
+/// is the point: guests record from the announcement, so the disk must not
+/// delay it (cast-6ma).
+fn announce_then_prepare<C, D>(
+    cx: &mut C,
+    announce: impl FnOnce(&mut C),
+    prepare: impl FnOnce(&mut C) -> std::io::Result<D>,
+) -> std::io::Result<D> {
+    announce(cx);
+    prepare(cx)
+}
+
+#[cfg(test)]
+mod start_order_tests {
+    use super::announce_then_prepare;
+    use std::time::{Duration, Instant};
+
+    struct Trace {
+        began: Instant,
+        announced_at: Option<Duration>,
+        prepared_after_announce: bool,
+    }
+
+    /// A slow disk (the 137 ms seen on a loaded runner, rounded up) must not
+    /// hold back the announcement.
+    #[test]
+    fn slow_take_dir_does_not_delay_the_announcement() {
+        let mut t = Trace {
+            began: Instant::now(),
+            announced_at: None,
+            prepared_after_announce: false,
+        };
+        let r = announce_then_prepare(
+            &mut t,
+            |t| t.announced_at = Some(t.began.elapsed()),
+            |t| {
+                t.prepared_after_announce = t.announced_at.is_some();
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(())
+            },
+        );
+        assert!(r.is_ok());
+        assert!(
+            t.prepared_after_announce,
+            "disk work ran before the announcement"
+        );
+        assert!(t.announced_at.unwrap() < Duration::from_millis(50));
+        assert!(t.began.elapsed() >= Duration::from_millis(150));
+    }
+
+    /// A failed directory is reported to the caller, after the announcement.
+    #[test]
+    fn failed_take_dir_is_returned_after_announcing() {
+        let mut announced = false;
+        let r: std::io::Result<()> = announce_then_prepare(
+            &mut announced,
+            |a| *a = true,
+            |_| Err(std::io::Error::other("disk full")),
+        );
+        assert!(announced && r.is_err());
     }
 }
