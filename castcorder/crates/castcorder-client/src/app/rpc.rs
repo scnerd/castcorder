@@ -339,11 +339,8 @@ pub(super) fn pump_rpc(ui: Ui) {
                 }
                 Event::JoinRefusedLocked { name } => {
                     info!(call = %ctx.call, device = %ctx.device, name = %name, "someone tried to join the locked call");
-                    ui.notes.update(|v| {
-                        v.push(format!(
-                            "{name} tried to join, but the call is locked. Unlock the call in the People panel to let new people in."
-                        ))
-                    });
+                    ui.notes
+                        .update(|v| crate::notes::locked_join_refused(v, &name));
                 }
             }
         }
