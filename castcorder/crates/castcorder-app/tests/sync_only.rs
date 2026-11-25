@@ -30,8 +30,8 @@ use castcorder_port_disk::{SimDisk, SimFile, Storage, StorageFile};
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::{MessageChannel, RpcClient};
 use castcorder_protocol::{
-    CallRef, ErrorKind, Event, PROTOCOL_VERSION, Request, Response, SourceId, SourceKind, TakeId,
-    TrackOffer,
+    CallRef, ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, Request, Response, RoomAction,
+    SourceId, SourceKind, TakeId, TrackOffer,
 };
 use support::TestGuest;
 
@@ -39,8 +39,21 @@ type Guest = TestGuest<UdpDatagramSocket, SystemClock>;
 type Shared = Rc<RefCell<Guest>>;
 
 fn request(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
-    let mut s = TcpStream::connect(addr).unwrap();
+    let s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    exchange(s, method, path, body)
+}
+
+/// The same over the LAN (HTTPS) listener: a guest that is not the host
+/// machine.
+fn request_lan(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+    let s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let s = castcorder_host::unverified_client("127.0.0.1", s).unwrap();
+    exchange(s, method, path, body)
+}
+
+fn exchange(mut s: impl Read + Write, method: &str, path: &str, body: &str) -> (u16, String) {
     write!(
         s,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-Castcorder-Native: 1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -71,6 +84,26 @@ fn device_of(host: &Running, key: u8) -> String {
 /// Offer to `room` from the device of `key` (sync-only or a call
 /// connection); the guest once its channels are open, or the refusal.
 fn connect(host: &Running, room: &str, key: u8, sync: bool) -> Result<Shared, (u16, String)> {
+    connect_via(host, room, key, sync, false)
+}
+
+/// The LAN listener's address (`https://ip:port/`).
+fn lan_addr(host: &Running) -> SocketAddr {
+    let link = host.lan_links()[0].clone();
+    link.trim_start_matches("https://")
+        .trim_end_matches('/')
+        .parse()
+        .unwrap()
+}
+
+/// [`connect`], through the LAN listener when `lan` (not the host machine).
+fn connect_via(
+    host: &Running,
+    room: &str,
+    key: u8,
+    sync: bool,
+    lan: bool,
+) -> Result<Shared, (u16, String)> {
     let socket = UdpDatagramSocket::bind_loopback().unwrap();
     let (mut guest, offer) = if sync {
         TestGuest::sync_only(socket, SystemClock::new())
@@ -87,12 +120,12 @@ fn connect(host: &Running, room: &str, key: u8, sync: bool) -> Result<Shared, (u
         ).unwrap(),
     })
     .to_string();
-    let (code, answer) = request(
-        host.http_addr(),
-        "POST",
-        &format!("/offer?name=g{key}&room={room}"),
-        &body,
-    );
+    let path = format!("/offer?name=g{key}&room={room}");
+    let (code, answer) = if lan {
+        request_lan(lan_addr(host), "POST", &path, &body)
+    } else {
+        request(host.http_addr(), "POST", &path, &body)
+    };
     if code != 200 {
         return Err((code, answer));
     }
@@ -439,6 +472,155 @@ fn a_guest_that_left_syncs_over_a_sync_only_connection_beside_another_rooms_call
     drop(s_rpc);
     drop(s);
     drop(b);
+    host.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Join `guest` to its room's call; its participant id and the call.
+fn join(guest: &Shared, rpc: &mut RpcClient<End>, name: &str) -> (u64, Option<CallRef>) {
+    let id = rpc
+        .send(Request::Join {
+            display_name: name.into(),
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .unwrap();
+    let Response::Joined { participant } = answer(guest, rpc, id) else {
+        panic!("{name} did not join");
+    };
+    let mut call = None;
+    let end = Instant::now() + Duration::from_secs(10);
+    while call.is_none() {
+        assert!(Instant::now() < end, "no Event::Call");
+        guest.borrow_mut().step();
+        rpc.poll().unwrap();
+        while let Some(e) = rpc.next_event() {
+            if let Event::Call(c) = e {
+                call = Some(c);
+            }
+        }
+        sleep(Duration::from_millis(1));
+    }
+    (participant.0, call)
+}
+
+#[test]
+fn a_kick_also_closes_the_kicked_devices_sync_only_connection_and_its_pull() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-kick-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dist = root.join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
+    let mut c = Config::new(dist);
+    c.library = root.join("library");
+    c.room = "show".into();
+    c.open = true;
+    c.bind = std::net::Ipv4Addr::LOCALHOST.into();
+    c.https_port = 0;
+    c.http_port = 0;
+    c.udp_port = 0;
+    c.align = None;
+    let host = castcorder_host::start(c, |_| {}).unwrap();
+    let alice = device_of(&host, 1);
+
+    // Bob is the host machine (a producer); Alice a LAN guest in the call.
+    let b = connect(&host, "show", 2, false).unwrap();
+    let mut b_rpc = rpc(&b);
+    join(&b, &mut b_rpc, "Bob");
+    let a = connect_via(&host, "show", 1, false, true).unwrap();
+    let mut a_rpc = rpc(&a);
+    let (alice_id, call) = join(&a, &mut a_rpc, "Alice");
+    let call = call.unwrap();
+    let (code, body) = request(host.http_addr(), "POST", "/take/start", "");
+    assert_eq!(code, 200, "{body}");
+    let (code, body) = request(host.http_addr(), "POST", "/take/stop", "");
+    assert_eq!(code, 200, "{body}");
+
+    // Alice's device also holds a sync-only connection, pulling a big track.
+    let s = connect_via(&host, "show", 1, true, true).expect("sync-only admitted");
+    assert_eq!(status(&host)["sync_only"].as_array().unwrap().len(), 1);
+    let disk = SimDisk::new(5);
+    let track = data(4 * 1024 * 1024 + 11);
+    let mut f = disk.open("t1.wav").unwrap();
+    f.write_at(0, &track).unwrap();
+    f.sync().unwrap();
+    let mut outbox: GuestOutbox<SimFile> = GuestOutbox::new("host", SyncConfig::default());
+    let offer = outbox
+        .add(
+            TrackOffer {
+                device: alice.clone(),
+                take: TakeId(1),
+                source: SourceId("mic".into()),
+                kind: SourceKind::Audio,
+                name: "t1".into(),
+                size: 0,
+                root: [0; 32],
+                format: "wav".into(),
+            },
+            disk.open("t1.wav").unwrap(),
+        )
+        .unwrap();
+    let mut s_rpc = rpc(&s);
+    let id = s_rpc
+        .send(Request::OfferCallTrack {
+            call: call.clone(),
+            offer,
+        })
+        .unwrap();
+    assert!(matches!(
+        answer(&s, &mut s_rpc, id),
+        Response::TrackAccepted { .. }
+    ));
+    let mut data_end = End {
+        guest: s.clone(),
+        data: true,
+    };
+    // The pull is under way (a few chunks), not finished.
+    for _ in 0..5 {
+        s.borrow_mut().step();
+        b.borrow_mut().step();
+        a.borrow_mut().step();
+        assert!(
+            outbox.pump(&mut data_end, 64 * 1024).unwrap().is_empty(),
+            "the pull must still be in progress"
+        );
+        sleep(Duration::from_millis(1));
+    }
+
+    // Bob kicks Alice: her call connection and her sync-only connection go.
+    let id = b_rpc
+        .send(Request::Room(RoomAction::Kick {
+            participant: ParticipantId(alice_id),
+        }))
+        .unwrap();
+    assert!(matches!(answer(&b, &mut b_rpc, id), Response::Done));
+    let end = Instant::now() + Duration::from_secs(20);
+    while !status(&host)["sync_only"].as_array().unwrap().is_empty() {
+        assert!(
+            Instant::now() < end,
+            "the kicked device's sync-only connection is still there"
+        );
+        s.borrow_mut().step();
+        b.borrow_mut().step();
+        a.borrow_mut().step();
+        let _ = outbox.pump(&mut data_end, 64 * 1024);
+        sleep(Duration::from_millis(5));
+    }
+    // Nothing of the interrupted pull counts as landed.
+    let manifest = std::fs::read_to_string(
+        root.join("library")
+            .join("show")
+            .join(&call.call)
+            .join("take01")
+            .join("manifest.jsonl"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !manifest
+            .lines()
+            .any(|l| l.starts_with("{\"Verified\"") && l.contains(&alice)),
+        "{manifest}"
+    );
+    drop((s_rpc, data_end, s, a_rpc, a, b_rpc, b));
     host.stop();
     let _ = std::fs::remove_dir_all(&root);
 }

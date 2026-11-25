@@ -246,6 +246,16 @@ impl Call {
         }
     }
 
+    /// The sync-only connections that came through the loaded room and whose
+    /// device it now bans (after a kick): removed, which ends any pull.
+    pub(super) fn banned_syncers(&self) -> Vec<GuestId> {
+        self.syncers
+            .iter()
+            .filter(|(_, s)| s.room == self.room_name && self.room.banned(&s.device, None))
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Before the open call closes or another opens: while sync-only
     /// connections may be filing into it, keep its library under its key,
     /// so one library serves its folder.
