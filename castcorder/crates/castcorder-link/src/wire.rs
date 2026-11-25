@@ -244,6 +244,10 @@ pub struct OfferPlain {
 pub struct PresencePing {
     /// The asking install's device name.
     pub device: String,
+    /// The asking person's device revocations (cast-40e.6), for the
+    /// contact to learn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 /// The answer to a presence ping: the answering install is online.
@@ -253,6 +257,9 @@ pub struct PresenceAnswer {
     pub name: String,
     /// The answering install's device name.
     pub device: String,
+    /// The answering person's device revocations (cast-40e.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 /// A person asks to become a contact of the person whose app install made a
@@ -321,6 +328,10 @@ pub struct LinkGrant {
     /// The person key's secret, base64url: for an app install only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_secret: Option<String>,
+    /// The person's device revocations so far (cast-40e.6), for an app
+    /// install to keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 fn is_false(b: &bool) -> bool {

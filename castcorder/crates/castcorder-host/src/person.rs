@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 
 use castcorder_link::identity::{self, device_id};
 use castcorder_link::person::{
-    DeviceCert, DeviceKind, LinkCode, PersonKey, fingerprint, verify_cert,
+    DeviceCert, DeviceKind, LinkCode, PersonKey, Revocation, fingerprint, verify_cert,
+    verify_revocation,
 };
 use castcorder_link::wire::{
     AnswerPlain, LinkAnswer, LinkAsk, LinkGrant, OfferPlain, b64, from_json, to_json, unb64,
@@ -75,6 +76,9 @@ struct Saved {
     cert: DeviceCert,
     #[serde(default)]
     devices: Vec<LinkedDevice>,
+    /// This person's device revocations (cast-40e.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revoked: Vec<Revocation>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -155,6 +159,8 @@ struct Inner {
     saved: Saved,
     codes: Vec<Code>,
     joining: Option<Joining>,
+    /// Devices contacts' persons revoked (learned by [`crate::contact`]).
+    foreign_revoked: std::collections::BTreeSet<String>,
 }
 
 /// This install's person, shared by the HTTP listeners, the rendezvous
@@ -213,6 +219,7 @@ impl Persons {
                     device_name: device_name_default(),
                     cert: person.certify(&host_pub, DeviceKind::App, now_ms),
                     devices: Vec::new(),
+                    revoked: Vec::new(),
                 };
                 write_atomic(&path, &serde_json::to_string_pretty(&saved)?)?;
                 info!(person = %person.id(), "made a person key");
@@ -226,6 +233,7 @@ impl Persons {
             saved,
             codes: Vec::new(),
             joining: None,
+            foreign_revoked: Default::default(),
         }))))
     }
 
@@ -260,12 +268,52 @@ impl Persons {
             return false;
         };
         match verify_cert(cert, device) {
-            Ok(p) => p == self.lock().person.public(),
+            Ok(p) => {
+                let g = self.lock();
+                p == g.person.public() && !g.own_revoked(&device_id(device))
+            }
             Err(e) => {
                 warn!(reason = e.reason(), "device certificate refused");
                 false
             }
         }
+    }
+
+    /// Revoke one of this person's devices (cast-40e.6), by device id: it is
+    /// no longer the owner's anywhere this install decides, it leaves the
+    /// devices linked from here, and the revocation goes to contacts with
+    /// the next presence pings. Not this install itself.
+    pub fn revoke(&self, device: &str, now_ms: u64) -> Result<(), String> {
+        let mut g = self.lock();
+        if device == device_id(&g.host.id().0) {
+            return Err("this install cannot revoke itself".into());
+        }
+        if !device.starts_with('k') || device.len() < 8 {
+            return Err("not a device id".into());
+        }
+        g.saved.devices.retain(|d| d.id != device);
+        if !g.own_revoked(device) {
+            let r = g.person.revoke(device, now_ms);
+            g.saved.revoked.push(r);
+        }
+        info!(device, "revoked a device");
+        g.save().map_err(|e| e.to_string())
+    }
+
+    /// This person's revocations, to send to contacts and new app installs.
+    pub fn revocations(&self) -> Vec<Revocation> {
+        self.lock().saved.revoked.clone()
+    }
+
+    /// Whether `device` (an id) was revoked by this person or a contact's.
+    pub fn is_revoked(&self, device: &str) -> bool {
+        let g = self.lock();
+        g.own_revoked(device) || g.foreign_revoked.contains(device)
+    }
+
+    /// Note devices a contact's person revoked (already verified).
+    pub fn note_revoked(&self, devices: impl IntoIterator<Item = String>) {
+        self.lock().foreign_revoked.extend(devices);
     }
 
     /// The person as the host machine's page shows it.
@@ -410,6 +458,12 @@ impl Persons {
         g.saved.key = b64(&person.secret());
         g.saved.name = grant.person_name.clone();
         g.saved.cert = grant.cert.clone();
+        g.saved.revoked = grant
+            .revoked
+            .iter()
+            .filter(|r| verify_revocation(r).ok() == Some(person.public()))
+            .cloned()
+            .collect();
         g.person = person;
         g.codes.clear();
         g.save().map_err(|e| e.to_string())
@@ -465,6 +519,10 @@ impl Persons {
 }
 
 impl Inner {
+    fn own_revoked(&self, device: &str) -> bool {
+        self.saved.revoked.iter().any(|r| r.device == device)
+    }
+
     fn save(&self) -> io::Result<()> {
         write_atomic(&self.path, &serde_json::to_string_pretty(&self.saved)?)
     }
@@ -529,6 +587,11 @@ impl Inner {
                     // Only an app install holds the person key.
                     person_secret: (claim.kind == DeviceKind::App)
                         .then(|| b64(&self.person.secret())),
+                    revoked: if claim.kind == DeviceKind::App {
+                        self.saved.revoked.clone()
+                    } else {
+                        Vec::new()
+                    },
                 })
             }
         }

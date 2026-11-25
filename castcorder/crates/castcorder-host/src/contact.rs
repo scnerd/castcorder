@@ -43,7 +43,8 @@ use std::time::Instant;
 
 use castcorder_link::identity::{self, device_id};
 use castcorder_link::person::{
-    ContactCode, DeviceCert, DeviceKind, fingerprint, person_id, verify_cert,
+    ContactCode, DeviceCert, DeviceKind, Revocation, fingerprint, person_id, verify_cert,
+    verify_revocation,
 };
 use castcorder_link::wire::{
     AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, PresenceAnswer, b64,
@@ -77,6 +78,33 @@ pub struct Contact {
     pub devices: Vec<DeviceCert>,
     /// When they were added, ms since the Unix epoch.
     pub added_ms: u64,
+    /// Their devices their person revoked (cast-40e.6), by device id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<String>,
+}
+
+/// Keep the revocations in `list` that `c`'s person key signed: record them
+/// and drop those installs from `c`'s devices. The device ids newly revoked.
+fn learn_revoked(c: &mut Contact, list: &[Revocation]) -> Vec<String> {
+    let Some(key) = unb64(&c.key).and_then(|k| <[u8; 32]>::try_from(k).ok()) else {
+        return Vec::new();
+    };
+    let mut new = Vec::new();
+    for r in list {
+        if verify_revocation(r).ok() != Some(key) || c.revoked.contains(&r.device) {
+            continue;
+        }
+        c.revoked.push(r.device.clone());
+        new.push(r.device.clone());
+    }
+    if !new.is_empty() {
+        c.devices.retain(|d| {
+            d.device_key()
+                .is_none_or(|k| !new.contains(&device_id(&k)))
+        });
+        info!(person = %c.id, devices = ?new, "a contact revoked devices");
+    }
+    new
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -225,6 +253,12 @@ impl Contacts {
                 }
             },
         };
+        persons.note_revoked(
+            saved
+                .contacts
+                .iter()
+                .flat_map(|c| c.revoked.iter().cloned()),
+        );
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
                 path,
@@ -520,6 +554,7 @@ impl Contacts {
             cert: self.persons.cert(),
             name,
             device,
+            revoked: self.persons.revocations(),
         }
     }
 
@@ -565,9 +600,23 @@ impl Contacts {
             return;
         }
         match r {
-            Ok(a) => g
-                .board
-                .heard(device, person, &crate::http::clean_label(&a.device), now_ms),
+            Ok(a) => {
+                let new = g
+                    .saved
+                    .contacts
+                    .iter_mut()
+                    .find(|c| c.id == person)
+                    .map(|c| learn_revoked(c, &a.revoked))
+                    .unwrap_or_default();
+                if !new.is_empty() {
+                    if let Err(e) = g.save() {
+                        warn!(error = %e, "could not save a contact's revocations");
+                    }
+                    self.persons.note_revoked(new);
+                }
+                g.board
+                    .heard(device, person, &crate::http::clean_label(&a.device), now_ms)
+            }
             // Refused by the rendezvous's rate limit: nothing learned.
             Err(e) if e.starts_with(castcorder_link::wire::code::RATE_LIMITED) => {}
             Err(_) => g.board.gone(device, now_ms),
@@ -595,14 +644,23 @@ impl Contacts {
             return None;
         }
         let c = g.saved.contacts.iter_mut().find(|c| c.id == id)?;
+        let new = learn_revoked(c, &ping.revoked);
+        if c.revoked.contains(&device_id(&key)) {
+            debug!(person = %id, "presence ping from a revoked install not answered");
+            return None;
+        }
         let cert = o.cert.clone()?;
-        if !c.devices.iter().any(|d| d.device == cert.device) {
+        let learned = !c.devices.iter().any(|d| d.device == cert.device);
+        if learned {
             c.devices.push(cert);
             info!(person = %id, device = %device_id(&key), "learned another install of a contact");
-            if let Err(e) = g.save() {
-                warn!(error = %e, "could not save the contact's new install");
-            }
         }
+        if (learned || !new.is_empty())
+            && let Err(e) = g.save()
+        {
+            warn!(error = %e, "could not save the contact");
+        }
+        self.persons.note_revoked(new);
         g.board.heard(
             &device_id(&key),
             &id,
@@ -612,6 +670,7 @@ impl Contacts {
         Some(PresenceAnswer {
             name: me.name,
             device: me.device,
+            revoked: me.revoked,
         })
     }
 
@@ -642,6 +701,10 @@ impl Contacts {
             debug!(person = %id, "contact link not answered: not a contact");
             return None;
         };
+        if c.revoked.contains(&device_id(&key)) {
+            debug!(person = %id, "contact link from a revoked install not answered");
+            return None;
+        }
         let cert = o.cert.clone()?;
         if !c.devices.iter().any(|d| d.device == cert.device) {
             c.devices.push(cert);
@@ -833,6 +896,7 @@ impl Inner {
                 nickname: String::new(),
                 devices: vec![cert.clone()],
                 added_ms: now_ms,
+                revoked: Vec::new(),
             }),
         }
     }
