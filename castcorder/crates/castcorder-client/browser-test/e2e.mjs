@@ -370,7 +370,7 @@ try {
   if (MODE !== 'fallback' && want('takeinfo')) await takeInfoChecks();
   if (MODE === 'chromium' && want('transcript')) await transcriptChecks();
   if (MODE !== 'fallback' && want('rooms')) await roomsChecks();
-  if (FULL && want('rejoin')) await rejoinChecks();
+  if ((FULL || MODE === 'firefox') && want('rejoin')) await rejoinChecks();
   if (FULL && want('joinfail')) await joinFailChecks();
   if (MODE !== 'fallback' && want('lobby')) await lobbyChecks();
   // Every mode: in fallback the backups take the AudioWorklet path too.

@@ -22,7 +22,7 @@ import { openGuest } from './guest.mjs';
 // `rendezvous` (host:port): use that one (system.mjs passes the Worker under
 // wrangler dev, cast-lxt.8) instead of starting a castcorder-rendezvous.
 export async function rejoinChecks({ rendezvous } = {}) {
-  const { exe, dist, RESULTS } = ctx;
+  const { MODE, exe, dist, RESULTS } = ctx;
   const RV_EXE = join(exe, '..', process.platform === 'win32' ? 'castcorder-rendezvous.exe' : 'castcorder-rendezvous');
   if (!rendezvous && !existsSync(RV_EXE)) { check(false, 'rejoin: missing ' + RV_EXE); return; }
   const LIB = join(RESULTS, 'library-rejoin' + (rendezvous ? '-rv' : ''));
@@ -39,7 +39,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
     const rv = out(ctx.rv8, 'rv8');
     RV = (await waitFor(() => rv.out.match(/RENDEZVOUS_READY http=(\S+)/), 'RENDEZVOUS_READY', 20000))[1];
   }
-  ctx.host8 = spawn(exe, ['--dist', dist, '--library', LIB, '--room', 'rejoin-show', '--bind', '127.0.0.1',
+  ctx.host8 = spawn(exe, ['--dist', dist, '--library', LIB, '--room', 'rejoin-show', '--bind', MODE === 'firefox' ? '0.0.0.0' : '127.0.0.1',
     '--port', '0', '--http-port', '0', '--udp-port', '0', '--rendezvous', 'http://' + RV], { stdio: ['ignore', 'pipe', 'pipe'] });
   const h = out(ctx.host8, 'host8');
   const HTTP = (await waitFor(() => h.out.match(/HOST_READY http=(\S+)/), 'HOST_READY', 20000))[1];
