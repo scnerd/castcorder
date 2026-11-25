@@ -134,6 +134,8 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   }, 'contacts: the home shows the rooms Bob shares', 30000, 250);
   check(line.startsWith('No rooms you share') || line.startsWith('Rooms you share'),
     'contacts: the home asked Bob over a contact link: ' + line);
+  // Back to Rooms: the room's card (and its open People panel) is there.
+  await page.click('#nav-rooms');
   await card.locator('.untrust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 0, 'contacts: the room no longer trusts Bob', 15000);
   check(true, 'contacts: trust taken back on the room card');
