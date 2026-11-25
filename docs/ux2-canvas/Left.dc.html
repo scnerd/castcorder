@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>After leaving</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:Inter,system-ui,sans-serif;color:#15181d;background:#f3f4f6}
+a{color:#1d4ed8}a:hover{color:#1e3a8a}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 18px;border-radius:10px;border:1px solid #cfd4dc;background:#fff;color:#15181d;font:600 14px Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap;text-decoration:none}
+.btn.primary{background:#1d4ed8;border-color:#1d4ed8;color:#fff}
+.muted{color:#555c66}
+.card{background:#fff;border:1px solid #dde1e7;border-radius:16px}
+.row{display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #eef0f3;font-size:14px}
+</style>
+</helmet>
+<div style="min-height: 800px; display: flex; flex-direction: column; background: #f3f4f6">
+  <header style="display: flex; align-items: center; gap: 12px; padding: 16px 32px; background: #fff; border-bottom: 1px solid #dde1e7">
+    <div style="width: 28px; height: 28px; border-radius: 7px; background: #1f2937; display: flex; align-items: center; justify-content: center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3"></path></svg></div>
+    <span style="font-weight: 700">Castcorder</span>
+  </header>
+  <main style="flex: 1; display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 56px 24px">
+    <section class="card" aria-labelledby="h-left" style="width: 100%; max-width: 560px; box-sizing: border-box; padding: 32px; display: flex; flex-direction: column; gap: 22px">
+      <div style="display: flex; align-items: center; gap: 14px">
+        <div style="width: 48px; height: 48px; border-radius: 50%; background: #dcfce7; display: flex; align-items: center; justify-content: center; flex: none"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#166534" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5 9-10"></path></svg></div>
+        <div><h1 id="h-left" style="margin: 0; font-size: 24px; font-weight: 700">You left Weekly show</h1><div class="muted" style="font-size: 14px">You were in the call for 48 min &middot; 3 takes recorded</div></div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; padding: 16px; border-radius: 12px; background: #eff6ff; border: 1px solid #c7d7fb">
+        <div style="display: flex; justify-content: space-between; font-size: 14px"><strong>Sending your recordings to Sam</strong><span>64%</span></div>
+        <div style="height: 8px; border-radius: 4px; background: #dbe5fb; overflow: hidden"><div style="width: 64%; height: 100%; background: #1d4ed8"></div></div>
+        <div style="font-size: 13px; color: #1e3a8a">3 of 5 files &middot; about 2 min left. Keep this tab open until it says done.</div>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 10px">
+        <a class="btn primary" href="Lobby.dc.html">Rejoin</a>
+        <a class="btn" href="#calls">Your calls</a>
+      </div>
+    </section>
+    <section aria-labelledby="h-calls" id="calls" style="width: 100%; max-width: 560px; box-sizing: border-box; display: flex; flex-direction: column">
+      <h2 id="h-calls" style="margin: 0 0 4px; font-size: 15px; font-weight: 700">Your calls</h2>
+      <div class="row"><span style="width: 8px; height: 8px; border-radius: 50%; background: #16a34a"></span><span style="flex: 1"><strong>Weekly show</strong> <span class="muted">&middot; Sam Rivera</span></span><span class="muted">Live &middot; 2 people</span></div>
+      <div class="row"><span style="width: 8px; height: 8px; border-radius: 50%; background: #c3c8d0"></span><span style="flex: 1"><strong>Book club</strong> <span class="muted">&middot; Alex Morgan</span></span><span class="muted">Quiet &middot; Nov 20</span></div>
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

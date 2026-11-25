@@ -236,14 +236,34 @@ Contacts see which of each other's app installs are online (ADR 0005, cast-40e.3
 
 The design pass (cast-72g) is the "Castcorder UX" canvas; `castcorder-client/style.css` carries its tokens and components.
 
+**UI layout v2 (planned).** The second pass (cast-d2o, 2026-11-24) is the "Castcorder UX 2: home, call, contacts" canvas (https://claude.ai/artifact/QRpduNS1CvaoLSEj7rQVBe); it keeps the tokens and the rules below and reorganises where things live. Implementation is epic cast-n56, with the contacts screens under cast-40e.
+
+- **Home.** A left nav: Rooms, Contacts, Settings, with the person and a reachability line at its foot. Each room shows one primary action (Join), a copy-link icon and a ... menu (start a fresh call, invite to a call now, people and settings, open the recordings folder, replace the link); past calls fold under a disclosure; rooms joined on other hosts sit below with live status.
+
+- **Settings.** You and your devices (names, linked devices with Remove, link another device), Appearance (the System/Light/Dark control, which leaves the lobby and the call top bar), Recordings folder (path and a disk bar), Connection (plain-language status, technical details folded).
+
+- **Contacts.** Requests, Online and Offline groups with presence, Invite per contact, a detail pane (nickname, rooms you share, recordings on the way), Add contact by contact link. A room's trusted people (CONTEXT.md, Trusted Person) are picked when creating a room and under the room's People and settings; an invite stays a one-off.
+
+- **Lobby and leaving.** Camera preview and a mic meter before joining; the password field only when the room has one; a name is required. Leave lands on a "You left" page with delivery progress, Rejoin and Your calls.
+
+- **Call.** One-row top bar with a fixed REC slot and Invite, People, Recordings, more. The People panel uses Host, Producer and Guest chips and icons (recording, space left, connection), a per-person menu (add as contact, make producer, their devices, remove) and folds room settings, calls and connection details. A phone gets a labelled dock with Leave.
+
 - **Layout.** A lobby before joining (name, password, microphone, camera and speakers pickers, camera choice, the recording notice). In the call: a top bar with the recording state, the stage (one tile per participant, own tile first), one optional side panel (People and call controls, Recordings, Transcript) and a bottom dock (Mute, Camera, Hide me, Devices, Start/Stop take for producers, Leave). The conversation fills the window; producers get the People panel open by default.
+
 - **Red means REC and nothing else.** The REC pill (take number and elapsed time, counted from the host's take start so a mid-take joiner agrees), a red rule under the top bar for the whole take, the red own-track waveform, the tab title (`REC take 3 - Castcorder`) and favicon, and the tray dot. Muted is an inverted button with a slashed mic, never red. Amber is for things to check; warnings say what still works and never block.
+
 - **Mute is call-only.** It disables the live stream's microphone track; the raw microphone, which is the track, keeps recording. The first mute explains this once per browser profile, and the dock's own-track waveform keeps moving while muted.
+
 - **Two signals per person, kept apart:** live (are we hearing them?) and track (is their machine recording?). Only signals backed by real data are drawn. Live: each remote tile has a green waveform and speaking ring from the audio actually arriving (an AnalyserNode on their received track, one shared animation loop at 15 Hz), so a flat line means nothing arrives; the host machine's own participant is metered the same way. Remote mute: a muted device keeps reporting its raw microphone level (level only, never audio, about 10 Hz, `MicState` on "control", relayed by the host to everyone else); the others see a slashed mic, a flat dimmed waveform and no speaking ring (nobody hears them; their track chip says they still record). The host machine's own participant mutes the same way (call-only, a volume element before its encoder) and reports `MicState` through the host. Track: every device acknowledges each recorded source per take (`SourceAck` on "control": recording, lost, or unavailable; a new segment acknowledges again, and so does every rejoin mid-take); the host's own participant's recorder does the same through its device-loss watchdog. The host works out each participant's track chip (Ready while no take records; Starting from the take start until the microphone is acknowledged; Recording; Mic lost until a new segment records; Cannot record; and Cannot record video, from the existing cannot-meet-profile report, while the microphone records) and sends it (`Recorders`) to producers for every participant and to each device for itself, whenever it changes. Every tile shows its chip (top left; red only while recording, amber for Mic lost and Cannot record video), and producers' top bar shows "N of M recording" during a take (amber while short), counting microphones recording.
+
 - **Icon.** A mic inside broadcast arcs on slate (`castcorder-app/icons/src`, `task app:icons`); state is a corner badge painted at runtime: red recording, amber needs a look (a device short of disk, the library volume included, a source that cannot meet the recording profile, or a microphone lost mid-take), blue while guests sync; red wins over amber, amber over blue.
+
 - **Theme.** System, Dark or Light, a toggle in the lobby and the top bar, remembered per browser or desktop webview in localStorage (`castcorder.theme`). An explicit choice is `data-theme` on `<html>` and overrides `prefers-color-scheme`; System removes it. index.html applies it before first paint.
+
 - **Call link.** The call link is always visible with a Copy button: the rendezvous link when there is one, else the LAN https link the host prints. The host machine's lobby shows it before joining (`GET /role` on the localhost listener carries `link` and `lan`; LAN guests are not handed it); a producer's top bar shows it in the call (the room's link, else the page's own LAN origin).
+
 - **Waveform scale.** Levels map to dBFS (`castcorder-client/src/levels.rs`), drawn relative to an adaptive per-stream noise floor (falls fast to quieter readings, rises about 1 dB/s): flat up to 6 dB above it, full at 40 dB above or 0 dBFS. The dock and the tiles share it, and the speaking ring is 12 dB above the floor (6 to stop), so a noisy webcam mic idles flat and speech stands out.
+
 - **Open.** The live transcript (cast-7hm).
 
 ## Devices
