@@ -104,7 +104,7 @@ function check(ok, what) {
   console.log((ok ? 'ok   ' : 'BAD  ') + what);
 }
 
-const logs = { A: [], B: [] };
+const logs = { A: [], B: [], C: [] };
 const browsers = [];
 async function openGuest(name, url, extraArgs = []) {
   const browser = await chromium.launch({
@@ -281,10 +281,23 @@ try {
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
 
+  // A guest that starts without relay credentials (forced relay policy, so no
+  // candidates at all) asks for them once its connection stalls, and then
+  // connects through the relay (cast-lxt.12). It asked for none up front.
+  const mintedBeforeC = (rv.err.match(/relay credentials minted/g) || []).length;
+  const reusedBeforeC = (rv.err.match(/relay credentials reused/g) || []).length;
+  const C = await openGuest('C', link.replace('/#', '/?name=C&iceTransportPolicy=relay&lazyRelay=1#'));
+  await C.click('#join');
+  await waitFor(() => logs.C.some((l) => l.includes('asking for relay credentials')), 'guest C asked for relay credentials', 30000);
+  await waitFor(async () => (await text(C, '#participant')).length > 0, 'guest C joined', 60000);
+  const gotC = (rv.err.match(/relay credentials (minted|reused)/g) || []).length - mintedBeforeC - reusedBeforeC;
+  // (Renewals of A's and B's credentials may land in the same window.)
+  check(gotC >= 1, 'the lazy guest asked the rendezvous for relay credentials after its connection stalled (' + gotC + ')');
+
   // Relay metering. The guests leave, so their coturn sessions end and coturn
   // reports their bytes (it counts a session when it ends).
   const HOST_ID = link.split('#')[1].split('.')[0];
-  for (const p of [A, B]) await p.close().catch(() => {});
+  for (const p of [A, B, C]) await p.close().catch(() => {});
   const usageOf = async () => {
     const r = await fetch('http://' + RV_ADMIN + '/usage').then((x) => x.json()).catch(() => null);
     return ((r && r.hosts) || []).find((h) => h.host === HOST_ID);

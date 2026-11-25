@@ -86,6 +86,32 @@ pub const MIN_RENEW_MS: f64 = 10_000.0;
 /// the rendezvous, so a guest renewing then may briefly find it offline.
 pub const RENEW_RETRY_MS: f64 = 3_000.0;
 
+/// How long a call connection gets to connect directly before the guest asks
+/// the rendezvous for relay credentials (cast-lxt.12).
+pub const DIRECT_WAIT_MS: f64 = 6_000.0;
+
+/// What a connection that started without relay credentials needs next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectVerdict {
+    /// Connected (or over): no relay is ever requested.
+    Direct,
+    /// Still trying: look again shortly.
+    Wait,
+    /// Failed, or not connected in time: request relay credentials.
+    NeedRelay,
+}
+
+/// Judge a peer connection from its `connectionState` string, `waited_ms`
+/// after the answer was applied.
+pub fn direct_verdict(state: &str, waited_ms: f64) -> DirectVerdict {
+    match state {
+        "connected" | "closed" => DirectVerdict::Direct,
+        "failed" => DirectVerdict::NeedRelay,
+        _ if waited_ms >= DIRECT_WAIT_MS => DirectVerdict::NeedRelay,
+        _ => DirectVerdict::Wait,
+    }
+}
+
 /// Whether a hello's `relay_error` is the relay budget being spent
 /// (`relay_quota: ...`): asking again within the budget period cannot help,
 /// so a renewal loop gives up and keeps its old credentials.
@@ -103,6 +129,20 @@ pub fn pair_is_relayed(local_type: &str, remote_type: &str) -> bool {
 mod tests {
     use super::*;
     use castcorder_link::wire::IceServer;
+
+    #[test]
+    fn relay_is_requested_only_when_a_direct_connection_fails_or_stalls() {
+        assert_eq!(direct_verdict("connected", 0.0), DirectVerdict::Direct);
+        assert_eq!(direct_verdict("connected", 99_000.0), DirectVerdict::Direct);
+        assert_eq!(direct_verdict("closed", 0.0), DirectVerdict::Direct);
+        assert_eq!(direct_verdict("connecting", 1_000.0), DirectVerdict::Wait);
+        assert_eq!(direct_verdict("new", 0.0), DirectVerdict::Wait);
+        assert_eq!(
+            direct_verdict("connecting", DIRECT_WAIT_MS),
+            DirectVerdict::NeedRelay
+        );
+        assert_eq!(direct_verdict("failed", 10.0), DirectVerdict::NeedRelay);
+    }
 
     #[test]
     fn only_a_spent_budget_stops_renewal_retries() {

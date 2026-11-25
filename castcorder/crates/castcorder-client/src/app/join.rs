@@ -99,6 +99,12 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
     Ok(())
 }
 
+thread_local! {
+    /// Set once a connection had to ask for relay credentials: later
+    /// connections of this page ask up front.
+    static RELAY_FIRST: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Start one connection attempt; a failure schedules the next.
 pub(super) fn connect(ui: Ui, epoch: u32) {
     let conn = CONN_EPOCH.get().wrapping_add(1);
@@ -277,10 +283,18 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     let url = ctx.url.clone();
     // From a call link: signal through the rendezvous, whose hello names the
     // ICE servers (STUN, so the offer carries this browser's public address).
-    // Naming the host asks the rendezvous for relay (TURN) credentials too.
+    // Relay (TURN) credentials are not asked for here: most connections are
+    // direct, and each credential counts against the host key's relay budget.
+    // They are requested when the connection fails or stalls ([`lazy_relay`]),
+    // or at once when the page forces `iceTransportPolicy=relay`.
     let link = LINK.with(|l| l.borrow().clone());
+    // (`?lazyRelay=1` with the forced policy is the browser test's way to
+    // exercise the lazy request deterministically: no candidates until asked.)
+    let relay_now = RELAY_FIRST.get()
+        || (query_param("iceTransportPolicy").as_deref() == Some("relay")
+            && query_param("lazyRelay").as_deref() != Some("1"));
     let mailbox = match &link {
-        Some(l) => Some(crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, l)).await?),
+        Some(l) => Some(crate::mailbox::Mailbox::open(&mailbox_url(&url, l, relay_now)).await?),
         None => None,
     };
     if !current() {
@@ -316,20 +330,62 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     remote.set_sdp(&answer_sdp);
     JsFuture::from(pc.set_remote_description(&remote)).await?;
     info!(call = %ctx.call, device = %ctx.device, sync_only, "answer applied");
-    if let (Some(expires), Some(l)) = (relay_expires, link) {
-        spawn_local(renew_relay(pc, url, l, expires, current));
+    match (relay_expires, link) {
+        (Some(expires), Some(l)) => spawn_local(renew_relay(pc, url, l, expires, current)),
+        (None, Some(_)) if !relay_now => spawn_local(lazy_relay(ui, epoch, pc, current)),
+        _ => {}
     }
     Ok(())
+}
+
+/// Watch a connection that started without relay credentials: if it connects,
+/// nothing is ever minted for it; if it fails or has not connected after
+/// [`crate::signal::DIRECT_WAIT_MS`], connect again asking for relay
+/// credentials from the start. (A restart on this connection is not possible:
+/// the host is told by a message over a channel that is not open yet.) Later
+/// reconnects of this page ask up front too, since direct has not worked.
+async fn lazy_relay(
+    ui: Ui,
+    epoch: u32,
+    pc: RtcPeerConnection,
+    current: impl Fn() -> bool + 'static,
+) {
+    use crate::signal::{DirectVerdict, direct_verdict};
+    const POLL_MS: i32 = 250;
+    let started = js_sys::Date::now();
+    loop {
+        if !current() {
+            return;
+        }
+        let state = format!("{:?}", pc.connection_state()).to_lowercase();
+        match direct_verdict(&state, js_sys::Date::now() - started) {
+            DirectVerdict::Direct => return,
+            DirectVerdict::Wait => crate::mailbox::sleep_ms(POLL_MS).await,
+            DirectVerdict::NeedRelay => break,
+        }
+    }
+    info!("no direct connection; asking for relay credentials");
+    RELAY_FIRST.set(true);
+    disconnect();
+    connect(ui, epoch);
 }
 
 /// The mailbox URL for a call connection through the rendezvous: naming the
 /// host asks the rendezvous for relay (TURN) credentials too.
 fn relay_mailbox_url(url: &str, link: &castcorder_link::CallLink) -> String {
+    mailbox_url(url, link, true)
+}
+
+/// The mailbox URL for a call connection through the rendezvous; `relay`
+/// names the host, which asks the rendezvous for relay credentials too.
+fn mailbox_url(url: &str, link: &castcorder_link::CallLink, relay: bool) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
-    castcorder_link::wire::mailbox_url(
-        &format!("{url}{sep}host={}", link.host.encode()),
-        &link.host,
-    )
+    let url = if relay {
+        format!("{url}{sep}host={}", link.host.encode())
+    } else {
+        url.to_string()
+    };
+    castcorder_link::wire::mailbox_url(&url, &link.host)
 }
 
 /// The call connection's RTCConfiguration: the hello's ICE servers, and the
