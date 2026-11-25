@@ -157,6 +157,35 @@ impl HostControl {
             .unwrap_or_default()
     }
 
+    /// The origin of the project's pages on the rendezvous: the call window
+    /// may reach this install's contacts only from there (cast-40e.10).
+    pub fn project_origin(&self) -> Option<String> {
+        self.running.lock().ok()?.as_ref()?.project_origin()
+    }
+
+    /// A contact code for `person` alone, accepted at once when they use it
+    /// ("Add as contact" in a call): its first link.
+    pub fn contact_code_for(&self, person: &str) -> Result<String, String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .contact_code_for(person)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no contact link".to_string())
+    }
+
+    /// Use a contact code another person's install made (accepting an offer
+    /// in a call).
+    pub fn add_contact(&self, code: &str) -> Result<(), String> {
+        let running = self.running.lock().map_err(|_| "host lock poisoned")?;
+        running
+            .as_ref()
+            .ok_or("the host is not running")?
+            .add_contact(code)
+    }
+
     /// Rotate the call secret (the old call link stops admitting anyone) and
     /// return the new call link, if the host is reachable through a rendezvous.
     pub fn regenerate_link(&self) -> Result<Option<String>, String> {
@@ -326,6 +355,35 @@ pub fn autolink_script(origin: &str, fragment: &str) -> String {
         q(origin),
         q(fragment)
     )
+}
+
+/// Whether a page may use the call window's bridge to this install
+/// (cast-40e.10): only the call window (`label` "call") showing the
+/// project's own pages (`origin`, [`HostControl::project_origin`]). Tauri
+/// grants the commands to that window and origin alone; this checks again.
+pub fn bridge_allows(label: &str, page_url: &str, origin: Option<&str>) -> bool {
+    let Some(origin) = origin else { return false };
+    label == "call"
+        && page_url
+            .strip_prefix(origin)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+}
+
+#[cfg(test)]
+mod bridge_tests {
+    use super::bridge_allows;
+
+    #[test]
+    fn only_the_call_window_on_the_project_s_pages_may_use_the_bridge() {
+        let o = Some("https://cast.example");
+        assert!(bridge_allows("call", "https://cast.example/#room.x", o));
+        assert!(bridge_allows("call", "https://cast.example", o));
+        assert!(!bridge_allows("main", "https://cast.example/", o));
+        assert!(!bridge_allows("call", "https://cast.example.evil/", o));
+        assert!(!bridge_allows("call", "https://cast.example:8443/", o));
+        assert!(!bridge_allows("call", "http://cast.example/", o));
+        assert!(!bridge_allows("call", "https://cast.example/", None));
+    }
 }
 
 #[cfg(test)]
