@@ -90,4 +90,9 @@ export async function homeLinkChecks() {
     '"Rooms you joined" says what it opens', 5000);
   await waitFor(() => inView(P, '#home-message'), 'the message beside "Rooms you joined" is in view', 5000);
   check(P.url().startsWith(HTTP11), 'the home stays open after "Rooms you joined"');
+  // cast-qhv: a click after that link still works (in Firefox the page went deaf).
+  await P.fill('#new-room-name', 'after-the-link');
+  await P.click('#create-room');
+  await waitFor(async () => (await text(P, '#rooms')).includes('after-the-link'),
+    'the home still takes clicks after "Rooms you joined"', 10000);
 }

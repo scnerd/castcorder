@@ -184,10 +184,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     // The rooms this app joined on other hosts live in its
                     // call window's lobby (docs/design.md "Rejoining").
                     <span class="small muted">"Calls you joined on other hosts: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |ev: web_sys::MouseEvent| {
-                        // Not a navigation: Firefox leaves the page ignoring later
-                        // clicks after one to a custom scheme (cast-qhv).
-                        ev.prevent_default();
-                        open_scheme("castcorder://rooms");
+                        // Firefox leaves the page ignoring later clicks after a
+                        // navigation to a custom scheme (cast-qhv), so it stays
+                        // put and the message below says what the link opens.
+                        if is_firefox() {
+                            ev.prevent_default();
+                        }
                         // The link opens the app's call window; say so, and what
                         // an empty answer means, where the click happened.
                         message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
@@ -276,24 +278,11 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     }
 }
 
-/// Hand a custom-scheme URL (`castcorder://...`) to the OS through a hidden
-/// iframe, so the page itself never navigates away (cast-qhv).
-fn open_scheme(url: &str) {
-    let Some(doc) = window().document() else {
-        return;
-    };
-    let Some(body) = doc.body() else {
-        return;
-    };
-    let Ok(frame) = doc.create_element("iframe") else {
-        return;
-    };
-    let _ = frame.set_attribute("src", url);
-    let _ = frame.set_attribute("hidden", "");
-    let _ = frame.set_attribute("aria-hidden", "true");
-    let _ = body.append_child(&frame);
-    // The hand-off is immediate; the frame has nothing left to do.
-    let cb = Closure::once_into_js(move || frame.remove());
-    let _ =
-        window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 1000);
+/// Whether this browser is Firefox (cast-qhv: it cannot be handed a
+/// custom-scheme link by navigating).
+fn is_firefox() -> bool {
+    window()
+        .navigator()
+        .user_agent()
+        .is_ok_and(|ua| ua.contains("Firefox/"))
 }
