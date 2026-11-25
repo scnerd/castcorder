@@ -188,7 +188,10 @@ fn contact_links_tell_shared_rooms_and_carry_invites() {
     wait("the waiting invite at Bob", || {
         b.contacts().invites.len() == 1
     });
-    assert!(a.contacts().invited[0].delivered);
+    // Ann hears so once his answer is back (it can trail his copy).
+    wait("Ann to see the waiting invite delivered", || {
+        a.contacts().invited.first().is_some_and(|i| i.delivered)
+    });
 
     a.stop();
     b.stop();
