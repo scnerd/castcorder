@@ -195,6 +195,17 @@ pub enum Request {
     /// invites this install's person to a call. Answered with
     /// [`Response::Done`] once it is shown (appended).
     Invite(RoomInvite),
+    /// Offer another participant to become contacts (cast-40e.10): `code` is
+    /// a contact code this participant's install made for their person. The
+    /// host passes it on ([`Event::ContactOffer`]) only between two
+    /// participants whose certificates name different persons. Answered with
+    /// [`Response::Done`] (appended).
+    OfferContact {
+        /// Whom to offer it to.
+        to: ParticipantId,
+        /// The contact code (`ContactCode::fragment`), or a link to it.
+        code: String,
+    },
 }
 
 /// An invite to a call, from a contact (CONTEXT.md "Invite"): the room's call
@@ -568,6 +579,16 @@ pub enum Event {
         /// The name the refused person asked to join as.
         name: String,
     },
+    /// Another participant offers to become contacts ([`Request::OfferContact`];
+    /// appended).
+    ContactOffer {
+        /// Who offers.
+        from: ParticipantId,
+        /// Their display name.
+        name: String,
+        /// Their install's contact code, made for this participant's person.
+        code: String,
+    },
 }
 
 /// A call of a room on a host.
@@ -673,6 +694,10 @@ pub struct ParticipantName {
     pub participant: ParticipantId,
     /// Display name, as they gave it.
     pub name: String,
+    /// The person their certificate names (verified by the host), if their
+    /// device is linked to one: they can be offered to become contacts
+    /// (cast-40e.10; appended).
+    pub person: Option<String>,
 }
 
 /// Everything a client sends to a core.
@@ -808,6 +833,10 @@ mod tests {
                 link: "https://example.test/v/1.2.3/#k".into(),
                 in_call: vec!["Ann".into()],
             }),
+            Request::OfferContact {
+                to: ParticipantId(3),
+                code: "contact.h.s".into(),
+            },
         ]
     }
 
@@ -891,7 +920,13 @@ mod tests {
             CoreMessage::Event(Event::Participants(vec![ParticipantName {
                 participant: ParticipantId(2),
                 name: "Bea Smith".into(),
+                person: Some("p0123".into()),
             }])),
+            CoreMessage::Event(Event::ContactOffer {
+                from: ParticipantId(2),
+                name: "Bea Smith".into(),
+                code: "contact.h.s".into(),
+            }),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,
@@ -1294,8 +1329,9 @@ mod tests {
             encode(&Event::Participants(vec![ParticipantName {
                 participant: ParticipantId(5),
                 name: "A".into(),
+                person: None,
             }])),
-            vec![5, 1, 5, 1, b'A']
+            vec![5, 1, 5, 1, b'A', 0]
         );
         // Track states for producers (appended).
         assert_eq!(encode(&TrackState::Recording), vec![0]);

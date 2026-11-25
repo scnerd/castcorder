@@ -62,7 +62,7 @@ struct PersonView {
 }
 
 /// One `/person` request; the answer's text, or the host's reason.
-async fn person_request(path: &str, body: Option<String>) -> Result<String, String> {
+pub(super) async fn person_request(path: &str, body: Option<String>) -> Result<String, String> {
     let init = object();
     set(&init, "method", if body.is_some() { "POST" } else { "GET" });
     let headers = object();

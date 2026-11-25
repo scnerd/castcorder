@@ -241,6 +241,9 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                             <button class="grant btn ghost" on:click=move |_| { menu.set(None); act(RoomAction::SetProducer { participant: p.participant, producer: !p.producer }) }>
                                                 {if p.producer { "Revoke producer" } else { "Make producer" }}</button>
                                         </Show>
+                                        <Show when=move || super::contact_offer::offerable(ui, p.participant.0)>
+                                            <button class="add-contact btn ghost" on:click=move |_| { menu.set(None); super::contact_offer::offer(ui, p.participant.0) }>"Add as contact"</button>
+                                        </Show>
                                         <button class="kick btn ghost danger" on:click=move |_| { menu.set(None); act(RoomAction::Kick { participant: p.participant }) }>"Remove from call"</button>
                                     </div>
                                 </div>
@@ -749,6 +752,7 @@ fn Call(ui: Ui) -> impl IntoView {
                     <div id="call-notes" class="banner" role="status" hidden=move || ui.notes.get().is_empty()>
                         <span>{move || ui.notes.get().join(" ")}</span>
                         <button id="call-notes-dismiss" class="btn" on:click=move |_| ui.notes.set(Vec::new())>"Dismiss"</button></div>
+                    <super::contact_offer::ContactOfferBanner ui=ui/>
                     <div id="disk-warning" class="banner" role="status" hidden=move || !ui.disk.get().iter().any(|d| d.low)>
                         <Icon name="alert" small=true/>
                         <span><strong>"Low disk space"</strong>
@@ -998,6 +1002,8 @@ pub(super) fn App() -> impl IntoView {
         disk: RwSignal::new(Vec::new()),
         take_started_us: RwSignal::new(None),
         elapsed: RwSignal::new(String::new()),
+        persons: RwSignal::new(Vec::new()),
+        contact_offer: RwSignal::new(None),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),
         // `?camera=off` joins with the camera off.
