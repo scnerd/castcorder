@@ -109,8 +109,13 @@ impl Config {
                 "--keep-wav" => a.keep_wav = flag_bool(value()?, "--keep-wav")?,
                 "--transcribe" => {
                     let v = value()?;
-                    a.transcribe =
-                        (v != "off").then(|| crate::transcript::Engine::Whisper(v.into()));
+                    // `sim`: the port's simulation, which hears only its tone
+                    // code (the browser tests).
+                    a.transcribe = match v.as_str() {
+                        "off" => None,
+                        "sim" => Some(crate::transcript::Engine::Simulated),
+                        _ => Some(crate::transcript::Engine::Whisper(v.into())),
+                    };
                 }
                 "--aligned-format" => {
                     let format = match value()?.as_str() {
