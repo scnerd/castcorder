@@ -389,7 +389,13 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             <h2>"Rooms you joined"</h2>
                             // The rooms this app joined on other hosts live in its
                             // call window's lobby (docs/design.md "Rejoining").
-                            <span class="small muted">"On other people's computers: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |_| {
+                            <span class="small muted">"On other people's computers: " <a id="joined-rooms" href="castcorder://rooms" on:click=move |ev: web_sys::MouseEvent| {
+                                // Firefox leaves the page ignoring later clicks after a
+                                // navigation to a custom scheme (cast-qhv), so it stays
+                                // put and the message below says what the link opens.
+                                if is_firefox() {
+                                    ev.prevent_default();
+                                }
                                 // The link opens the app's call window; say so, and what
                                 // an empty answer means, where the click happened.
                                 message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
@@ -582,4 +588,13 @@ fn room_card(
             </Show>
         </li>
     }
+}
+
+/// Whether this browser is Firefox (cast-qhv: it cannot be handed a
+/// custom-scheme link by navigating).
+fn is_firefox() -> bool {
+    window()
+        .navigator()
+        .user_agent()
+        .is_ok_and(|ua| ua.contains("Firefox/"))
 }
