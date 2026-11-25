@@ -196,6 +196,8 @@ jobs:
           tc qdisc show dev lo
 
       - name: Relay test on the degraded network
+        env:
+          DEGRADED: "1"
         run: task test:relay
 
   # A failing scheduled run files an issue pointing at it.
