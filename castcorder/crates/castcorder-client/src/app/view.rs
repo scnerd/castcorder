@@ -81,6 +81,7 @@ pub(super) fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl In
         }
         .into_any(),
         "x" => view! { <path d="M18 6L6 18M6 6l12 12"/> }.into_any(),
+        "check" => view! { <path d="M5 12.5l4.5 4.5L19 7"/> }.into_any(),
         "sliders" => view! {
             <path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/>
             <circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>
@@ -761,6 +762,7 @@ fn Call(ui: Ui) -> impl IntoView {
                     {move || connection_note().map(|(head, more)| view! {
                         <div class="banner" role="status"><span><strong>{head}</strong>{more}</span></div>
                     })}
+                    <recordings::TakeToast ui=ui/>
                     <div class="stage">
                         <div class="tile" class:self-off=move || ui.camera_state.get() != "on"
                             class:self-hidden=move || !ui.self_view.get()>
@@ -802,7 +804,11 @@ fn Call(ui: Ui) -> impl IntoView {
                             <Show when=producer>
                                 <recordings::Recordings ui=ui/>
                             </Show>
-                            <recordings::YourRecordings ui=ui/>
+                            // The host machine's own page saves straight into the
+                            // call's folder: nothing of a guest's outbox to explain.
+                            <Show when=move || !ui.role.get().host_machine>
+                                <recordings::YourRecordings ui=ui/>
+                            </Show>
                         </div>
                         <div class="section" hidden=move || panel() != Panel::Transcript>
                             <div class="empty">"A live, speaker-labelled transcript of the whole call will appear here. "

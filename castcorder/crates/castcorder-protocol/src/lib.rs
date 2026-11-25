@@ -672,6 +672,9 @@ pub struct TakeTracks {
     pub dir: String,
     /// Its tracks.
     pub tracks: Vec<TrackStatus>,
+    /// How long it ran, in seconds, once it has stopped (none while it
+    /// records, or for a take whose stop the host never recorded).
+    pub length_s: Option<u32>,
 }
 
 /// The call's takes and tracks, for producers.
@@ -1013,6 +1016,7 @@ mod tests {
                         kind: SourceKind::Audio,
                         state: TrackState::Receiving { percent: 40 },
                     }],
+                    length_s: Some(754),
                 }],
             })),
             CoreMessage::Event(Event::Call(CallRef {
@@ -1347,9 +1351,10 @@ mod tests {
                         kind: SourceKind::Audio,
                         state: TrackState::Verified,
                     }],
+                    length_s: Some(5),
                 }],
             })),
-            vec![6, 0, 1, 1, 0, 1, 0, 0, 0, 3]
+            vec![6, 0, 1, 1, 0, 1, 0, 0, 0, 3, 1, 5]
         );
         // Free disk (appended): a device's report and what the host tells producers.
         assert_eq!(encode(&Request::DiskFree { free_bytes: 1 }), vec![10, 1]);

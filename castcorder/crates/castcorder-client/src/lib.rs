@@ -42,6 +42,7 @@ pub mod recorders;
 pub mod scope;
 pub mod session;
 pub mod signal;
+pub mod takes;
 pub mod waiting;
 pub mod wav;
 
