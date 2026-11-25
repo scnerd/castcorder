@@ -249,3 +249,22 @@ fn a_host_key_over_its_relay_budget_gets_no_relay_credentials() {
     assert!(body.contains("\"budget_bytes\":1000"), "{body}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_client_that_keeps_reconnecting_reuses_its_credential_and_counts_once() {
+    let addr = start();
+    let key = HostKey::from_secret([31; 32]);
+    let (_host_ws, _, _) = register(addr, &key);
+    let id = key.id().encode();
+
+    // More hellos from one address than the host key's bucket (burst 30)
+    // holds: each is a client re-asking, and each gets the same credential.
+    let mut first = None;
+    for n in 0..45 {
+        let (_, ice, why) = hello(&mut connect(addr, &id));
+        assert_eq!(why, None, "hello {n}");
+        let users = turn_users(&ice);
+        assert_eq!(users.len(), 1, "hello {n}: {ice:?}");
+        assert_eq!(first.get_or_insert_with(|| users[0].clone()), &users[0]);
+    }
+}
