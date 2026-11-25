@@ -2,7 +2,7 @@
 //! (`tests/data/speech.wav`, espeak-ng at 16 kHz, saying `speech.txt`).
 //!
 //! It needs a ggml model: set `CASTCORDER_WHISPER_MODEL` to its path (CI
-//! fetches ggml-tiny.en). Without one the test says so and passes, unless
+//! fetches ggml-base.en). Without one the test says so and passes, unless
 //! `CASTCORDER_REQUIRE_WHISPER` is set (as in CI), when it fails.
 
 use std::path::PathBuf;
