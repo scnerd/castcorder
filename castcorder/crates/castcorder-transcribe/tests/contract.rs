@@ -78,22 +78,31 @@ fn a_missing_model_is_an_error_not_a_crash() {
 }
 
 /// The installers' way in (cast-7hm.4): a folder of bundled models, the
-/// right one loaded and warmed up. The CI model stands in for both bundled
-/// names, so the GPU model is tried first and, with no GPU, the CPU model
-/// is loaded instead. A Vulkan build on a machine with no Vulkan driver must
-/// get here too (CI runs this test so built as well).
+/// right one loaded and warmed up. `CASTCORDER_MODELS` names the real
+/// folder (`scripts/fetch_models.py`); then `CASTCORDER_EXPECT_GPU` says
+/// which model must be kept: `0` on a machine with no GPU (CI), `1` on one
+/// with a GPU. Without it, the contract model stands in for both names,
+/// which shows a folder loads but not which model is picked (a small model
+/// is quick even on the CPU). A Vulkan build on a machine with no Vulkan
+/// driver must get here too (CI runs this test so built as well).
 #[test]
 fn the_bundled_models_folder_gives_a_transcriber_that_keeps_the_contract() {
+    let real = std::env::var_os("CASTCORDER_MODELS")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
     let Some(path) = model() else { return };
     let dir = std::env::temp_dir().join(format!("castcorder-bundled-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    for name in [
-        castcorder_transcribe::GPU_MODEL,
-        castcorder_transcribe::CPU_MODEL,
-    ] {
-        std::fs::copy(&path, dir.join(name)).unwrap();
+    if real.is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            castcorder_transcribe::GPU_MODEL,
+            castcorder_transcribe::CPU_MODEL,
+        ] {
+            std::fs::copy(&path, dir.join(name)).unwrap();
+        }
     }
+    let dir = real.clone().unwrap_or(dir);
     let mut w = castcorder_transcribe::load_best(&dir).unwrap();
     let kept = w
         .model()
@@ -104,11 +113,16 @@ fn the_bundled_models_folder_gives_a_transcriber_that_keeps_the_contract() {
     eprintln!("load_best kept {kept}");
     // CASTCORDER_EXPECT_GPU=0 (CI: no GPU) or 1 (a machine with one) says
     // which it must have kept.
-    match std::env::var("CASTCORDER_EXPECT_GPU").as_deref() {
-        Ok("0") => assert_eq!(kept, castcorder_transcribe::CPU_MODEL),
-        Ok("1") => assert_eq!(kept, castcorder_transcribe::GPU_MODEL),
+    match (
+        real.is_some(),
+        std::env::var("CASTCORDER_EXPECT_GPU").as_deref(),
+    ) {
+        (true, Ok("0")) => assert_eq!(kept, castcorder_transcribe::CPU_MODEL),
+        (true, Ok("1")) => assert_eq!(kept, castcorder_transcribe::GPU_MODEL),
         _ => {}
     }
     check(&mut w, &speech());
-    let _ = std::fs::remove_dir_all(&dir);
+    if real.is_none() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

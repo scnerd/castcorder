@@ -123,12 +123,30 @@ jobs:
           curl -fsSL --retry 4 -o ${{ runner.temp }}/whisper-models/ggml-base.en.bin \
             https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
 
+      # The models installers bundle (scripts/fetch_models.py), so the test of
+      # picking between them runs on the real pair: on this GPU-less runner the
+      # GPU model is too slow and the CPU model must be kept.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Cache bundled models
+        id: bundled-models
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bundled-models
+          key: bundled-models-${{ hashFiles('scripts/fetch_models.py') }}
+
+      - name: Fetch bundled models
+        if: steps.bundled-models.outputs.cache-hit != 'true'
+        run: uv run scripts/fetch_models.py ${{ runner.temp }}/bundled-models
+
       # Tiers 1-2 (unit, simulation). The system and browser tiers join here with M1.
       - name: Unit and simulation tests
         run: task check
         env:
           CASTCORDER_WHISPER_MODEL: ${{ runner.temp }}/whisper-models/ggml-base.en.bin
           CASTCORDER_REQUIRE_WHISPER: "1"
+          CASTCORDER_MODELS: ${{ runner.temp }}/bundled-models
           CASTCORDER_EXPECT_GPU: "0"
 
       # The installers' Vulkan build of whisper.cpp on a runner with no GPU: it
@@ -142,6 +160,7 @@ jobs:
         env:
           CASTCORDER_WHISPER_MODEL: ${{ runner.temp }}/whisper-models/ggml-base.en.bin
           CASTCORDER_REQUIRE_WHISPER: "1"
+          CASTCORDER_MODELS: ${{ runner.temp }}/bundled-models
           CASTCORDER_EXPECT_GPU: "0"
 
   # The desktop app's Tauri shell (castcorder-app --features desktop): clippy, its
