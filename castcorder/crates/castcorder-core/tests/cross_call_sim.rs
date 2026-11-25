@@ -162,6 +162,8 @@ fn an_old_calls_tracks_land_in_that_call_and_a_foreign_one_stays_on_the_device()
     }
 
     let mut confirmed = Vec::new();
+    let mut open_done = Vec::new();
+    let mut elsewhere_done = Vec::new();
     for _ in 0..20_000 {
         for c in outbox.pump(&mut g, MAX_BUFFERED).unwrap() {
             // Verified receipt: only now may the guest delete its copy.
@@ -169,10 +171,33 @@ fn an_old_calls_tracks_land_in_that_call_and_a_foreign_one_stays_on_the_device()
             confirmed.push(c.name);
         }
         host.poll();
+        open_done.extend(
+            host.puller
+                .take_completed()
+                .into_iter()
+                .map(|e| e.offer.name),
+        );
+        elsewhere_done.extend(
+            host.puller
+                .take_completed_elsewhere()
+                .into_iter()
+                .map(|(key, e)| (key, e.offer.name)),
+        );
         if confirmed.len() == 4 && host.puller.is_idle() {
             break;
         }
     }
+    // The host aligns what completes: the open call's, and (cast-1i6) an old
+    // call's under that call's key, so its folder is aligned, not the open one's.
+    assert_eq!(open_done, ["t-now-1-mic"]);
+    assert_eq!(
+        elsewhere_done,
+        [
+            (OLD.to_string(), "t-old-1-mic".to_string()),
+            (OLD.to_string(), "t-old-2-mic".to_string()),
+            (OLD.to_string(), "t-old-1-cam".to_string()),
+        ]
+    );
     // Audio before video, oldest call and take first.
     assert_eq!(
         confirmed,

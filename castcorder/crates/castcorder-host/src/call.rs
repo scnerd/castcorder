@@ -350,7 +350,7 @@ pub struct Call {
     /// and synced on their own thread, never this one.
     safety: SafetyWriter<FsStorage>,
     /// Takes to align go to the align thread (`None`: alignment is off).
-    align: Option<mpsc::Sender<(TakeId, FsStorage)>>,
+    align: Option<mpsc::Sender<(TakeId, FsStorage, bool)>>,
     /// The loaded room's security: admission, roles, producer actions.
     room: Room,
     /// The loaded room's name (its folder in the library).
@@ -433,16 +433,17 @@ const TRACKS_EVERY_US: i64 = 500_000;
 fn spawn_aligner(
     cfg: castcorder_align::AlignConfig,
     aligned: crate::tracks::Aligned,
-) -> mpsc::Sender<(TakeId, FsStorage)> {
-    let (tx, rx) = mpsc::channel::<(TakeId, FsStorage)>();
+) -> mpsc::Sender<(TakeId, FsStorage, bool)> {
+    let (tx, rx) = mpsc::channel::<(TakeId, FsStorage, bool)>();
     let spawned = thread::Builder::new().name("align".into()).spawn(move || {
         while let Ok(first) = rx.recv() {
-            let mut jobs: BTreeMap<u32, FsStorage> = BTreeMap::new();
-            jobs.insert(first.0.0, first.1);
-            while let Ok((t, d)) = rx.try_recv() {
-                jobs.insert(t.0, d);
+            // Keyed by the take's folder: other calls' takes number alike.
+            let mut jobs: BTreeMap<std::path::PathBuf, (u32, FsStorage, bool)> = BTreeMap::new();
+            jobs.insert(first.1.root().to_path_buf(), (first.0.0, first.1, first.2));
+            while let Ok((t, d, open)) = rx.try_recv() {
+                jobs.insert(d.root().to_path_buf(), (t.0, d, open));
             }
-            for (take, dir) in jobs {
+            for (_, (take, dir, open)) in jobs {
                 // The host's own recorder finalises its timing file just
                 // after the take stops; give it a moment.
                 for _ in 0..50 {
@@ -462,7 +463,10 @@ fn spawn_aligner(
                             rate = s.sample_rate,
                             "aligned tracks written"
                         );
-                        if let Ok(mut a) = aligned.lock() {
+                        // Only the open call's takes are tracked in memory
+                        // (take numbers repeat across calls); another call's
+                        // are read from their folder when it opens.
+                        if open && let Ok(mut a) = aligned.lock() {
                             a.insert(
                                 take,
                                 s.tracks
@@ -939,7 +943,7 @@ impl Call {
             let ready = library.entries(take).map(|e| castcorder_align::ready(&e));
             match (ready, library.take_dir(take)) {
                 (Ok(true), Ok(dir)) => {
-                    if tx.send((take, dir.clone())).is_err() {
+                    if tx.send((take, dir.clone(), true)).is_err() {
                         warn!(take = take.0, "align thread gone; take not aligned");
                     }
                 }
@@ -1054,6 +1058,16 @@ impl Call {
             &mut libs,
             recording || busy,
         ));
+        // Tracks filed into a call by key (a sync-only connection's, or a
+        // guest's OfferCallTrack): those of the open call and of other calls.
+        let mut keyed: Vec<(String, TakeId)> = Vec::new();
+        for s in self.syncers.values_mut() {
+            for (key, e) in s.puller.take_completed_elsewhere() {
+                if e.offer.kind == SourceKind::Audio {
+                    keyed.push((key, e.offer.take));
+                }
+            }
+        }
         if libs.open.is_none() {
             return;
         }
@@ -1063,6 +1077,11 @@ impl Call {
                 gone.push(*id);
             } else if p.is_closed() {
                 gone.push(*id);
+            }
+            for (key, e) in p.take_completed_elsewhere() {
+                if e.offer.kind == SourceKind::Audio {
+                    keyed.push((key, e.offer.take));
+                }
             }
             for e in p.take_completed() {
                 // Only audio is aligned: video (never aligned) and its timing
@@ -1075,8 +1094,43 @@ impl Call {
         for id in gone {
             self.drop_puller(id);
         }
+        for (key, take) in keyed {
+            if open_key.as_deref() == Some(key.as_str()) {
+                if !completed.contains(&take) {
+                    completed.push(take);
+                }
+            } else {
+                self.align_elsewhere(&key, take);
+            }
+        }
         if !completed.is_empty() {
             self.align_completed(completed);
+        }
+    }
+
+    /// Queue alignment of `take` of another call (filed into its folder by
+    /// a sync-only connection or an `OfferCallTrack`), if all its tracks are in.
+    fn align_elsewhere(&mut self, key: &str, take: TakeId) {
+        let (Some(tx), Some(library)) = (&self.align, self.elsewhere.get_mut(key)) else {
+            return;
+        };
+        if take.0 == 0 {
+            return;
+        }
+        let ready = library.entries(take).map(|e| castcorder_align::ready(&e));
+        match (ready, library.take_dir(take)) {
+            (Ok(true), Ok(dir)) => {
+                info!(call = %key, take = take.0, "aligning a take of another call");
+                if tx.send((take, dir.clone(), false)).is_err() {
+                    warn!(take = take.0, "align thread gone; take not aligned");
+                }
+            }
+            (Ok(false), _) => {
+                info!(call = %key, take = take.0, "track received; take of another call still waiting for tracks")
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                warn!(call = %key, take = take.0, error = %e, "take of another call not aligned: library unreadable")
+            }
         }
     }
 

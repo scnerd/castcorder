@@ -878,6 +878,8 @@ pub struct Puller<S: Storage, C: MessageChannel> {
     done: VecDeque<([u8; 32], String)>,
     current: Option<Pull<S::File>>,
     completed: Vec<ManifestEntry>,
+    /// Other calls' completed tracks, by the key they were offered under.
+    completed_elsewhere: Vec<(String, ManifestEntry)>,
     closed: bool,
     broken: bool,
 }
@@ -894,6 +896,7 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             done: VecDeque::new(),
             current: None,
             completed: Vec::new(),
+            completed_elsewhere: Vec::new(),
             closed: false,
             broken: false,
         }
@@ -952,9 +955,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
     }
 
     /// The open call's tracks completed (verified and confirmed) since the
-    /// last call (other calls' are only logged).
+    /// last call (other calls' are [`take_completed_elsewhere`](Self::take_completed_elsewhere)).
     pub fn take_completed(&mut self) -> Vec<ManifestEntry> {
         std::mem::take(&mut self.completed)
+    }
+
+    /// Tracks of calls offered under a key (`CallSet::others`, or the open
+    /// call's key) completed since the last call, with that key.
+    pub fn take_completed_elsewhere(&mut self) -> Vec<(String, ManifestEntry)> {
+        std::mem::take(&mut self.completed_elsewhere)
     }
 
     /// The open call's track being received now, if any: its manifest entry,
@@ -1147,8 +1156,9 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
                 size = o.size, "sync done: track verified and confirmed");
             let mut entry = entry;
             entry.verified = true;
-            if c.call.is_none() {
-                self.completed.push(entry);
+            match c.call {
+                None => self.completed.push(entry),
+                Some(key) => self.completed_elsewhere.push((key, entry)),
             }
             progress = true;
         }
