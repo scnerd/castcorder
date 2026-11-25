@@ -344,6 +344,9 @@ const MAX_WAIT: Duration = Duration::from_millis(100);
 /// to the renewed one (ICE restarts in well under this).
 const RELAY_DRAIN: Duration = Duration::from_secs(8);
 
+/// Binds a new socket like the host's own, on a source port not used before.
+pub type SocketFactory<S> = Box<dyn FnMut() -> std::io::Result<S> + Send>;
+
 /// The host's forwarding unit: one socket, many guests.
 pub struct Host<S, C> {
     socket: S,
@@ -360,6 +363,9 @@ pub struct Host<S, C> {
     stun: Stun,
     /// A second socket, for the second relay while TURN credentials rotate.
     spare: Option<S>,
+    /// Binds a fresh socket (a new source port) for a TURN retry; see
+    /// [`Host::set_socket_factory`].
+    factory: Option<SocketFactory<S>>,
     /// Relay 0 allocates from `socket`, relay 1 from `spare`.
     relays: [Relay; 2],
     /// Which relay offers the relayed candidate to guests.
@@ -415,6 +421,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             queue: VecDeque::new(),
             stun: Stun::default(),
             spare: None,
+            factory: None,
             relays: [Relay::default(), Relay::default()],
             active: 0,
             rotating: None,
@@ -501,6 +508,17 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         self.spare = Some(socket);
     }
 
+    /// A way to bind another socket like the first (its own new port). When
+    /// every address of the TURN server goes unanswered, the allocation is
+    /// retried from a fresh socket each time, not just from the one spare:
+    /// a path that drops a flow for good (about one in seven from CI runners)
+    /// is escaped within a few tries, and a server with one UDP address
+    /// (self-hosted coturn) gets the same chance. Without it the retry
+    /// alternates between the two sockets (cast-7bu).
+    pub fn set_socket_factory(&mut self, factory: SocketFactory<S>) {
+        self.factory = Some(factory);
+    }
+
     /// The relayed address on the TURN server, once allocated.
     pub fn relayed(&self) -> Option<SocketAddr> {
         self.relays[self.active].relayed()
@@ -537,23 +555,48 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         let a = self.active;
         if self.rotating.is_none()
             && self.draining.is_none()
-            && self.spare.is_some()
+            && (self.spare.is_some() || self.factory.is_some())
             && self.relays[a].exhausted()
             && let Some(server) = self.relays[a].credentials().cloned()
         {
-            let b = 1 - a;
-            let (old, new) = if b == 0 {
-                (self.spare.as_ref().expect("checked"), &self.socket)
-            } else {
-                (&self.socket, self.spare.as_ref().expect("checked"))
-            };
             let local = self.destination_for(server.addr);
+            // A factory gives the retry its own new source port, on the spare
+            // slot (the first socket's address is advertised and stays put).
+            let fresh = match self.factory.as_mut().map(|f| f()) {
+                Some(Ok(s)) => Some(s),
+                Some(Err(e)) => {
+                    warn!(error = %e, "no fresh socket for the turn retry; using the other one");
+                    None
+                }
+                None => None,
+            };
+            let b = if fresh.is_some() { 1 } else { 1 - a };
+            if b == 1 && fresh.is_none() && self.spare.is_none() {
+                return next;
+            }
             info!(
                 from = a,
                 to = b,
-                "turn allocation unanswered on every address; retrying from the other socket"
+                fresh = fresh.is_some(),
+                "turn allocation unanswered on every address; retrying from another socket"
             );
-            self.relays[a].set_server(None, None, local, old, now_d);
+            // The failed allocation is dropped on the socket it used.
+            {
+                let old = if a == 0 {
+                    &self.socket
+                } else {
+                    self.spare.as_ref().expect("active relay 1 has a spare")
+                };
+                self.relays[a].set_server(None, None, local, old, now_d);
+            }
+            if let Some(s) = fresh {
+                self.spare = Some(s);
+            }
+            let new = if b == 0 {
+                &self.socket
+            } else {
+                self.spare.as_ref().expect("checked")
+            };
             self.relays[b].set_server(Some(server), None, local, new, now_d);
             self.active = b;
             next = now_d;

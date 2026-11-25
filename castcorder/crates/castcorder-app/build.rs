@@ -14,6 +14,13 @@ fn main() {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
         }
     }
+    // The commands the call window may call from the project's pages
+    // (cast-40e.10); main.rs grants them to that window and origin only.
     #[cfg(feature = "desktop")]
-    tauri_build::build();
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(
+            tauri_build::AppManifest::new().commands(&["contact_code", "contact_add"]),
+        ),
+    )
+    .expect("tauri build step");
 }
