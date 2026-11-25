@@ -723,7 +723,7 @@ impl Call {
     }
 
     /// Send each joined connection its view of the recorders if it changed:
-    /// a producer everyone's, anyone else only its own. Checked when they
+    /// a producer everyone's, anyone else its own and the host machine's. Checked when they
     /// change and every half second (a role may have changed).
     fn publish_recorders(&mut self) {
         let now = self.timeline.now_us();
@@ -740,8 +740,12 @@ impl Call {
             let view: Vec<Recorder> = if producers.contains(&id) {
                 all.clone()
             } else {
+                // Its own, and the host machine's: a guest sees that the
+                // host records (cast-n56.5), and nobody else's state.
                 all.iter()
-                    .filter(|r| r.participant.0 == id)
+                    .filter(|r| {
+                        r.participant.0 == id || self.room.role(r.participant.0).host_machine
+                    })
                     .cloned()
                     .collect()
             };

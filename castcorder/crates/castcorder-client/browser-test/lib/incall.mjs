@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, check } from './helpers.mjs';
+import { sleep, waitFor, text, check } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 import { sampleTile } from './levels.mjs';
 
@@ -46,6 +46,16 @@ export async function inCallChecks() {
     const r = await sampleTile(X, 'Y', 1500);
     return r.n > 0 && r.tallest > 2 ? r : null;
   }, 'X sees Y\x27s level move', 30000, 0);
+  // cast-n56.5: Y's own tile shows Y's level too: the newest 12 of the
+  // dock waveform's readings (a steady test tone sits on the adaptive noise
+  // floor, so both are flat here; the heights are compared, not the motion).
+  const ownWave = () => Y.evaluate(() => ({
+    own: [...document.querySelectorAll('#self-level .tile-wave span')].map((s) => s.style.height),
+    dock: [...document.querySelectorAll('.dock .wave span')].slice(-12).map((s) => s.style.height),
+  }));
+  const ow = await ownWave();
+  check(ow.own.length === 12 && JSON.stringify(ow.own) === JSON.stringify(ow.dock) && await Y.isVisible('#self-level'),
+    'the own tile shows the own microphone level (the dock waveform\x27s newest readings): ' + JSON.stringify(ow));
   await Y.click('#mute');
   // The waveform keeps about 1.3 s of readings: let the unmuted ones scroll out.
   await waitFor(async () => (await sampleTile(X, 'Y', 500)).muted > 0, 'X sees Y muted', 10000, 0);
@@ -69,6 +79,10 @@ export async function inCallChecks() {
   await waitFor(async () => (await tip(X)) === 1, 'a second mute explains again (not yet acknowledged)', 5000);
   await X.click('#self-view');
   await sleep(300);
+  // Hidden self view says so while the camera is on; camera off keeps the avatar.
+  const camOn = (await text(X, '#camera-state')) === 'on';
+  check((await X.isVisible('#self-hidden-note')) === camOn,
+    'Hide me shows "Self view hidden" only while the camera is on (camera ' + (camOn ? 'on' : 'off') + ')');
   check((await tip(X)) === 0 && (await X.getAttribute('#mute', 'aria-pressed')) === 'true',
     'another action (Hide me) closes the explanation; still muted');
   await X.click('#self-view');

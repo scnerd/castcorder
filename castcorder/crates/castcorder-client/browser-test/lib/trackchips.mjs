@@ -4,7 +4,8 @@
 // the device itself (its own tile):
 // - take 1: every chip goes Ready -> Starting -> Recording at the take start
 //   and back to Ready after the stop; the producer's top bar reads
-//   "2 of 2 recording"; a guest who is not a producer sees only its own chip.
+//   "2 of 2 recording"; a guest who is not a producer sees only its own chip
+//   and the host machine's (cast-n56.5: guests see that the host records).
 // - take 2 (micLostChecks): a guest's microphone track ends mid-take and is
 //   held lost (test hook window.__castcorderHoldMic): the producer sees
 //   "Mic lost" on its tile and "1 of 2 recording"; released, the microphone
@@ -83,9 +84,10 @@ export async function chipsWhileRecording(A, B) {
     return has(c, 'self', 'recording') && has(c, 'B', 'recording') && c.rollup === '2 of 2 recording' ? c : null;
   }, 'producer A sees Recording on both tiles and "2 of 2 recording"', 15000);
   check(true, 'producer A: both tracks Recording, top bar reads "' + a.rollup + '"');
-  const b = await waitFor(async () => { const c = await chips(B); return has(c, 'self', 'recording') ? c : null; },
-    'guest B sees Recording on its own tile', 15000);
-  check(!b.A && b.rollup === '', 'guest B (not a producer) sees only its own track chip and no roll-up: ' + JSON.stringify(b));
+  const b = await waitFor(async () => { const c = await chips(B); return has(c, 'self', 'recording') && has(c, 'A', 'recording') ? c : null; },
+    'guest B sees Recording on its own tile and on the host\'s', 15000);
+  check(b.rollup === '' && Object.keys(b).every((k) => ['self', 'A', 'rollup'].includes(k)),
+    'guest B (not a producer) sees its own track chip and the host machine\'s (A), no roll-up: ' + JSON.stringify(b));
 }
 
 // After take 1 stops: Ready again, no roll-up; every chip went

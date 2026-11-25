@@ -41,8 +41,21 @@ export async function takeInfoChecks() {
     return e && !e.hidden && e.offsetParent !== null ? e.textContent : '';
   });
   check((await pill(P)) === '', 'no take time on the pill while idle');
+  // The top bar (cast-n56.5): room and role on the left, the REC pill in a
+  // fixed slot, so nothing on the bar moves when a take starts.
+  const bar = (p) => p.evaluate(() => {
+    const x = (sel) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().left) : null; };
+    return { recordings: x('#open-recordings'), more: x('#more-menu'), h1: document.querySelector('.topbar h1')?.textContent,
+      role: document.querySelector('#role-chip')?.textContent };
+  });
+  const idleBar = await bar(P);
+  check(idleBar.h1 === 'takeinfo-test' && idleBar.role === 'Host' && (await bar(G)).role === 'Guest',
+    'the top bar names the room and the role: ' + JSON.stringify(idleBar) + ' / ' + JSON.stringify(await bar(G)));
   await P.click('#take-start');
   const first = await waitFor(async () => (await pill(P)) || null, 'the REC pill shows the take time', 15000);
+  const recBar = await bar(P);
+  check(recBar.recordings === idleBar.recordings && recBar.more === idleBar.more,
+    'the top bar does not move when a take starts: ' + JSON.stringify(idleBar) + ' then ' + JSON.stringify(recBar));
   check(/^\d+:\d\d$/.test(first), 'the REC pill shows the take time (' + first + ')');
   await sleep(3000);
   const later = await pill(P);
