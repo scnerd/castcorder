@@ -138,17 +138,35 @@ export async function rejoinChecks({ rendezvous } = {}) {
   check(await card(G).locator('.rejoin-room').isHidden(), 'a kicked device is offered no Rejoin');
   check((await card(G).locator('.rejoin-call, .continue-call').count()) === 0, 'nor any call');
 
-  // The link is regenerated (cast-lot): K (not trusted) is told plainly to ask
-  // the host for the new link, not "Status unknown", and is offered no Rejoin.
+  // The link is regenerated (cast-lot). A device that joined with a producer
+  // present is trusted (K): it is sent the new link and can still rejoin. U
+  // joined an always-open room with no producer present, so it is not trusted:
+  // it is told plainly to ask the host for the new link, not "Status unknown",
+  // and is offered no Rejoin.
+  await P.click('#open-toggle');
+  await waitFor(async () => (await text(P, '#room-open')) === 'always open', 'the room is always open', 10000);
+  await leave(P);
+  await waitFor(async () => !(await rooms()).live, 'the room empties for U', 20000);
+  const U = await openGuest('RU', [], base, undefined, 'Una', '#' + frag);
+  await U.click('#join');
+  await connected(U, 'U');
+  await leave(U);
+  await waitFor(async () => (await card(U).count()) === 1, 'U lists the room', 15000);
+  await P.click('#join');
+  await connected(P, 'P');
   await P.click('#regen-link');
-  // The host rotates the secret asynchronously: ask K only after it has.
+  // The host rotates the secret asynchronously: ask only after it has.
   await waitFor(() => h.err.includes('call secret regenerated'), 'the host regenerated the link', 15000);
+  await U.reload();
+  await U.waitForSelector('#join');
+  await waitFor(async () => (await card(U).count()) === 1 && (await chip(U)) === 'Link changed', 'U\x27s room says the link changed', 40000);
+  check((await chip(U)) === 'Link changed', 'after the link is regenerated an untrusted guest\x27s room says the link changed, not unknown');
+  check((await card(U).locator('.link-changed-note').innerText()).includes('ask the host for the new link'), 'the room says to ask the host for the new link');
+  check(await card(U).locator('.rejoin-room').isHidden(), 'no Rejoin is offered with a link that no longer works');
   await K.reload();
   await K.waitForSelector('#join');
-  await waitFor(async () => (await card(K).count()) === 1 && (await chip(K)) === 'Link changed', 'K\x27s room says the link changed', 40000);
-  check((await chip(K)) === 'Link changed', 'after the link is regenerated K\x27s room says the link changed, not unknown: ' + (await chip(K)));
-  check((await card(K).locator('.link-changed-note').innerText()).includes('ask the host for the new link'), 'the room says to ask the host for the new link');
-  check(await card(K).locator('.rejoin-room').isHidden(), 'no Rejoin is offered with a link that no longer works');
+  await waitFor(async () => (await card(K).count()) === 1 && (await chip(K)) === 'Live', 'K (trusted) still lists the room live', 40000);
+  check(await card(K).locator('.rejoin-room').isVisible(), 'a trusted device is sent the new link and can still Rejoin');
 
   // The host stops: K's page (served by the rendezvous) reloads and still
   // lists the room, offline.
