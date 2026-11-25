@@ -696,6 +696,10 @@ pub(super) fn on_track(ev: RtcTrackEvent) {
         old.remove();
     }
     let _ = tile.append_child(&el);
+    let ended_origin = origin.clone();
+    let on_ended = Closure::<dyn FnMut()>::new(move || track_ended(ended_origin.clone()));
+    track.set_onended(Some(on_ended.as_ref().unchecked_ref()));
+    on_ended.forget();
     // Their waveform and speaking ring, from the same stream the element plays.
     if !video && let Some(s) = el.src_object() {
         super::meters::watch(&origin, &tile, &s);
@@ -825,19 +829,64 @@ fn remove_tiles(left: &[u64]) {
         })
         .collect();
     for t in gone {
-        let origin = t.get_attribute("data-origin").unwrap_or_default();
-        info!(origin = %origin, "participant left: tile removed");
-        for class in [".remote-audio", ".remote-video"] {
-            if let Ok(Some(m)) = t.query_selector(class)
-                && let Ok(m) = m.dyn_into::<web_sys::HtmlMediaElement>()
-            {
-                m.set_src_object(None);
-            }
-        }
-        super::meters::forget(&origin);
-        with_engine(|e| e.mid_origin.retain(|(_, o)| *o != origin));
-        t.remove();
+        drop_tile(&t);
     }
+}
+
+/// Stop a remote tile's media elements and meter, then remove it.
+fn drop_tile(t: &web_sys::Element) {
+    let origin = t.get_attribute("data-origin").unwrap_or_default();
+    info!(origin = %origin, "participant left: tile removed");
+    for class in [".remote-audio", ".remote-video"] {
+        if let Ok(Some(m)) = t.query_selector(class)
+            && let Ok(m) = m.dyn_into::<web_sys::HtmlMediaElement>()
+        {
+            m.set_src_object(None);
+        }
+    }
+    super::meters::forget(&origin);
+    with_engine(|e| e.mid_origin.retain(|(_, o)| *o != origin));
+    t.remove();
+}
+
+/// How long after a track ends its tile waits for a replacement track
+/// before it goes (a renegotiation swaps tracks within moments).
+const ENDED_GRACE_MS: i32 = 2_000;
+
+/// A remote track ended: once the grace has passed, a tile with no live
+/// track left belongs to someone who left before any participant list
+/// named them, so [`remove_tiles`] never saw them go (cast-wg9).
+fn track_ended(origin: String) {
+    let cb = Closure::once_into_js(move || {
+        let Some(remote) = window()
+            .document()
+            .and_then(|d| d.get_element_by_id("remote"))
+        else {
+            return;
+        };
+        let tiles = remote.children();
+        let Some(tile) = (0..tiles.length())
+            .filter_map(|i| tiles.item(i))
+            .find(|t| t.get_attribute("data-origin").as_deref() == Some(origin.as_str()))
+        else {
+            return;
+        };
+        let live: Vec<bool> = [".remote-audio", ".remote-video"]
+            .iter()
+            .filter_map(|c| tile.query_selector(c).ok().flatten())
+            .filter_map(|m| m.dyn_into::<web_sys::HtmlMediaElement>().ok())
+            .filter_map(|m| m.src_object())
+            .filter_map(|s| s.dyn_into::<MediaStream>().ok())
+            .flat_map(|s| s.get_tracks().to_vec())
+            .filter_map(|t| t.dyn_into::<web_sys::MediaStreamTrack>().ok())
+            .map(|t| t.ready_state() != web_sys::MediaStreamTrackState::Ended)
+            .collect();
+        if crate::pagelink::tile_is_orphaned(&live) {
+            drop_tile(&tile);
+        }
+    });
+    let _ = window()
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), ENDED_GRACE_MS);
 }
 
 /// The name shown on a remote tile: the participant's display name (the
