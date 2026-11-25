@@ -314,3 +314,40 @@ fn a_sync_only_connection_files_by_key_and_survives_the_call_opening() {
     }
     assert!(guest.list().unwrap().is_empty());
 }
+
+/// A take's start and stop (cast-n56.8, its length on the Recordings panel)
+/// survive a crash and a reopen; a torn line is cut before the next mark.
+#[test]
+fn take_times_survive_a_crash_and_a_torn_line() {
+    let disk = SimDisk::new(14);
+    let root = disk.subdir("room").unwrap();
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    assert_eq!(lib.take_times(TakeId(1)).unwrap().length_us(), None);
+    lib.mark_take(TakeId(1), false, 1_000_000).unwrap();
+    lib.mark_take(TakeId(1), true, 755_000_000).unwrap();
+    lib.mark_take(TakeId(2), false, 800_000_000).unwrap();
+    drop(lib);
+    disk.crash();
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    assert_eq!(
+        lib.take_times(TakeId(1)).unwrap().length_us(),
+        Some(754_000_000)
+    );
+    // Take 2 never stopped (the host died mid-take): no length.
+    assert_eq!(lib.take_times(TakeId(2)).unwrap().length_us(), None);
+    drop(lib);
+    let take2 = root.subdir(OLD).unwrap().subdir("take02").unwrap();
+    assert!(take2.exists("times.jsonl").unwrap());
+    let mut f = take2.open("times.jsonl").unwrap();
+    let len = f.len().unwrap();
+    f.write_at(len, b"{\"stopped\":{\"host_").unwrap();
+    f.sync().unwrap();
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    lib.mark_take(TakeId(2), true, 810_000_000).unwrap();
+    drop(lib);
+    let mut lib = Library::open(&root, OLD, cfg()).unwrap();
+    assert_eq!(
+        lib.take_times(TakeId(2)).unwrap().length_us(),
+        Some(10_000_000)
+    );
+}

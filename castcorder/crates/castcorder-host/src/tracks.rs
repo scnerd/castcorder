@@ -50,12 +50,14 @@ pub fn take_dir(take: TakeId) -> String {
 /// One take's tracks. `recording` lists who is recording it now (empty when
 /// the take is not recording); each gets a `Recording` row beside whatever of
 /// theirs is already in the manifest (a segment finished mid-take).
+/// `length_s` is how long the take ran, once it stopped.
 pub fn take_tracks(
     take: TakeId,
     entries: &[ManifestEntry],
     receiving: &[Receiving],
     aligned: Option<&BTreeSet<(String, String)>>,
     recording: &[String],
+    length_s: Option<u32>,
 ) -> TakeTracks {
     let mut tracks: Vec<TrackStatus> = entries
         .iter()
@@ -105,6 +107,7 @@ pub fn take_tracks(
         take,
         dir: take_dir(take),
         tracks,
+        length_s,
     }
 }
 
@@ -196,7 +199,7 @@ mod tests {
             have: 3,
             total: 4,
         }];
-        let t = take_tracks(TakeId(1), &entries, &receiving, None, &[]);
+        let t = take_tracks(TakeId(1), &entries, &receiving, None, &[], None);
         assert_eq!(t.dir, "take01");
         assert_eq!(
             states(&t),
@@ -222,13 +225,20 @@ mod tests {
             have: 4,
             total: 4,
         };
-        let t = take_tracks(TakeId(1), &entries, std::slice::from_ref(&full), None, &[]);
+        let t = take_tracks(
+            TakeId(1),
+            &entries,
+            std::slice::from_ref(&full),
+            None,
+            &[],
+            None,
+        );
         assert_eq!(t.tracks[0].state, TrackState::Receiving { percent: 99 });
         let other = Receiving {
             take: TakeId(2),
             ..full
         };
-        let t = take_tracks(TakeId(1), &entries, &[other], None, &[]);
+        let t = take_tracks(TakeId(1), &entries, &[other], None, &[], None);
         assert_eq!(t.tracks[0].state, TrackState::Pending);
     }
 
@@ -240,7 +250,7 @@ mod tests {
             entry("B", "b-mic", SourceKind::Audio, "wav", true),
         ];
         let aligned: BTreeSet<_> = [("dev-A".to_string(), "mic".to_string())].into();
-        let t = take_tracks(TakeId(1), &entries, &[], Some(&aligned), &[]);
+        let t = take_tracks(TakeId(1), &entries, &[], Some(&aligned), &[], None);
         assert_eq!(
             states(&t),
             vec![
@@ -254,7 +264,14 @@ mod tests {
     #[test]
     fn a_recording_take_lists_who_records_it_beside_finished_segments() {
         let entries = vec![entry("B", "b-mic", SourceKind::Audio, "wav", false)];
-        let t = take_tracks(TakeId(1), &entries, &[], None, &["B".into(), "A".into()]);
+        let t = take_tracks(
+            TakeId(1),
+            &entries,
+            &[],
+            None,
+            &["B".into(), "A".into()],
+            None,
+        );
         assert_eq!(
             states(&t),
             vec![

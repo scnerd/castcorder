@@ -41,6 +41,7 @@ pub mod recorders;
 pub mod scope;
 pub mod session;
 pub mod signal;
+pub mod takes;
 pub mod wav;
 
 #[cfg(target_arch = "wasm32")]

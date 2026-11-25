@@ -116,7 +116,7 @@ import { homeLinkChecks } from './lib/homelink.mjs';
 import { inCallChecks } from './lib/incall.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { phoneLeaveChecks } from './lib/phone.mjs';
-import { recordingsWhileRecording, recordingsAfterSync } from './lib/recordings.mjs';
+import { recordingsWhileRecording, recordingsAfterSync, watchToasts } from './lib/recordings.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -290,6 +290,7 @@ try {
   await waitFor(async () => (await text(B, '#state')) === 'connected' && (await text(B, '#participant')).length > 0,
     'B connected again after reopening its microphone', 30000);
   await sleep(2000);
+  await watchToasts(A, B);
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 2 stopped', 10000);
   const TAKE2 = join(callDir(LIBRARY, 'browser-test'), 'take02');

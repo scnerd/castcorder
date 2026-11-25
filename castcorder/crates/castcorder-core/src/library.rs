@@ -7,6 +7,7 @@
 //! <library>/<call>/logs/<device>-<file>.jsonl      a guest log file (SourceKind::Log,
 //!                                                  take 0; manifest.jsonl beside it)
 //! <library>/<call>/takeNN/manifest.jsonl          the take's manifest
+//! <library>/<call>/takeNN/times.jsonl             when the take started and stopped
 //! <library>/<call>/takeNN/takeNN_<who>_<src>.wav  a track, received in place
 //!                         ... .wav.obao, .wav.journal   while it is incomplete
 //! <library>/<call>/takeNN/aligned/                aligned tracks and marker exports
@@ -64,6 +65,63 @@ use crate::sync::{SyncConfig, hex, sync_order};
 /// The manifest file in each take directory.
 pub const MANIFEST: &str = "manifest.jsonl";
 
+/// When a take started and stopped on the host timeline, appended as JSON
+/// lines like the manifest (a torn last line is ignored).
+pub const TIMES: &str = "times.jsonl";
+
+/// A line of [`TIMES`].
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TimeMark {
+    Started { host_us: i64 },
+    Stopped { host_us: i64 },
+}
+
+/// When a take started and stopped (microseconds on the host timeline), as
+/// far as its [`TIMES`] file says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TakeTimes {
+    /// The last start recorded.
+    pub started_us: Option<i64>,
+    /// The last stop recorded after that start.
+    pub stopped_us: Option<i64>,
+}
+
+impl TakeTimes {
+    /// The take's length, once it has both a start and a later stop.
+    pub fn length_us(&self) -> Option<i64> {
+        match (self.started_us, self.stopped_us) {
+            (Some(a), Some(b)) if b >= a => Some(b - a),
+            _ => None,
+        }
+    }
+
+    fn apply(&mut self, mark: &TimeMark) {
+        match *mark {
+            TimeMark::Started { host_us } => {
+                self.started_us = Some(host_us);
+                self.stopped_us = None;
+            }
+            TimeMark::Stopped { host_us } => self.stopped_us = Some(host_us),
+        }
+    }
+}
+
+/// Parse a take's [`TIMES`] file; parsing stops at a torn or unparsable line.
+pub fn parse_times(buf: &[u8]) -> TakeTimes {
+    let mut t = TakeTimes::default();
+    for line in buf.split_inclusive(|b| *b == b'\n') {
+        if !line.ends_with(b"\n") {
+            break;
+        }
+        let Ok(m) = serde_json::from_slice::<TimeMark>(&line[..line.len() - 1]) else {
+            break;
+        };
+        t.apply(&m);
+    }
+    t
+}
+
 /// One track in a take's manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEntry {
@@ -99,6 +157,7 @@ struct Take<S: Storage> {
     log_len: u64,
     /// Keyed by (device, name).
     entries: BTreeMap<(String, String), ManifestEntry>,
+    times: TakeTimes,
 }
 
 impl<S: Storage> Take<S> {
@@ -424,11 +483,20 @@ impl<S: Storage> Library<S> {
         if removed {
             dir.sync_dir()?;
         }
+        let times = if dir.exists(TIMES)? {
+            let mut f = dir.open(TIMES)?;
+            let mut buf = vec![0u8; f.len()? as usize];
+            castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf)?;
+            parse_times(&buf)
+        } else {
+            TakeTimes::default()
+        };
         Ok(Take {
             dir,
             log,
             log_len: valid as u64,
             entries,
+            times,
         })
     }
 
@@ -589,6 +657,41 @@ impl<S: Storage> Library<S> {
             .entries
             .get(&(device.to_string(), name.to_string()))
             .cloned())
+    }
+
+    /// Record (durably) that `take` started (`stopped` false) or stopped at
+    /// `host_us` on the host timeline.
+    pub fn mark_take(&mut self, take: TakeId, stopped: bool, host_us: i64) -> io::Result<()> {
+        let mark = if stopped {
+            TimeMark::Stopped { host_us }
+        } else {
+            TimeMark::Started { host_us }
+        };
+        let mut line = serde_json::to_vec(&mark).map_err(io::Error::other)?;
+        line.push(b'\n');
+        let t = self.take(take)?;
+        let existed = t.dir.exists(TIMES)?;
+        let mut f = t.dir.open(TIMES)?;
+        // Drop a torn tail first, so the new line parses.
+        let len = f.len()?;
+        let mut buf = vec![0u8; len as usize];
+        castcorder_transfer::io::read_exact_at(&mut f, 0, &mut buf)?;
+        let whole = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1) as u64;
+        if whole != len {
+            f.set_len(whole)?;
+        }
+        f.write_at(whole, &line)?;
+        f.sync()?;
+        if !existed {
+            t.dir.sync_dir()?;
+        }
+        t.times.apply(&mark);
+        Ok(())
+    }
+
+    /// When `take` started and stopped, as recorded by [`Library::mark_take`].
+    pub fn take_times(&mut self, take: TakeId) -> io::Result<TakeTimes> {
+        Ok(self.take(take)?.times)
     }
 
     /// Every entry of a take's manifest, sorted by file name.
@@ -1055,7 +1158,25 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_ext;
+    use super::{TakeTimes, clean_ext, parse_times};
+
+    #[test]
+    fn take_times_parse_and_length() {
+        let t =
+            parse_times(b"{\"started\":{\"host_us\":1000}}\n{\"stopped\":{\"host_us\":61000}}\n");
+        assert_eq!(t.length_us(), Some(60_000));
+        // A restart clears the earlier stop; a torn line is ignored.
+        let t = parse_times(b"{\"started\":{\"host_us\":1}}\n{\"stopped\":{\"host_us\":5}}\n{\"started\":{\"host_us\":9}}\n{\"stopp");
+        assert_eq!(
+            t,
+            TakeTimes {
+                started_us: Some(9),
+                stopped_us: None
+            }
+        );
+        assert_eq!(t.length_us(), None);
+        assert_eq!(parse_times(b"").length_us(), None);
+    }
 
     #[test]
     fn extensions_keep_single_dots_only() {

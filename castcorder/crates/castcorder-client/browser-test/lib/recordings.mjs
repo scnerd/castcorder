@@ -7,6 +7,10 @@
 //   "waiting" while the take records (nothing syncs then), and "delivered"
 //   once the host has it;
 // - B made a producer sees the same takes and states but not the folder.
+// The Recordings panel's words (cast-n56.8): A lists take 2 as "Take 2 -
+// m:ss - saved" with a row per person, the files folded away, and no "Your
+// recordings" (the host machine's page); A and B are told "Take 2 saved" once
+// it is, and the note then goes.
 import { resolve } from 'node:path';
 import { ctx } from './ctx.mjs';
 import { waitFor, check, sleep, callDir, personAction } from './helpers.mjs';
@@ -18,6 +22,24 @@ const mine = (p) => p.evaluate(() => [...document.querySelectorAll('#your-record
   .map((li) => ({ name: li.dataset.name, state: li.dataset.state, text: li.textContent })));
 
 const norm = (s) => s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+// Before take 2 stops: note every state of the "Take N saved" note.
+export async function watchToasts(...pages) {
+  for (const p of pages) {
+    await p.evaluate(() => {
+      window.__toasts = [];
+      let last = '';
+      const note = () => {
+        const t = document.getElementById('take-toast');
+        const now = t ? t.dataset.take + '|' + t.dataset.state + '|' + t.textContent.trim() : 'gone';
+        if (now !== last) { window.__toasts.push(now); last = now; }
+      };
+      new MutationObserver(note).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+    });
+  }
+}
+
+const toasts = (p) => p.evaluate(() => window.__toasts || []);
 
 // While take 2 records: B's finished first segment waits, and A sees B recording.
 export async function recordingsWhileRecording(A, B, seg1) {
@@ -48,6 +70,26 @@ export async function recordingsAfterSync(A, B, seg1Name) {
     + JSON.stringify(take2 || await rows(A, 2)));
   check(!!take2 && ['A', 'B'].every((w) => take2.some((r) => r.who === w && r.file.startsWith('take02_'))),
     'host page: take 2 lists A\'s and B\'s track files');
+  const panel = await A.evaluate(() => {
+    const li = document.querySelector('#recordings li.take[data-take="2"]');
+    return li && {
+      line: li.querySelector('.take-line').textContent,
+      length: li.dataset.length,
+      state: li.dataset.state,
+      people: [...li.querySelectorAll('li.take-person')].map((p) => p.dataset.participant + ':' + p.dataset.state),
+      folded: !li.querySelector('details.take-files').open,
+      first: document.querySelector('#recordings li.take').dataset.take,
+    };
+  });
+  check(!!panel && /^Take 2 \u00b7 \d+:\d\d \u00b7 saved$/.test(panel.line) && Number(panel.length) > 0 && panel.state === 'saved'
+    && panel.people.join(',') === 'A:saved,B:saved' && panel.folded && panel.first === '2',
+    'host page: Recordings lists take 2 newest first as length and saved, a row per person, files folded: ' + JSON.stringify(panel));
+  check((await A.locator('#your-recordings').count()) === 0, 'host page: no "Your recordings" (guest-only text)');
+  for (const [p, n] of [[A, 'A'], [B, 'B']]) {
+    const seen = await waitFor(async () => { const t = await toasts(p); return t.includes('2|saved|Take 2 saved') && t[t.length - 1] === 'gone' ? t : null; },
+      n + ' told take 2 saved, then the note goes', 20000).catch(() => null);
+    check(!!seen, n + ': "Take 2 saved" once take 2 is saved, then the note goes: ' + JSON.stringify(seen || await toasts(p)));
+  }
   const del = await waitFor(async () => (await mine(B)).find((r) => r.name === seg1Name && r.state === 'delivered'),
     'B lists its first segment as delivered', 15000).catch(() => null);
   check(!!del, 'B: "Your recordings" shows ' + seg1Name + ' delivered to the host (removed here)');
