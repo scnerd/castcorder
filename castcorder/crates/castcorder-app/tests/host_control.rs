@@ -229,3 +229,26 @@ fn the_recordings_folder_is_the_calls_folder_in_the_library() {
     control.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The call window's bridge to its install (cast-40e.10) goes through these:
+/// a contact code for one person, and using another install's code. Both
+/// refuse while the host is stopped, and the bridge has no origin to allow
+/// without a rendezvous.
+#[test]
+fn the_call_window_bridge_makes_and_uses_contact_codes() {
+    let root = scratch("bridge");
+    let a = HostControl::new(config(&root.join("a")));
+    let b = HostControl::new(config(&root.join("b")));
+    assert!(a.contact_code_for("someone").is_err(), "stopped");
+    assert!(b.add_contact("x").is_err(), "stopped");
+    a.start().unwrap();
+    b.start().unwrap();
+    assert_eq!(a.project_origin(), None, "no rendezvous");
+    let code = a.contact_code_for("someone").unwrap();
+    assert!(code.starts_with("https://"), "{code}");
+    assert!(b.add_contact("not a code").is_err());
+    b.add_contact(&code).unwrap();
+    a.stop();
+    b.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -356,6 +356,13 @@ impl Running {
         ))
     }
 
+    /// The origin (`scheme://host[:port]`) of the project's pages on the
+    /// rendezvous, if the host uses one: the only pages the app's call window
+    /// lets reach this install (cast-40e.10).
+    pub fn project_origin(&self) -> Option<String> {
+        self.call_links.base.as_ref().map(|b| origin_of(&b.base))
+    }
+
     /// The link the app hands its own call window so it links itself to
     /// this person (cast-40e.7): the origin of the project's pages on the
     /// rendezvous and the code's fragment (`link.<host-id>.<secret>`), whose
@@ -919,6 +926,12 @@ pub fn start(
             tracing::warn!(error = %e, "no spare UDP socket: renewing relay credentials will drop relayed calls")
         }
     }
+    // A fresh socket (new source port) for each TURN retry when a path drops
+    // one flow for good (cast-7bu).
+    let bind_ip = args.bind;
+    host.set_socket_factory(Box::new(move || {
+        UdpDatagramSocket::bind(SocketAddr::new(bind_ip, 0))
+    }));
     let (tx, rx) = mpsc::channel();
     let health = rendezvous::SharedHealth::default();
     let rendezvous = args.rendezvous.as_ref().map(|base| rendezvous::Config {
