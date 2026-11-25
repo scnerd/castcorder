@@ -45,6 +45,9 @@ struct HomeRoom {
     /// Devices that joined with its link.
     #[serde(default)]
     devices: Vec<super::person::JoinedDev>,
+    /// Who waits for a producer to join it now (cast-n56.9).
+    #[serde(default)]
+    waiting: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -587,6 +590,9 @@ fn room_card(
                     <Show when=move || live><span class="chip ok">"Live"</span></Show>
                 </div>
                 <span class="small muted room-line">{line}</span>
+                {crate::waiting::line(&r.waiting).map(|w| view! {
+                    <span class="room-waiting" role="status"><Icon name="people" small=true/>{w}</span>
+                })}
                 <span class="room-actions">
                     <a class="btn primary join-room" href=format!("/?room={}", name)>"Join"</a>
                     <button class="btn icon copy-room-link" title="Copy the call link" on:click=move |_| copy(n1.clone(), l1.clone())>

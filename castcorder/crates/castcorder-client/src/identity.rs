@@ -103,6 +103,27 @@ pub fn cert() -> Option<castcorder_link::DeviceCert> {
     person().map(|p| p.cert)
 }
 
+thread_local! {
+    /// The app's call window is linking itself (cast-40e.7).
+    static LINKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark the call window's own link as under way (or done).
+pub fn set_linking(on: bool) {
+    LINKING.with(|l| l.set(on));
+}
+
+/// The certificate to offer with, once the app's call window has linked
+/// itself (waiting up to 5 s for that), so its first offer already carries
+/// it.
+pub async fn cert_settled() -> Option<castcorder_link::DeviceCert> {
+    let started = js_sys::Date::now();
+    while LINKING.with(|l| l.get()) && js_sys::Date::now() - started < 5_000.0 {
+        crate::mailbox::sleep_ms(100).await;
+    }
+    cert()
+}
+
 /// Remember a link (only the certificate and the name: a browser profile is
 /// never sent the person key).
 pub fn remember_person(grant: &castcorder_link::wire::LinkGrant) {

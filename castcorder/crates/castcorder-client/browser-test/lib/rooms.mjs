@@ -10,7 +10,9 @@ import { openGuest } from './guest.mjs';
 // - the host machine's home (its page with no query) lists the rooms; a new,
 //   empty room is made there and its call link copied;
 // - a guest opening that room's link before anyone opened it waits in the
-//   lobby; the producer joins the room from the home and the guest gets in;
+//   lobby, and the home's card says "Gil is waiting for a producer"; the
+//   producer joins the room from the home and the guest gets in (no longer
+//   listed as waiting);
 // - everyone leaves and rejoins: the same call (same folder, take numbers
 //   continue); the guest reloads and joins mid-take, its first take status
 //   a recording one, and its track still syncs (cast-83e);
@@ -77,6 +79,13 @@ export async function roomsChecks() {
   await waitFor(async () => (await text(G, '#state')).includes('waiting for the host or a producer'), 'G waits in the lobby', 20000);
   check(true, 'a guest opening a room that is not live waits in the lobby');
   check(!(await live()), 'nothing is live while the guest waits');
+  // The home says so on the room's card (cast-n56.9).
+  const waitLine = await waitFor(async () => {
+    const t = await card.locator('.room-waiting').textContent({ timeout: 500 }).catch(() => '');
+    return t && t.trim() === 'Gil is waiting for a producer' ? t : null;
+  }, 'the home says Gil is waiting', 10000).catch(() => null);
+  check(!!waitLine && (await rooms()).find((r) => r.name === ROOM).waiting.join() === 'Gil',
+    'the room card says who is waiting for a producer: ' + waitLine);
 
   // The producer joins the room from the home; the guest gets in.
   await card.locator('.join-room').click();
@@ -86,6 +95,7 @@ export async function roomsChecks() {
   await P.fill('#name', 'Pat');
   await P.click('#join');
   await waitFor(async () => (await text(G, '#state')) === 'connected', 'G gets in once the producer opened the room', 40000);
+  check((await rooms()).find((r) => r.name === ROOM).waiting.length === 0, 'once in, the guest is no longer listed as waiting');
   await waitFor(async () => (await text(P, '#current-call')).length > 0, 'the producer sees which call this is', 15000);
   const first = await text(P, '#current-call');
   const startTake = async (n) => {

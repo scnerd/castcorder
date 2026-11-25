@@ -142,6 +142,21 @@ impl HostControl {
         Some((v.invites.len(), newest))
     }
 
+    /// The script the call window runs on every page (cast-40e.7): on the
+    /// project's own pages (the rendezvous origin) it hands the page a link
+    /// code approved in advance, so the window links itself to this
+    /// install's person. Empty when the host is not running or not yet
+    /// registered with a rendezvous.
+    pub fn call_window_script(&self) -> String {
+        let link = self
+            .running
+            .lock()
+            .ok()
+            .and_then(|r| r.as_ref()?.call_window_link());
+        link.map(|(origin, fragment)| autolink_script(&origin, &fragment))
+            .unwrap_or_default()
+    }
+
     /// Rotate the call secret (the old call link stops admitting anyone) and
     /// return the new call link, if the host is reachable through a rendezvous.
     pub fn regenerate_link(&self) -> Result<Option<String>, String> {
@@ -285,5 +300,43 @@ mod tests {
                 assert_ne!(a.rgb(), b.rgb());
             }
         }
+    }
+}
+
+/// The call window's script for `origin` and the code's `fragment`: it sets
+/// `window.__castcorderAutoLink` only on a page of that origin, so another
+/// host's LAN page loaded in the window never sees the code.
+pub fn autolink_script(origin: &str, fragment: &str) -> String {
+    // A JS string literal; anything but plain URL characters escaped.
+    let q = |s: &str| {
+        let body: String = s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '_' | '-') {
+                    c.to_string()
+                } else {
+                    format!("\\u{:04x}", c as u32)
+                }
+            })
+            .collect();
+        format!("\"{body}\"")
+    };
+    format!(
+        "if (window.location.origin === {}) {{ window.__castcorderAutoLink = {}; }}",
+        q(origin),
+        q(fragment)
+    )
+}
+
+#[cfg(test)]
+mod autolink_tests {
+    #[test]
+    fn the_script_names_the_origin_and_the_code() {
+        let s = super::autolink_script("https://cast.example", "link.h.s");
+        assert_eq!(
+            s,
+            r#"if (window.location.origin === "https://cast.example") { window.__castcorderAutoLink = "link.h.s"; }"#
+        );
+        assert!(super::autolink_script("x\"y", "a</b").contains(r#""x\u0022y""#));
     }
 }

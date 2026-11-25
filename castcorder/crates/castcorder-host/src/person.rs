@@ -98,6 +98,9 @@ struct Code {
     secret: [u8; 16],
     made_ms: u64,
     claim: Option<Claim>,
+    /// Approved in advance for the app's own call window (cast-40e.7):
+    /// a browser profile only, never an app install, and kept until used.
+    auto: bool,
 }
 
 /// A link request waiting for a decision, as the home page shows it.
@@ -292,7 +295,11 @@ impl Persons {
                     kind: c.kind,
                 })
                 .collect(),
-            codes: g.codes.iter().filter(|c| c.claim.is_none()).count(),
+            codes: g
+                .codes
+                .iter()
+                .filter(|c| c.claim.is_none() && !c.auto)
+                .count(),
             joining: g.joining.clone(),
         }
     }
@@ -318,8 +325,33 @@ impl Persons {
             secret,
             made_ms: now_ms,
             claim: None,
+            auto: false,
         });
         info!("made a link code");
+        Ok(LinkCode {
+            host: g.host.id(),
+            secret,
+        })
+    }
+
+    /// Make the link code the app hands its own call window (cast-40e.7):
+    /// approved in advance, so the first browser profile to use it is linked
+    /// at once with nobody asked; it links a browser profile only (never one
+    /// that would get the person key), is used once, and replaces any earlier
+    /// such code not used yet. Never shown to anyone: the app injects it into
+    /// its call window only on the project's own pages.
+    pub fn new_auto_code(&self, now_ms: u64) -> io::Result<LinkCode> {
+        let mut g = self.lock();
+        g.expire(now_ms);
+        g.codes.retain(|c| !(c.auto && c.claim.is_none()));
+        let secret = crate::rendezvous::random()?;
+        g.codes.push(Code {
+            secret,
+            made_ms: now_ms,
+            claim: None,
+            auto: true,
+        });
+        info!("made the call window's link code");
         Ok(LinkCode {
             host: g.host.id(),
             secret,
@@ -471,7 +503,7 @@ impl Inner {
 
     fn expire(&mut self, now_ms: u64) {
         self.codes
-            .retain(|c| now_ms.saturating_sub(c.made_ms) <= CODE_TTL_MS);
+            .retain(|c| c.auto || now_ms.saturating_sub(c.made_ms) <= CODE_TTL_MS);
     }
 
     fn answer(&mut self, ask: &LinkAsk, key: [u8; 32], device: &str, now_ms: u64) -> LinkAnswer {
@@ -487,7 +519,21 @@ impl Inner {
             return refuse("unknown or expired link code");
         };
         let code = &mut self.codes[i];
+        if code.auto && ask.kind != DeviceKind::Browser {
+            return refuse("this link code is only for the app's call window");
+        }
         let claim = match &mut code.claim {
+            None if code.auto => {
+                let c = Claim {
+                    key,
+                    name: crate::http::clean_label(&ask.name),
+                    kind: ask.kind,
+                    state: ClaimState::Approved,
+                };
+                info!(device, name = %ask.name, "the app's call window links itself");
+                code.claim = Some(c.clone());
+                c
+            }
             None => {
                 code.claim = Some(Claim {
                     key,
@@ -771,6 +817,53 @@ mod tests {
         let c = Persons::load_or_create(&dir, &HostKey::from_secret([2; 32]), NOW).unwrap();
         assert_ne!(c.id(), a.id());
         assert!(dir.join(format!("person.json.bad-{NOW}")).exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The app's call window code (cast-40e.7): a browser is linked at once,
+    /// with nobody asked; an app install never; used once; a newer code
+    /// replaces an unused one; never counted as a code waiting to be used,
+    /// and never expires.
+    #[test]
+    fn the_call_window_code_links_a_browser_at_once_and_only_once() {
+        let dir = tmp("auto");
+        let host = HostKey::from_secret([1; 32]);
+        let p = Persons::load_or_create(&dir, &host, NOW).unwrap();
+        p.set_names(Some("Ann"), None).unwrap();
+        let old = p.new_auto_code(NOW).unwrap();
+        let code = p.new_auto_code(NOW).unwrap();
+        assert_eq!(p.view(NOW).codes, 0);
+        let window = HostKey::from_secret([5; 32]);
+        assert!(matches!(
+            p.answer(&ask(&old, &window, DeviceKind::Browser, NOW), NOW),
+            LinkAnswer::Refused(w) if w.contains("unknown")
+        ));
+        let app = HostKey::from_secret([6; 32]);
+        assert!(matches!(
+            p.answer(&ask(&code, &app, DeviceKind::App, NOW), NOW),
+            LinkAnswer::Refused(w) if w.contains("call window")
+        ));
+        let later = NOW + 2 * CODE_TTL_MS;
+        let LinkAnswer::Granted(g) =
+            p.answer(&ask(&code, &window, DeviceKind::Browser, later), later)
+        else {
+            panic!("the call window is linked at once");
+        };
+        assert!(
+            g.person_secret.is_none(),
+            "a browser profile never gets the person key"
+        );
+        assert_eq!(verify_cert(&g.cert, &window.id().0).ok(), Some(p.public()));
+        assert!(p.view(later).requests.is_empty(), "nobody was asked");
+        assert_eq!(p.view(later).devices.len(), 1);
+        let other = HostKey::from_secret([7; 32]);
+        assert!(matches!(
+            p.answer(
+                &ask(&code, &other, DeviceKind::Browser, later + 1),
+                later + 1
+            ),
+            LinkAnswer::Refused(_)
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 

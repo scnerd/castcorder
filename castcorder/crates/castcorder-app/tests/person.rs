@@ -225,3 +225,91 @@ fn a_linked_app_install_is_a_producer_in_the_other_installs_room() {
     b.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The app's call window links itself (cast-40e.7): the code the app hands
+/// it is approved in advance, so a browser profile's link request over A's
+/// LAN listener is granted at once with nobody asked, and with that
+/// certificate its key enters A's producer-gated, empty room as one of the
+/// owner's devices. The code is single use and never links an app install.
+#[test]
+fn the_app_s_call_window_links_itself_and_is_a_producer() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-autolink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let a = start(&root, "a");
+    a.set_person_names(Some("Ann"), None).unwrap();
+    let fragment = a.call_window_code().unwrap();
+    let code = castcorder_link::person::LinkCode::parse(&fragment).unwrap();
+    let lan = a.lan_links()[0].clone();
+    let mut exchange = |sealed: &[u8]| {
+        let (status, body) = lan_post(
+            &lan,
+            "/link",
+            "text/plain",
+            &castcorder_link::wire::b64(sealed),
+        )?;
+        assert_eq!(status, 200, "{body}");
+        castcorder_link::wire::unb64(body.trim()).ok_or_else(|| "not base64url".to_string())
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    // An app install cannot use it.
+    let app = castcorder_link::HostKey::from_secret([56; 32]);
+    let refused = castcorder_host::person::request_link(
+        &code,
+        &app,
+        "App",
+        castcorder_link::person::DeviceKind::App,
+        &mut exchange,
+        deadline,
+    );
+    assert!(refused.is_err(), "{refused:?}");
+    let window_secret = [55u8; 32];
+    let window = castcorder_link::HostKey::from_secret(window_secret);
+    let grant = castcorder_host::person::request_link(
+        &code,
+        &window,
+        "Castcorder app",
+        castcorder_link::person::DeviceKind::Browser,
+        &mut exchange,
+        deadline,
+    )
+    .expect("granted at once, with nobody asked");
+    assert!(grant.person_secret.is_none());
+    assert!(a.person().requests.is_empty());
+    assert_eq!(a.person().devices.len(), 1);
+    // Used once.
+    let again = castcorder_host::person::request_link(
+        &code,
+        &castcorder_link::HostKey::from_secret([57; 32]),
+        "Another",
+        castcorder_link::person::DeviceKind::Browser,
+        &mut exchange,
+        deadline,
+    );
+    assert!(again.is_err(), "{again:?}");
+    // The window's key without the certificate waits; with it, it enters.
+    assert_eq!(
+        connect(&a, &window_secret, None).err().expect("waits").0,
+        503
+    );
+    let guest = connect(&a, &window_secret, Some(&grant.cert)).unwrap();
+    let mut rpc = RpcClient::new(End(guest.clone()));
+    let joined = call(
+        &guest,
+        &mut rpc,
+        Request::Join {
+            display_name: "Ann (app)".into(),
+            protocol_version: PROTOCOL_VERSION,
+        },
+    );
+    assert!(matches!(joined, Response::Joined { .. }), "{joined:?}");
+    let started = call(&guest, &mut rpc, Request::StartTake);
+    assert!(
+        matches!(started, Response::TakeStartedAt { .. }),
+        "{started:?}"
+    );
+    let _ = call(&guest, &mut rpc, Request::StopTake);
+    drop(rpc);
+    drop(guest);
+    a.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
