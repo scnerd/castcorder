@@ -811,8 +811,7 @@ fn Call(ui: Ui) -> impl IntoView {
                             </Show>
                         </div>
                         <div class="section" hidden=move || panel() != Panel::Transcript>
-                            <div class="empty">"A live, speaker-labelled transcript of the whole call will appear here. "
-                                "It is not available yet."</div>
+                            <super::transcript::Transcript ui=ui/>
                         </div>
                         <details class="diag">
                             <summary>"Connection details"</summary>
@@ -1004,6 +1003,8 @@ pub(super) fn App() -> impl IntoView {
         elapsed: RwSignal::new(String::new()),
         persons: RwSignal::new(Vec::new()),
         contact_offer: RwSignal::new(None),
+        transcript: RwSignal::new(Vec::new()),
+        transcript_query: RwSignal::new(String::new()),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),
         // `?camera=off` joins with the camera off.

@@ -66,6 +66,7 @@ mod recvideo;
 mod rejoin;
 mod rpc;
 mod settings;
+mod transcript;
 mod view;
 
 use std::cell::{Cell, RefCell};
@@ -418,6 +419,10 @@ struct Ui {
     /// An offer to become contacts from another participant, shown until
     /// answered (`Event::ContactOffer`).
     contact_offer: RwSignal<Option<contact_offer::Offer>>,
+    /// The call's live transcript, in spoken order (cast-7hm.3).
+    transcript: RwSignal<Vec<castcorder_protocol::TranscriptLine>>,
+    /// What the Transcript panel searches for.
+    transcript_query: RwSignal<String>,
     /// The last producer request's result.
     producer_result: RwSignal<String>,
     /// The last debug request's result.
