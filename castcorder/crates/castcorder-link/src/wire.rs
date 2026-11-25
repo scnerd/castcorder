@@ -244,6 +244,10 @@ pub struct OfferPlain {
 pub struct PresencePing {
     /// The asking install's device name.
     pub device: String,
+    /// The asking person's device revocations (cast-40e.6), for the
+    /// contact to learn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 /// The answer to a presence ping: the answering install is online.
@@ -253,6 +257,9 @@ pub struct PresenceAnswer {
     pub name: String,
     /// The answering install's device name.
     pub device: String,
+    /// The answering person's device revocations (cast-40e.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 /// A person asks to become a contact of the person whose app install made a
@@ -321,6 +328,10 @@ pub struct LinkGrant {
     /// The person key's secret, base64url: for an app install only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_secret: Option<String>,
+    /// The person's device revocations so far (cast-40e.6), for an app
+    /// install to keep.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked: Vec<crate::person::Revocation>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -530,6 +541,7 @@ mod tests {
                 cert,
                 person_name: "Ann".into(),
                 person_secret: None,
+                revoked: Vec::new(),
             }))),
             r#"{"link":{"granted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"person_name":"Ann"}}}"#
         );
@@ -578,16 +590,34 @@ mod tests {
         assert_eq!(
             ping.presence,
             Some(PresencePing {
-                device: "Laptop".into()
+                device: "Laptop".into(),
+                revoked: Vec::new(),
             })
         );
         let pa = AnswerPlain::Presence(PresenceAnswer {
             name: "Ann".into(),
             device: "Desk".into(),
+            revoked: Vec::new(),
         });
         assert_eq!(
             to_json(&pa),
             r#"{"presence":{"name":"Ann","device":"Desk"}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
+        // With a revocation (cast-40e.6).
+        let pa = AnswerPlain::Presence(PresenceAnswer {
+            name: "Ann".into(),
+            device: "Desk".into(),
+            revoked: vec![crate::person::Revocation {
+                person: "P".into(),
+                device: "D".into(),
+                revoked_ms: 7,
+                sig: "S".into(),
+            }],
+        });
+        assert_eq!(
+            to_json(&pa),
+            r#"{"presence":{"name":"Ann","device":"Desk","revoked":[{"person":"P","device":"D","revoked_ms":7,"sig":"S"}]}}"#
         );
         assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
         // An offer from an older page (no device, no password) still parses.

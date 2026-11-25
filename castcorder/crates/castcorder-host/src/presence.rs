@@ -231,6 +231,8 @@ pub struct Me {
     pub name: String,
     /// This install's device name.
     pub device: String,
+    /// The person's device revocations, sent with each ping (cast-40e.6).
+    pub revoked: Vec<castcorder_link::person::Revocation>,
 }
 
 /// Ping the contact install `to` once through `exchange`: its answer, or why
@@ -264,6 +266,7 @@ pub fn ping(
         contact_link: false,
         presence: Some(PresencePing {
             device: me.device.clone(),
+            revoked: me.revoked.clone(),
         }),
     };
     let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;

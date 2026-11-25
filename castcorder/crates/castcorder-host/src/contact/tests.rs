@@ -321,11 +321,23 @@ fn ping_as(
     cert: DeviceCert,
     now: u64,
 ) -> Result<castcorder_link::wire::PresenceAnswer, String> {
+    ping_with(to, key, cert, Vec::new(), now)
+}
+
+/// [`ping_as`], the ping carrying the revocations `revoked`.
+fn ping_with(
+    to: &Install,
+    key: &HostKey,
+    cert: DeviceCert,
+    revoked: Vec<castcorder_link::person::Revocation>,
+    now: u64,
+) -> Result<castcorder_link::wire::PresenceAnswer, String> {
     let me = crate::presence::Me {
         key: HostKey::from_secret(key.secret()),
         cert,
         name: "Bob".into(),
         device: "Laptop".into(),
+        revoked,
     };
     // A proof signed `skew` ms before the answering clock's now.
     let signed = now - to.skew.get();
@@ -436,6 +448,7 @@ fn link_as(to: &Install, key: &HostKey, cert: DeviceCert, now: u64) -> Result<Li
         cert,
         name: "Bob".into(),
         device: "Laptop".into(),
+        revoked: Vec::new(),
     };
     let mut admitted = None;
     let sdp = "v=0\r\nfake offer";
@@ -482,6 +495,7 @@ fn only_a_contacts_install_gets_a_contact_link_and_never_while_appearing_offline
         cert: b.persons.cert(),
         name: "Bob".into(),
         device: "Laptop".into(),
+        revoked: Vec::new(),
     };
     let _ = crate::presence::ping(&me, &a.host.id(), now, &mut |sealed: &[u8]| {
         let (plain, _) = a.host.open_offer(sealed).map_err(|e| e.to_string())?;
@@ -571,4 +585,62 @@ fn a_code_made_for_a_chosen_person_is_accepted_at_once_for_them_only() {
     assert!(a.contacts.get(&b.persons.id()).is_some());
     assert!(b.contacts.get(&a.persons.id()).is_some());
     assert!(a.contacts.view(crate::wall_ms()).requests.is_empty());
+}
+
+#[test]
+fn a_revoked_install_is_dropped_refused_and_never_learned_again() {
+    let (a, b) = paired(46);
+    let now = crate::wall_ms();
+    // A second app install of Bob's, which Ann learns from its ping.
+    let other = HostKey::from_secret([48; 32]);
+    let oid = device_id(&other.id().0);
+    let cert = person_key(&b).certify(&other.id().0, DeviceKind::App, now);
+    assert!(ping_as(&a, &other, cert.clone(), now).is_ok());
+    assert_eq!(a.contacts.get(&b.persons.id()).unwrap().devices.len(), 2);
+    // A revocation signed by another person is ignored.
+    let c = install("Cy", 49);
+    let forged = person_key(&c).revoke(&oid, now);
+    assert!(ping_with(&a, &b.host, b.persons.cert(), vec![forged], now).is_ok());
+    assert_eq!(a.contacts.get(&b.persons.id()).unwrap().devices.len(), 2);
+    assert!(!a.persons.is_revoked(&oid));
+    // Bob revokes it; his next ping carries the revocation.
+    b.persons.revoke(&oid, now).unwrap();
+    assert!(ping_with(&a, &b.host, b.persons.cert(), b.persons.revocations(), now).is_ok());
+    let kept = a.contacts.get(&b.persons.id()).unwrap();
+    assert_eq!(kept.devices.len(), 1);
+    assert!(!kept.devices.contains(&cert));
+    assert!(a.persons.is_revoked(&oid));
+    // Its own pings and link offers are refused, so it is not learned again.
+    assert!(ping_as(&a, &other, cert.clone(), now).is_err());
+    assert!(link_as(&a, &other, cert.clone(), now).is_err());
+    assert_eq!(a.contacts.get(&b.persons.id()).unwrap().devices.len(), 1);
+    // It survives a restart.
+    let persons = Persons::load_or_create(&a.dir, &a.host, NOW).unwrap();
+    let back = Contacts::load(&a.dir, &a.host, persons.clone(), NOW).unwrap();
+    assert!(persons.is_revoked(&oid));
+    let me = back.me();
+    assert!(me.revoked.is_empty(), "Ann's own revocations only");
+}
+
+#[test]
+fn a_presence_answer_carries_the_answering_person_s_revocations() {
+    let (a, b) = paired(50);
+    let now = crate::wall_ms();
+    // A second install of Ann's, which Bob learns from its ping.
+    let other = HostKey::from_secret([52; 32]);
+    let oid = device_id(&other.id().0);
+    let cert = person_key(&a).certify(&other.id().0, DeviceKind::App, now);
+    assert!(ping_as(&b, &other, cert.clone(), now).is_ok());
+    assert_eq!(b.contacts.get(&a.persons.id()).unwrap().devices.len(), 2);
+    // Ann revokes it; Bob pings Ann and records her answer.
+    a.persons.revoke(&oid, now).unwrap();
+    let got = ping_as(&a, &b.host, b.persons.cert(), now).unwrap();
+    assert_eq!(got.revoked.len(), 1);
+    let dev = device_id(&a.host.id().0);
+    b.contacts
+        .presence_result(&dev, &a.persons.id(), Ok(got), now);
+    let kept = b.contacts.get(&a.persons.id()).unwrap();
+    assert_eq!(kept.devices.len(), 1);
+    assert!(b.persons.is_revoked(&oid));
+    assert!(ping_as(&b, &other, cert, now).is_err());
 }
