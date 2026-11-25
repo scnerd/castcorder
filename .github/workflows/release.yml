@@ -96,27 +96,29 @@ jobs:
         # Native capture (GStreamer): bundled on Windows and macOS (a trimmed,
         # LGPL-only copy, task app:gst:stage), the distro's packages on Linux (the
         # .deb depends on them; 24.04 for GStreamer 1.24). macOS is one universal
-        # (x86_64 and arm64) build.
+        # (x86_64 and arm64) build. The live transcript (cast-7hm.4) runs
+        # whisper.cpp on the GPU through Vulkan (Windows, Linux) or Metal (macOS),
+        # else the CPU, with both models bundled (task app:models).
         include:
           - name: windows
             os: windows-latest
             bundles: nsis,msi
-            features: desktop,native-capture,project-rendezvous
-            extra_config: --config tauri.gst.conf.json
+            features: desktop,native-capture,project-rendezvous,vulkan
+            extra_config: --config tauri.gst.conf.json --config tauri.models.conf.json
             target_args: ""
             bundle_dir: castcorder/target/release/bundle
           - name: macos
             os: macos-latest
             bundles: app,dmg
-            features: desktop,native-capture,project-rendezvous
-            extra_config: --config tauri.gst-macos.conf.json
+            features: desktop,native-capture,project-rendezvous,metal
+            extra_config: --config tauri.gst-macos.conf.json --config tauri.models.conf.json
             target_args: --target universal-apple-darwin
             bundle_dir: castcorder/target/universal-apple-darwin/release/bundle
           - name: linux
             os: ubuntu-24.04
             bundles: deb,appimage
-            features: desktop,native-capture,project-rendezvous
-            extra_config: --config tauri.gst-deb.conf.json
+            features: desktop,native-capture,project-rendezvous,vulkan
+            extra_config: --config tauri.gst-deb.conf.json --config tauri.models.conf.json
             target_args: ""
             bundle_dir: castcorder/target/release/bundle
     env:
@@ -151,7 +153,8 @@ jobs:
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev xvfb \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-good gstreamer1.0-pulseaudio
+            gstreamer1.0-plugins-good gstreamer1.0-pulseaudio \
+            libvulkan-dev glslc
           pkg-config --modversion gstreamer-1.0
 
       - name: Cache the GStreamer installer
@@ -217,9 +220,29 @@ jobs:
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           PKG_CONFIG_PATH="$root/lib/pkgconfig" pkg-config --modversion gstreamer-1.0
 
+      # whisper.cpp's Vulkan backend needs the Vulkan headers, loader and glslc
+      # to build; the installed app needs only the GPU driver's loader.
+      - name: Install the Vulkan SDK (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $exe = "$env:RUNNER_TEMP\vulkan-sdk.exe"
+          Invoke-WebRequest -Uri https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile $exe
+          & $exe --root C:\VulkanSDK --accept-licenses --default-answer --confirm-command install | Out-Host
+          "VULKAN_SDK=C:\VulkanSDK" >> $env:GITHUB_ENV
+          "C:\VulkanSDK\Bin" >> $env:GITHUB_PATH
+
       - name: Install uv
-        if: matrix.name != 'linux'
         uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Cache the transcription models
+        uses: actions/cache@v6
+        with:
+          path: castcorder/crates/castcorder-app/models
+          key: whisper-models-small.en-q5_1-base.en-q8_0
+
+      - name: Fetch the transcription models
+        run: task app:models
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.9.3
@@ -276,6 +299,9 @@ jobs:
           if (-not (Test-Path "$dir/client/index.html")) { throw 'client not installed' }
           if (-not (Test-Path "$dir/gstreamer-1.0-0.dll")) { throw 'GStreamer not installed' }
           if (-not (Test-Path "$dir/licenses/gstreamer/NOTICE.txt")) { throw 'GStreamer notice not installed' }
+          foreach ($m in 'ggml-small.en-q5_1.bin', 'ggml-base.en-q8_0.bin') {
+            if (-not (Test-Path "$dir/models/$m")) { throw "transcription model $m not installed" }
+          }
           # Every non-system DLL the exe, its DLLs and the plugins import (the MSVC
           # runtime included, which a clean machine lacks) is in the install.
           uv run scripts/check_install_dlls.py $dir
@@ -310,6 +336,8 @@ jobs:
           exe=$(ls "$app"/Contents/MacOS/*)
           echo "$exe"
           test -f "$app/Contents/Resources/client/index.html"
+          test -f "$app/Contents/Resources/models/ggml-small.en-q5_1.bin"
+          test -f "$app/Contents/Resources/models/ggml-base.en-q8_0.bin"
           test -f "$app/Contents/Frameworks/libgstreamer-1.0.0.dylib"
           test -f "$app/Contents/Resources/licenses/gstreamer/NOTICE.txt"
           plutil -extract NSMicrophoneUsageDescription raw "$app/Contents/Info.plist"
@@ -359,9 +387,11 @@ jobs:
           dpkg-deb -f "$deb" Depends
           dpkg-deb -f "$deb" Depends | grep -q 'libgstreamer1.0-0 (>= 1.24)'
           dpkg-deb -f "$deb" Depends | grep -q 'gstreamer1.0-pulseaudio'
+          dpkg-deb -f "$deb" Depends | grep -q 'libvulkan1'
           sudo apt-get install -y "./$deb"
           dpkg -L "$pkg" | grep -E 'bin/|client/index.html'
           dpkg -L "$pkg" | grep -q 'client/index.html'
+          dpkg -L "$pkg" | grep -q 'models/ggml-base.en-q8_0.bin'
           castcorder-app --smoke-gst 2>&1 | tee smoke-gst.log
           grep -q GST_OK smoke-gst.log
           xvfb-run -a castcorder-app --smoke 2>&1 | tee smoke.log

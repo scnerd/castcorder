@@ -59,6 +59,31 @@ pub fn default_dist() -> PathBuf {
         .unwrap_or_else(|| dir.join("client"))
 }
 
+/// Where the app finds its bundled transcription models (cast-7hm.4):
+/// `CASTCORDER_MODELS`, else the first `models` resource beside the client
+/// (the installers' layouts, as for [`default_dist`]) holding a `.bin`.
+pub fn default_models() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("CASTCORDER_MODELS") {
+        return Some(PathBuf::from(d));
+    }
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    models_candidates(&dir).into_iter().find(|c| has_model(c))
+}
+
+fn has_model(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut d| {
+        d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "bin")))
+    })
+}
+
+/// The model locations to try for an executable in `exe_dir`.
+fn models_candidates(exe_dir: &Path) -> Vec<PathBuf> {
+    dist_candidates(exe_dir)
+        .into_iter()
+        .map(|c| c.with_file_name("models"))
+        .collect()
+}
+
 /// The client locations to try for an executable in `exe_dir`.
 fn dist_candidates(exe_dir: &Path) -> Vec<PathBuf> {
     vec![
@@ -73,6 +98,11 @@ impl AppArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut config = Config::new(default_dist());
         config.log = true;
+        // The live transcript is on wherever this build can run it and the
+        // installer bundled its models; `--transcribe off` turns it off.
+        if cfg!(feature = "transcribe") {
+            config.transcribe = default_models().map(castcorder_host::transcript::Engine::Whisper);
+        }
         config.rendezvous = castcorder_host::DEFAULT_RENDEZVOUS.map(String::from);
         let rest = config.apply_args(args)?;
         let mut a = AppArgs {
@@ -106,6 +136,7 @@ impl AppArgs {
             a.config.http_port = 0;
             a.config.udp_port = 0;
             a.config.rendezvous = None;
+            a.config.transcribe = None;
         }
         Ok(a)
     }
@@ -146,5 +177,20 @@ mod tests {
         assert_eq!(c[0], Path::new("bin/client"));
         assert!(c.iter().any(|p| p.ends_with("lib/Castcorder/client")));
         assert!(c.iter().any(|p| p.ends_with("Resources/client")));
+    }
+
+    #[test]
+    fn models_sit_beside_the_client_in_each_installer_layout() {
+        let c = models_candidates(Path::new("bin"));
+        assert_eq!(c[0], Path::new("bin/models"));
+        assert!(c.iter().any(|p| p.ends_with("lib/Castcorder/models")));
+        assert!(c.iter().any(|p| p.ends_with("Resources/models")));
+        let dir = std::env::temp_dir().join(format!("castcorder-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!has_model(&dir));
+        std::fs::write(dir.join("ggml-base.en-q8_0.bin"), b"x").unwrap();
+        assert!(has_model(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

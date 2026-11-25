@@ -76,3 +76,25 @@ fn a_missing_model_is_an_error_not_a_crash() {
         .expect("no model, no transcriber");
     assert!(err.contains("no-such-model.bin"), "{err}");
 }
+
+/// The installers' way in (cast-7hm.4): a folder of bundled models, the
+/// right one loaded and warmed up. The CI model stands in for both bundled
+/// names, so the GPU model is tried first and, with no GPU, the CPU model
+/// is loaded instead. A Vulkan build on a machine with no Vulkan driver must
+/// get here too (CI runs this test so built as well).
+#[test]
+fn the_bundled_models_folder_gives_a_transcriber_that_keeps_the_contract() {
+    let Some(path) = model() else { return };
+    let dir = std::env::temp_dir().join(format!("castcorder-bundled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in [
+        castcorder_transcribe::GPU_MODEL,
+        castcorder_transcribe::CPU_MODEL,
+    ] {
+        std::fs::copy(&path, dir.join(name)).unwrap();
+    }
+    let mut w = castcorder_transcribe::load_best(&dir).unwrap();
+    check(&mut w, &speech());
+    let _ = std::fs::remove_dir_all(&dir);
+}

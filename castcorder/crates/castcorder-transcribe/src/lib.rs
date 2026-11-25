@@ -28,6 +28,68 @@ pub enum Device {
     Cpu,
 }
 
+/// The model installers bundle for machines with a usable GPU (cast-7hm.4):
+/// about 190 MB, word error rate 5.0 in the spike at 0.11 s per 5 s.
+pub const GPU_MODEL: &str = "ggml-small.en-q5_1.bin";
+/// The model installers bundle for the CPU: about 80 MB, word error rate
+/// 7.9 in the spike at 0.39 s per 5 s on a desktop CPU.
+pub const CPU_MODEL: &str = "ggml-base.en-q8_0.bin";
+
+/// The bundled model (in `dir`) to load first: the GPU model if it is
+/// there, else the CPU model.
+fn first_choice(dir: &Path) -> Option<std::path::PathBuf> {
+    [GPU_MODEL, CPU_MODEL]
+        .iter()
+        .map(|m| dir.join(m))
+        .find(|p| p.is_file())
+}
+
+/// Five seconds of the GPU model slower than this means it is not on a GPU
+/// (the spike: 0.11 s on a GPU, over a second on a desktop CPU).
+const GPU_SECONDS: f64 = 0.6;
+
+/// Load the model that suits this machine from the folder of bundled models
+/// `dir` (cast-7hm.4), warmed up: the GPU model, unless it turns out to run
+/// on the CPU (no usable GPU, or no GPU in this build) and the CPU model is
+/// there, which is then loaded instead. Trying is the safe way to find out:
+/// asking ggml for its Vulkan devices aborts the process on a machine with
+/// no Vulkan driver, while loading falls back to the CPU.
+pub fn load_best(dir: &Path) -> Result<Whisper, String> {
+    let first =
+        first_choice(dir).ok_or_else(|| format!("no transcription model in {}", dir.display()))?;
+    let mut w = Whisper::load(&first, Device::Auto)?;
+    w.warm_up()?;
+    let cpu = dir.join(CPU_MODEL);
+    if first != cpu && cpu.is_file() {
+        let secs = w.time(5.0)?;
+        if secs > GPU_SECONDS {
+            tracing::info!(
+                secs,
+                "the GPU model runs on the CPU here; loading the CPU model"
+            );
+            let mut c = Whisper::load(&cpu, Device::Cpu)?;
+            c.warm_up()?;
+            return Ok(c);
+        }
+        tracing::info!(secs, "the GPU model runs fast enough here");
+    }
+    Ok(w)
+}
+
+/// `secs` of a quiet, speech-band hiss (above [`QUIET_RMS`], so the model
+/// runs on it).
+fn hiss(secs: f32) -> Vec<f32> {
+    let mut x: u32 = 0x9e37_79b9;
+    (0..(secs * SAMPLE_RATE as f32) as usize)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 / u32::MAX as f32 - 0.5) * 0.05
+        })
+        .collect()
+}
+
 /// A segment whisper rates at least this likely to be non-speech is dropped.
 const NO_SPEECH: f32 = 0.6;
 /// Audio quieter than this (RMS, about -50 dBFS) is not given to the model:
@@ -76,6 +138,16 @@ fn is_marker(text: &str) -> bool {
         || [('[', ']'), ('(', ')'), ('*', '*')]
             .iter()
             .any(|&(a, b)| t.starts_with(a) && t.ends_with(b))
+}
+
+impl Whisper {
+    /// How long transcribing `secs` of hiss takes, in seconds.
+    fn time(&mut self, secs: f32) -> Result<f64, String> {
+        let audio = hiss(secs);
+        let start = std::time::Instant::now();
+        self.transcribe(&audio)?;
+        Ok(start.elapsed().as_secs_f64())
+    }
 }
 
 impl Transcriber for Whisper {
@@ -139,10 +211,38 @@ impl Transcriber for Whisper {
         }
         Ok(out)
     }
+
+    /// Run the model once on real input (silence is never given to it), so
+    /// weights are loaded and GPU shaders compiled before the call needs it.
+    fn warm_up(&mut self) -> Result<(), String> {
+        self.transcribe(&hiss(2.0)).map(|_| ())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_gpu_model_is_tried_first_and_either_rather_than_none() {
+        let dir = std::env::temp_dir().join(format!("castcorder-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(super::first_choice(&dir), None);
+        assert!(super::load_best(&dir).is_err());
+        std::fs::write(dir.join(super::CPU_MODEL), b"x").unwrap();
+        assert_eq!(super::first_choice(&dir), Some(dir.join(super::CPU_MODEL)));
+        std::fs::write(dir.join(super::GPU_MODEL), b"x").unwrap();
+        assert_eq!(super::first_choice(&dir), Some(dir.join(super::GPU_MODEL)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_hiss_is_loud_enough_to_reach_the_model() {
+        let h = super::hiss(1.0);
+        let rms = (h.iter().map(|s| s * s).sum::<f32>() / h.len() as f32).sqrt();
+        assert!(rms > super::QUIET_RMS * 3.0, "{rms}");
+        assert_eq!(h.len(), 16_000);
+    }
+
     #[test]
     fn markers_are_not_words() {
         for m in ["[BLANK_AUDIO]", " (music) ", "*laughs*", "", "  "] {

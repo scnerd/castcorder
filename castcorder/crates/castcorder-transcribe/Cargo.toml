@@ -15,6 +15,8 @@ workspace = true
 # GPU through Vulkan (release builds): about 40 MB, no extra DLLs. Without it,
 # or with no usable GPU at runtime, whisper.cpp runs on the CPU.
 vulkan = ["whisper-rs/vulkan"]
+# GPU through Metal (macOS release builds).
+metal = ["whisper-rs/metal"]
 
 [dependencies]
 castcorder-port-transcribe.workspace = true

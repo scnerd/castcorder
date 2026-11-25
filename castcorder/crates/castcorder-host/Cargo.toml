@@ -66,3 +66,6 @@ project-rendezvous = []
 # The live transcript with whisper.cpp (cast-7hm). Without it, --transcribe
 # with a model reports that this build cannot transcribe.
 whisper = ["dep:castcorder-transcribe"]
+# The GPU for it: Vulkan (Windows, Linux release builds) or Metal (macOS).
+whisper-vulkan = ["whisper", "castcorder-transcribe/vulkan"]
+whisper-metal = ["whisper", "castcorder-transcribe/metal"]

@@ -2,3 +2,5 @@
 /gen/
 # The trimmed GStreamer task app:gst:stage copies for the Windows installer.
 /gstreamer/
+# The transcription models task app:models fetches for the installers.
+/models/
