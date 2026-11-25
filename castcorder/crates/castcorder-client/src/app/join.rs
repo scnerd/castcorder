@@ -695,7 +695,7 @@ pub(super) async fn direct_offer(
     set(&body, "device", ctx.device.as_str());
     set(&body, "proof", proof);
     // Linked to a person: the host of the same person makes it a producer.
-    if let Some(c) = crate::identity::cert() {
+    if let Some(c) = crate::identity::cert_settled().await {
         set(
             &body,
             "cert",

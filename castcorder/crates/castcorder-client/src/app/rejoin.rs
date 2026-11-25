@@ -304,6 +304,7 @@ fn nonce() -> String {
 /// Ask `room`'s host about every room it was in.
 async fn ask(room: &Room) -> Result<HostStatus, String> {
     let key = crate::identity::device().await.map_err(|e| describe(&e))?;
+    let cert = crate::identity::cert_settled().await;
     let n = nonce();
     if room.host.starts_with("http") {
         // A LAN host: its own `/offer`.
@@ -318,7 +319,7 @@ async fn ask(room: &Room) -> Result<HostStatus, String> {
             "sdp": n,
             "device": key.id,
             "proof": proof,
-            "cert": crate::identity::cert(),
+            "cert": cert,
         });
         let init = object();
         set(&init, "method", "POST");
