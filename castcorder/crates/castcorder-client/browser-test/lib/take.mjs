@@ -67,8 +67,19 @@ export async function takeChecks(A, B) {
   try { take1StopUs = JSON.parse(await text(A, '#take-result')).hostUs; } catch { /* diagnostic only */ }
   await waitFor(async () => buttons(A).then((b) => b.start && !b.stop), 'producer offers Start take again', 10000);
   check(true, 'idle again: Start take enabled, Stop take disabled');
-  const guestsSeen = await text(A, '#guests');
+  const guestsSeen = await text(A, '#guests-detail');
   check(guestsSeen.includes('A (guest') && guestsSeen.includes('B (guest'), 'producer lists the connected guests: ' + guestsSeen);
+  // cast-n56.6: rows in plain language (name, role, recording), the
+  // developer detail only under Connection details; the sections folded.
+  const plain = await A.evaluate(() => ({
+    rows: [...document.querySelectorAll('#guests li.person')].map((li) => li.querySelector('.person-head').textContent.trim()),
+    text: document.querySelector('#guests').textContent,
+    folded: [...document.querySelectorAll('details.fold')].map((d) => d.id + (d.open ? ':open' : ':folded')),
+  }));
+  check(plain.rows.some((r) => r.startsWith('A') && r.includes('(you)') && r.endsWith('Host')) && plain.rows.some((r) => r.startsWith('B') && /Guest|Producer/.test(r))
+    && !/\(guest \d+\)|\[trusted\]|\[untrusted\]/.test(plain.text)
+    && plain.folded.join(',') === 'room-settings:folded,calls-section:folded,connection-details:folded',
+    'People rows read in plain language, the detail folded away: ' + JSON.stringify(plain));
 
   // The outbox: after the take, each guest's track (and its JSON sidecar) is
   // pulled into the host's library, verified, and only then deleted from OPFS.

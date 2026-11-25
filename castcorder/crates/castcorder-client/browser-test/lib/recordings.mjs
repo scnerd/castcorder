@@ -9,7 +9,7 @@
 // - B made a producer sees the same takes and states but not the folder.
 import { resolve } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { waitFor, check, sleep, callDir } from './helpers.mjs';
+import { waitFor, check, sleep, callDir, personAction } from './helpers.mjs';
 
 const rows = (p, take) => p.evaluate((take) => [...document.querySelectorAll('#recordings li.take[data-take="' + take + '"] li.track')]
   .map((li) => ({ who: li.dataset.participant, file: li.dataset.file, state: li.dataset.state, text: li.textContent })), take);
@@ -54,14 +54,13 @@ export async function recordingsAfterSync(A, B, seg1Name) {
   check((await mine(B)).every((r) => r.state === 'delivered'), 'B: every recording delivered after the sync');
 
   // A producer on another device: same takes, no host path.
-  const grant = A.locator('#guests li[data-name="B"] button.grant');
-  await grant.click();
+  await personAction(A, 'B', 'grant');
   const seen = await waitFor(async () => { const r = await rows(B, 2); return done(r) ? r : null; },
     'B, made producer, sees take 2', 15000).catch(() => null);
   check(!!seen, 'remote producer B sees take 2\'s tracks and their states');
   await sleep(1000);
   check((await B.locator('#recordings-folder').count()) === 0 && (await B.locator('#open-folder').count()) === 0,
     'remote producer B is not told the host\'s folder path');
-  await A.locator('#guests li[data-name="B"] button.grant').click();
+  await personAction(A, 'B', 'grant');
   await waitFor(async () => (await B.locator('#take-start').count()) === 0, 'B no longer a producer', 10000);
 }

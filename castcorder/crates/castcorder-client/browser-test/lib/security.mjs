@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, check } from './helpers.mjs';
+import { sleep, waitFor, text, check, personAction, unfold } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Producers and room security (cast-xne), chromium mode: a second host with
@@ -52,9 +52,9 @@ export async function securityChecks() {
   check((await text(H, '#take-status')).startsWith('idle'), 'no take started by the non-producer');
 
   // The host machine grants the producer role to trusted C, who starts and stops a take.
-  await waitFor(async () => (await text(H, '#guests')).includes('C (guest'), 'H lists C', 10000);
-  check(/C \(guest \d+\) \[trusted\]/.test(await text(H, '#guests')), 'C joined with a producer present and is trusted');
-  await H.click('#guests li[data-name="C"] button.grant');
+  await waitFor(async () => (await text(H, '#guests-detail')).includes('C (guest'), 'H lists C', 10000);
+  check(/C \(guest \d+\) \[trusted\]/.test(await text(H, '#guests-detail')), 'C joined with a producer present and is trusted');
+  await personAction(H, 'C', 'grant');
   await C.waitForSelector('#take-start', { timeout: 10000 });
   check((await C.locator('button.grant').count()) === 0, 'granted producer C gets the panel but no grant/revoke controls');
   await waitFor(async () => C.isEnabled('#take-start'), 'C can start a take', 10000);
@@ -71,14 +71,14 @@ export async function securityChecks() {
   // change shows on every producer's panel.
   check((await text(C, '#room-open')) === 'producer-gated', 'the call starts producer-gated');
   check((await C.locator('#open-toggle').count()) === 0, 'granted producer C has no gated/open toggle');
-  await H.click('#open-toggle');
+  await unfold(H); await H.click('#open-toggle');
   await waitFor(async () => (await text(C, '#room-open')) === 'always open' && (await text(H, '#room-open')) === 'always open', 'call made always open for everyone', 10000);
-  await H.click('#open-toggle');
+  await unfold(H); await H.click('#open-toggle');
   await waitFor(async () => (await text(C, '#room-open')) === 'producer-gated' && (await text(H, '#room-open')) === 'producer-gated', 'call made producer-gated again', 10000);
   check(true, 'host machine flipped open and gated; producer C saw both and has no toggle');
 
   // Lock: a new, untrusted device is refused.
-  await H.click('#lock');
+  await unfold(H); await H.click('#lock');
   await waitFor(async () => (await text(H, '#room-locked')) === 'locked', 'call locked', 10000);
   const D = await openGuest('D', [], HTTPS2);
   await D.click('#join');
@@ -92,11 +92,11 @@ export async function securityChecks() {
     'locked call: the plain reason shows in view beside Join, with Try again: ' + note);
   await waitFor(async () => (await text(H, '#call-notes')).includes('D tried to join'), 'H is told D tried to join the locked call', 10000);
   check(await H.isVisible('#call-notes'), 'locked call: the producer is told that D tried to join');
-  await H.click('#lock');
+  await unfold(H); await H.click('#lock');
   await waitFor(async () => (await text(H, '#room-locked')) === 'unlocked', 'call unlocked', 10000);
 
   // Password: wrong refused, right admitted.
-  await H.fill('#new-password', 'pw-1');
+  await unfold(H); await H.fill('#new-password', 'pw-1');
   await H.click('#set-password');
   await waitFor(async () => (await text(H, '#room-password')) === 'password set', 'password set', 10000);
   const E = await openGuest('E', [], HTTPS2);
@@ -116,8 +116,8 @@ export async function securityChecks() {
   check(true, 'the right password is admitted');
 
   // Kick: E is removed and cannot rejoin.
-  await waitFor(async () => (await text(H, '#guests')).includes('E (guest'), 'H lists E', 10000);
-  await H.click('#guests li[data-name="E"] button.kick');
+  await waitFor(async () => (await text(H, '#guests-detail')).includes('E (guest'), 'H lists E', 10000);
+  await personAction(H, 'E', 'kick');
   await waitFor(async () => (await state(E)) === 'removed from the call by a producer', 'E removed', 30000);
   const kicks = () => (ctx.host2Log.match(/device was kicked/g) || []).length;
   const before = kicks();
@@ -128,7 +128,7 @@ export async function securityChecks() {
   // Regenerate link (no rendezvous here: the secret rotates on disk).
   const secretFile = join(LIB2, 'security-test', 'call-secret');
   const oldSecret = readFileSync(secretFile, 'utf8');
-  await H.click('#regen-link');
+  await unfold(H); await H.click('#regen-link');
   await waitFor(async () => readFileSync(secretFile, 'utf8') !== oldSecret, 'call secret rotated', 10000);
   check((await joined(C)) && (await joined(H)), 'regenerating the link rotates the call secret; everyone in the call stays');
 

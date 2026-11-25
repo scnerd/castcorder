@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
 import { VERSION } from './version.mjs';
-import { sleep, waitFor, text, check } from './helpers.mjs';
+import { sleep, waitFor, text, check, personAction, unfold } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Rejoining (cast-zr8), Chromium, guests through a rendezvous of their own
@@ -96,7 +96,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
   // The producer moves everyone to a new call, then all leave: the first
   // call is past. G (no producer) naming it is refused; the next Join takes
   // the current call.
-  await P.click('#new-call');
+  await unfold(P); await P.click('#new-call');
   const second = await waitFor(async () => { const c = await text(P, '#current-call'); return c && c !== first ? c : null; }, 'a new call', 20000);
   for (const p of [P, K]) await leave(p);
   await waitFor(async () => !(await rooms()).live, 'the room empties', 20000);
@@ -118,7 +118,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
 
   // Granted the producer role, G continues the past call.
   await waitFor(async () => (await P.locator('#guests li[data-name="Gus"] button.grant').count()) === 1, 'P can grant G', 15000);
-  await P.click('#guests li[data-name="Gus"] button.grant');
+  await personAction(P, 'Gus', 'grant');
   await sleep(1000);
   await leave(P);
   await leave(G);
@@ -136,7 +136,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
 
   // Kicked: the room says Removed, with no way back in.
   await waitFor(async () => (await P.locator('#guests li[data-name="Gus"] button.kick').count()) === 1, 'P can kick G', 15000);
-  await P.click('#guests li[data-name="Gus"] button.kick');
+  await personAction(P, 'Gus', 'kick');
   await waitFor(async () => (await state(G)) === 'removed from the call by a producer', 'G removed', 30000);
   await waitFor(async () => (await chip(G)) === 'Removed', 'G\x27s list says Removed', 20000);
   check(await card(G).locator('.rejoin-room').isHidden(), 'a kicked device is offered no Rejoin');
@@ -147,7 +147,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
   // joined an always-open room with no producer present, so it is not trusted:
   // it is told plainly to ask the host for the new link, not "Status unknown",
   // and is offered no Rejoin.
-  await P.click('#open-toggle');
+  await unfold(P); await P.click('#open-toggle');
   await waitFor(async () => (await text(P, '#room-open')) === 'always open', 'the room is always open', 10000);
   await leave(P);
   await waitFor(async () => !(await rooms()).live, 'the room empties for U', 20000);
@@ -166,7 +166,7 @@ export async function rejoinChecks({ rendezvous } = {}) {
   }
   await P.click('#join');
   await connected(P, 'P');
-  await P.click('#regen-link');
+  await unfold(P); await P.click('#regen-link');
   // The host rotates the secret asynchronously: ask only after it has.
   await waitFor(() => h.err.includes('call secret regenerated'), 'the host regenerated the link', 15000);
   await U.reload();

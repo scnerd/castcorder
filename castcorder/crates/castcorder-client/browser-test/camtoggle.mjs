@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { parseWav, deinterleave, analyzeRecording } from './analyze.mjs';
 import { ctx } from './lib/ctx.mjs';
-import { sleep, waitFor, text, buttons, opfsNames, callDir } from './lib/helpers.mjs';
+import { sleep, waitFor, text, buttons, opfsNames, callDir, unfold } from './lib/helpers.mjs';
 import { openGuest } from './lib/guest.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -71,7 +71,7 @@ try {
   await A.click('#join');
   await waitFor(async () => (await text(A, '#participant')).length > 0, 'A joined');
   await A.waitForSelector('#take-start', { timeout: 10000 });
-  await A.click('#record-video');
+  await unfold(A); await A.click('#record-video');
   await waitFor(async () => (await text(A, '#room-record-video')) === 'audio and video', 'video recording on', 10000);
   for (let t = 1; t <= TAKES; t++) {
     const name = 'take' + String(t).padStart(2, '0');

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ctx } from './ctx.mjs';
-import { sleep, waitFor, text, check, callDirs, opfsNames, readOpfs } from './helpers.mjs';
+import { sleep, waitFor, text, check, callDirs, opfsNames, readOpfs, personAction, unfold } from './helpers.mjs';
 import { openGuest } from './guest.mjs';
 
 // Rooms and calls (cast-brj), chromium and firefox, on a fourth host whose
@@ -129,11 +129,11 @@ export async function roomsChecks() {
 
   // A producer starts a new call: a new folder, takes from 01.
   // (Refused while a device is still syncing: asked again.)
-  await P.click('#new-call');
+  await unfold(P); await P.click('#new-call');
   await waitFor(async () => {
     const c = await text(P, '#current-call');
     if (c.length > 0 && c !== first) return true;
-    if ((await text(P, '#take-result')).startsWith('refused')) await P.click('#new-call');
+    if ((await text(P, '#take-result')).startsWith('refused')) { await unfold(P); await P.click('#new-call'); }
     return false;
   }, 'P is moved to a new call', 30000, 1000);
   const second = await text(P, '#current-call');
@@ -220,11 +220,11 @@ export async function roomsChecks() {
     }
   }, meta);
   // The producer moves on to a new call (G is gone, so nothing holds it).
-  await P.click('#new-call');
+  await unfold(P); await P.click('#new-call');
   await waitFor(async () => {
     const c = await text(P, '#current-call');
     if (c.length > 0 && c !== first && c !== second) return true;
-    if ((await text(P, '#take-result')).startsWith('refused')) await P.click('#new-call');
+    if ((await text(P, '#take-result')).startsWith('refused')) { await unfold(P); await P.click('#new-call'); }
     return false;
   }, 'P is moved to a third call', 30000, 1000);
   const third = await text(P, '#current-call');
@@ -300,7 +300,7 @@ export async function roomsChecks() {
   await waitFor(async () => (await text(P, '#take-result')).includes('"take":'), 'a main-show take started', 10000);
   await sleep(2500);
   await waitFor(async () => (await text(P, '#guests')).includes('Gil'), 'P lists G', 10000);
-  await P.click('#guests li[data-name="Gil"] button.kick');
+  await personAction(P, 'Gil', 'kick');
   await waitFor(async () => (await text(G, '#state')) === 'removed from the call by a producer', 'G removed', 30000);
   await P.click('#take-stop');
   await waitFor(async () => (await text(P, '#take-status')).startsWith('idle'), 'the main-show take stopped', 10000);
