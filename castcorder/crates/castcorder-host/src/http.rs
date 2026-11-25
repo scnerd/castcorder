@@ -203,6 +203,9 @@ struct TrustRequest {
     room: String,
     person: String,
     trust: bool,
+    /// Also set their role there: producer (`true`) or guest.
+    #[serde(default)]
+    producer: Option<bool>,
 }
 
 fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
@@ -866,6 +869,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 room: r.room,
                 person: r.person,
                 trust: r.trust,
+                producer: r.producer,
                 reply,
             }) {
                 Some(Ok(())) => json(200, "{}".into()),

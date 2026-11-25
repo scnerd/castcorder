@@ -171,6 +171,21 @@ pub struct CallView {
     pub live: bool,
 }
 
+/// A device that joined a room with its link (Room settings > People).
+#[derive(Clone, Debug, Serialize)]
+pub struct JoinedDevice {
+    /// Its device id.
+    pub device: String,
+    /// The name it last joined with.
+    pub name: String,
+    /// The person its certificate named, if any.
+    pub person: Option<String>,
+    /// Trusted in the room (joined with a producer present).
+    pub trusted: bool,
+    /// Kicked: it cannot rejoin.
+    pub banned: bool,
+}
+
 /// One room, for the host machine's home.
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomView {
@@ -195,6 +210,10 @@ pub struct RoomView {
     pub default: bool,
     /// Persons trusted in it, by id (ADR 0005).
     pub persons: Vec<String>,
+    /// Of those, the ones who are producers there.
+    pub producers: Vec<String>,
+    /// Devices that joined with its link, but this person's own.
+    pub devices: Vec<JoinedDevice>,
 }
 
 impl Call {
@@ -559,12 +578,20 @@ impl Call {
         room: &str,
         person: &str,
         trust: bool,
+        producer: Option<bool>,
     ) -> Result<(), String> {
         if !self.rooms.exists(room) {
             return Err(format!("unknown_room: no room named {room} on this host"));
         }
+        let apply = |r: &mut Room| -> Result<bool, String> {
+            let mut changed = r.trust_person(person, trust)?;
+            if let Some(p) = producer {
+                changed |= r.set_person_producer(person, p && trust)?;
+            }
+            Ok(changed)
+        };
         if room == self.room_name {
-            self.room.trust_person(person, trust)?;
+            apply(&mut self.room)?;
             self.save_room();
             return Ok(());
         }
@@ -573,7 +600,7 @@ impl Call {
             Ok(text) => Room::from_json(&text).map_err(|e| format!("{}: {e}", path.display()))?,
             Err(_) => Room::new(false),
         };
-        if r.trust_person(person, trust)? {
+        if apply(&mut r)? {
             std::fs::write(&path, r.to_json()).map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -589,11 +616,31 @@ impl Call {
             .filter(|r| self.rooms.exists(r))
             .map(|name| {
                 let dir = self.rooms.room_dir(&name);
-                let (state, persons) = if name == self.room_name {
-                    (self.room.state(None), self.room.trusted_persons())
+                let me = self.rooms.persons.id();
+                let people = |r: &Room| {
+                    let devices = r
+                        .devices()
+                        .into_iter()
+                        .filter(|(_, d)| d.person.as_deref() != Some(me.as_str()))
+                        .map(|(device, d)| JoinedDevice {
+                            device,
+                            name: d.name,
+                            person: d.person,
+                            trusted: d.trusted,
+                            banned: d.banned,
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        r.state(None),
+                        r.trusted_persons(),
+                        r.producer_persons(),
+                        devices,
+                    )
+                };
+                let (state, persons, producers, devices) = if name == self.room_name {
+                    people(&self.room)
                 } else {
-                    let r = read_room(&dir);
-                    (r.state(None), r.trusted_persons())
+                    people(&read_room(&dir))
                 };
                 let calls = rooms::list_calls(&dir);
                 let room_live = live && name == self.room_name;
@@ -621,6 +668,8 @@ impl Call {
                         .collect(),
                     default: name == default,
                     persons,
+                    producers,
+                    devices,
                     name,
                 }
             })

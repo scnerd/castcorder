@@ -116,7 +116,9 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   // Room trust for Bob, picked on a room's card: Rooms, then the room's
   // ... menu, People and settings.
   await page.click('#nav-rooms');
-  const card = page.locator('#rooms li.room-card').first();
+  // Pinned by name: a room made below may sort before it.
+  const firstRoom = await page.locator('#rooms li.room-card').first().getAttribute('data-room');
+  const card = page.locator('#rooms li.room-card[data-room="' + firstRoom + '"]');
   await card.locator('.room-menu summary').click();
   await card.locator('.room-people-toggle').click();
   await card.locator('.trust-pick').selectOption(bob.id);
@@ -125,6 +127,22 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   const room = await card.getAttribute('data-room');
   const trusted = (await call(HTTP, '/rooms')).rooms.find((r) => r.name === room).persons;
   check(trusted.length === 1 && trusted[0] === bob.id, 'contacts: the room trusts Bob\x27s person: ' + JSON.stringify(trusted));
+  // His role there (cast-40e.14): Producer, then Guest again.
+  await card.locator('.trusted-person .person-role').selectOption('producer');
+  await waitFor(async () => (await call(HTTP, '/rooms')).rooms.find((r) => r.name === room).producers.includes(bob.id),
+    'contacts: Bob is a producer in the room', 10000);
+  await card.locator('.trusted-person .person-role').selectOption('guest');
+  await waitFor(async () => (await call(HTTP, '/rooms')).rooms.find((r) => r.name === room).producers.length === 0,
+    'contacts: Bob is a guest in the room again', 10000);
+  check(true, 'contacts: Room settings > People sets a trusted person\x27s role');
+  // A new room trusts the people picked for it.
+  await page.fill('#new-room-name', 'With Bob');
+  await page.selectOption('#new-room-pick', bob.id);
+  await page.waitForSelector('#new-room-people .new-room-person[data-person="' + bob.id + '"]');
+  await page.click('#create-room');
+  const made = await waitFor(async () => (await call(HTTP, '/rooms')).rooms.find((r) => r.persons.includes(bob.id) && r.name !== room),
+    'contacts: the new room trusts Bob', 10000, 250);
+  check(true, 'contacts: a new room trusts the contacts picked for it: ' + made.name);
   // Contact links (cast-40e.4): Bob's install opens one to Ann's through
   // the mailbox and learns the room she trusts him in, with its call link.
   const shared = await call(HTTP2, '/contacts/rooms?person=' + encodeURIComponent(ann.id));
@@ -153,7 +171,7 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   }, 'contacts: the invite reaches Bob', 30000, 500);
   check(invited.from === 'Ann Host' && invited.room === room && invited.link.includes('#'),
     'contacts: Bob is invited to ' + room + ' by Ann with the call link: ' + JSON.stringify(invited));
-  await waitFor(async () => (await text(page, '.invite-contact[data-person="' + bob.id + '"] .invite-state')) === 'Invited',
+  await waitFor(async () => (await card.locator('.invite-contact[data-person="' + bob.id + '"] .invite-state').textContent()) === 'Invited',
     'contacts: the room card says Bob is invited', 15000);
   await call(HTTP2, '/contacts/invite/dismiss', { id: invited.id });
   check((await call(HTTP2, '/contacts')).invites.length === 0, 'contacts: Bob dismissed the invite');

@@ -172,6 +172,8 @@ pub enum Command {
         person: String,
         /// Trust, or stop trusting.
         trust: bool,
+        /// Also make them a producer there (`true`), or a guest (`false`).
+        producer: Option<bool>,
         /// Done, or why not.
         reply: mpsc::Sender<Result<(), String>>,
     },
@@ -1787,9 +1789,10 @@ impl Call {
                 room,
                 person,
                 trust,
+                producer,
                 reply,
             } => {
-                let _ = reply.send(self.trust_person(&room, &person, trust));
+                let _ = reply.send(self.trust_person(&room, &person, trust, producer));
             }
             Command::Current { reply } => {
                 let current = match (&self.call_id, &self.call_dir) {

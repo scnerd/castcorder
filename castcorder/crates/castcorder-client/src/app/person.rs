@@ -835,26 +835,49 @@ pub(super) fn ContactsCard(
     }
 }
 
-/// Who a room trusts as whole persons, on its card on the host machine's
-/// home: trust a contact (each of their devices may enter the room when it
-/// is locked, and can be made a producer), or stop trusting someone.
+/// A device that joined a room with its link (`GET /rooms`, `devices`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub(super) struct JoinedDev {
+    pub(super) device: String,
+    #[serde(default)]
+    pub(super) name: String,
+    /// The person its certificate named, if any.
+    #[serde(default)]
+    pub(super) person: Option<String>,
+    #[serde(default)]
+    pub(super) trusted: bool,
+    #[serde(default)]
+    pub(super) banned: bool,
+}
+
+/// Room settings > People, on a room's card on the host machine's home
+/// (CONTEXT.md Trusted Person, cast-40e.14): the persons the room trusts
+/// with their role (producer or guest) and a way to take them out, adding a
+/// contact, and the devices that joined with the link, whose person can be
+/// trusted from there when they are a contact.
 #[component]
 pub(super) fn RoomTrust(
     room: String,
     trusted: Vec<String>,
+    producers: Vec<String>,
+    devices: Vec<JoinedDev>,
     contacts: RwSignal<Vec<ContactItem>>,
 ) -> impl IntoView {
     let pick = RwSignal::new(String::new());
     let message = RwSignal::new(String::new());
-    let post = move |room: String, person: String, trust: bool| {
+    let post = move |room: String, person: String, trust: bool, producer: Option<bool>| {
         spawn_local(async move {
-            let body = serde_json::json!({ "room": room, "person": person, "trust": trust });
+            let mut body = serde_json::json!({ "room": room, "person": person, "trust": trust });
+            if let Some(p) = producer {
+                body["producer"] = p.into();
+            }
             match person_request("/rooms/trust", Some(body.to_string())).await {
                 Ok(_) => message.set(
-                    if trust {
-                        "Trusted: the room list updates in a moment."
-                    } else {
-                        "No longer trusted."
+                    match (trust, producer) {
+                        (false, _) => "Taken out of the room.",
+                        (true, Some(true)) => "Producer here: each of their devices joins as one.",
+                        (true, Some(false)) => "Guest here.",
+                        (true, None) => "Trusted: the room list updates in a moment.",
                     }
                     .into(),
                 ),
@@ -870,8 +893,10 @@ pub(super) fn RoomTrust(
             .map(ContactItem::label)
             .unwrap_or_else(|| "Someone no longer in your contacts".into())
     };
+    let is_contact = move |id: &str| contacts.with(|l| l.iter().any(|c| c.id == id));
     let t2 = trusted.clone();
-    let (r1, r2) = (room.clone(), room.clone());
+    let t3 = trusted.clone();
+    let (r1, r2, r3) = (room.clone(), room.clone(), room.clone());
     let untrusted = move || {
         contacts
             .get()
@@ -879,28 +904,83 @@ pub(super) fn RoomTrust(
             .filter(|c| !t2.contains(&c.id))
             .collect::<Vec<_>>()
     };
+    let none_trusted = trusted.is_empty();
+    let none_joined = devices.is_empty();
     view! {
-        <div class="row room-trust">
-            <span class="small muted">"Trusted people (all their devices may enter, even when locked):"</span>
-            {trusted.into_iter().map(|id| {
-                let (room, i2, i3) = (r1.clone(), id.clone(), id.clone());
-                view! {
-                    <span class="chip trusted-person" data-person=i3>{move || name_of(&id)}
-                        <button class="btn tiny outline untrust-person"
-                            on:click=move |_| post(room.clone(), i2.clone(), false)>"Stop trusting"</button>
-                    </span>
-                }
-            }).collect_view()}
-            <label class="sr-only">"Contact to trust in this room"</label>
-            <select class="trust-pick" on:change=move |ev| pick.set(event_target_value(&ev))>
-                <option value="">"Pick a contact"</option>
-                <For each=untrusted key=|c| c.id.clone() let:c>
-                    <option value=c.id.clone()>{c.label()}</option>
-                </For>
-            </select>
-            <button class="btn tiny trust-person" disabled=move || pick.get().is_empty()
-                on:click=move |_| { let p = pick.get_untracked(); if !p.is_empty() { post(r2.clone(), p, true) } }>"Trust"</button>
-            <span class="small muted">{move || message.get()}</span>
+        <div class="room-trust">
+            <span class="group-label">"Trusted people"</span>
+            <span class="small muted">"Every device of theirs may enter, even when the room is locked, and sees this room in their list. A producer runs the recording."</span>
+            <ul class="list people-rows">
+                {trusted.into_iter().map(|id| {
+                    let (room, room2, i2, i3, i4) = (r1.clone(), r1.clone(), id.clone(), id.clone(), id.clone());
+                    let producer = producers.contains(&id);
+                    let id2 = id.clone();
+                    let label = move || name_of(&id);
+                    let label2 = move || name_of(&id2);
+                    view! {
+                        <li class="person-row trusted-person" data-person=i3>
+                            {move || avatar(&label2(), None, false)}
+                            <span class="contact-text">
+                                <span class="contact-name">{label}</span>
+                                <span class="small muted">"All their devices"</span>
+                            </span>
+                            <label class="sr-only">"Role"</label>
+                            <select class="person-role" on:change=move |ev| post(room2.clone(), i4.clone(), true, Some(event_target_value(&ev) == "producer"))>
+                                <option value="guest" selected=!producer>"Guest"</option>
+                                <option value="producer" selected=producer>"Producer"</option>
+                            </select>
+                            <button class="btn tiny ghost untrust-person" title="Take them out of this room" aria-label="Take them out of this room"
+                                on:click=move |_| post(room.clone(), i2.clone(), false, None)><Icon name="x" small=true/></button>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+            {none_trusted.then(|| view! { <span class="small muted">"Nobody yet: anyone else joins with the link."</span> })}
+            <div class="row">
+                <label class="sr-only">"Contact to trust in this room"</label>
+                <select class="trust-pick" on:change=move |ev| pick.set(event_target_value(&ev))>
+                    <option value="">"Add a contact..."</option>
+                    <For each=untrusted key=|c| c.id.clone() let:c>
+                        <option value=c.id.clone()>{c.label()}</option>
+                    </For>
+                </select>
+                <button class="btn tiny trust-person" disabled=move || pick.get().is_empty()
+                    on:click=move |_| { let p = pick.get_untracked(); if !p.is_empty() { post(r2.clone(), p, true, None) } }>"Add"</button>
+            </div>
+            <span class="group-label">"Joined with the link"</span>
+            <ul class="list people-rows">
+                {devices.into_iter().map(|d| {
+                    let room = r3.clone();
+                    let state = if d.banned { "kicked" } else if d.trusted { "trusted device" } else { "guest" };
+                    let person = d.person.clone();
+                    let trusted_person = person.as_ref().is_some_and(|p| t3.contains(p));
+                    let action = move || match person.clone() {
+                        Some(p) if trusted_person => view! { <span class="small muted">{format!("Trusted as {}", name_of(&p))}</span> }.into_any(),
+                        Some(p) if is_contact(&p) => {
+                            let room = room.clone();
+                            view! {
+                                <button class="btn tiny trust-device" title="Trust their person: every device of theirs"
+                                    on:click=move |_| post(room.clone(), p.clone(), true, None)>"Trust"</button>
+                            }.into_any()
+                        }
+                        Some(_) => view! { <span class="small muted">"Not a contact"</span> }.into_any(),
+                        None => view! { <span class="small muted">"No person"</span> }.into_any(),
+                    };
+                    let name = if d.name.is_empty() { "Someone".to_string() } else { d.name.clone() };
+                    view! {
+                        <li class="person-row link-device" data-device=d.device.clone()>
+                            {avatar(&name, None, false)}
+                            <span class="contact-text">
+                                <span class="contact-name">{name.clone()}</span>
+                                <span class="small muted">{state}</span>
+                            </span>
+                            {action}
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+            {none_joined.then(|| view! { <span class="small muted">"Nobody has joined with the link yet."</span> })}
+            <span class="small muted" role="status">{move || message.get()}</span>
         </div>
     }
 }

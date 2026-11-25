@@ -479,3 +479,11 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   font: inherit; font-size: 14px; cursor: pointer; }
 .seg > button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .15); }
 .settings-line.start { justify-content: flex-start; }
+
+/* Room settings > People and the new room's trusted people (cast-40e.14). */
+.room-trust { display: flex; flex-direction: column; gap: 8px; }
+.people-rows { gap: 2px; }
+.person-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.person-row .contact-text { flex: 1; }
+.person-row .avatar { width: 34px; height: 34px; font-size: 12px; }
+.new-room-people { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

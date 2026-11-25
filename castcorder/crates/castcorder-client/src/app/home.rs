@@ -39,6 +39,12 @@ struct HomeRoom {
     /// Persons trusted in it, by id.
     #[serde(default)]
     persons: Vec<String>,
+    /// Of those, the producers there.
+    #[serde(default)]
+    producers: Vec<String>,
+    /// Devices that joined with its link.
+    #[serde(default)]
+    devices: Vec<super::person::JoinedDev>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -288,10 +294,55 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             refresh();
         })
     };
+    // Trusted people picked for the new room (cast-40e.14).
+    let new_people = RwSignal::new(Vec::<String>::new());
     let create = move |_| {
         let name = new_name.get_untracked();
         new_name.set(String::new());
-        act("/rooms", serde_json::json!({ "name": name }), "Room made.");
+        let people = new_people.get_untracked();
+        new_people.set(Vec::new());
+        spawn_local(async move {
+            let body = serde_json::json!({ "name": name }).to_string();
+            match home_request("POST", "/rooms", Some(body)).await {
+                Ok(t) => {
+                    let room = serde_json::from_str::<serde_json::Value>(&t)
+                        .ok()
+                        .and_then(|v| v["room"].as_str().map(String::from))
+                        .unwrap_or_default();
+                    let mut failed = Vec::new();
+                    for person in &people {
+                        let body =
+                            serde_json::json!({ "room": room, "person": person, "trust": true });
+                        if let Err(e) =
+                            home_request("POST", "/rooms/trust", Some(body.to_string())).await
+                        {
+                            failed.push(e);
+                        }
+                    }
+                    message.set(match (people.len(), failed.is_empty()) {
+                        (0, _) => "Room made.".into(),
+                        (n, true) => format!(
+                            "Room made; it trusts {n} {}.",
+                            if n == 1 { "person" } else { "people" }
+                        ),
+                        (_, false) => format!(
+                            "Room made, but not every person was trusted: {}",
+                            failed.join("; ")
+                        ),
+                    });
+                }
+                Err(e) => message.set(e),
+            }
+            refresh();
+        })
+    };
+    let contact_name = move |id: &str| {
+        contacts.with(|l| {
+            l.iter()
+                .find(|c| c.id == id)
+                .map(|c| c.label())
+                .unwrap_or_default()
+        })
     };
     let copied = RwSignal::new(String::new());
     let copy = move |room: String, link: String| {
@@ -397,6 +448,33 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             <button id="create-room" class="btn" disabled=move || new_name.get().trim().is_empty() on:click=create>"New room"</button>
                             <span id="home-message" class="small muted">{move || message.get()}</span>
                         </div>
+                        <Show when=move || !new_name.get().trim().is_empty() && !contacts.with(|l| l.is_empty())>
+                            <div id="new-room-people" class="new-room-people">
+                                <span class="field">"Trusted people (optional)"</span>
+                                <span class="small muted">"Contacts you add can always get in and see this room in their list. Anyone else joins with the link."</span>
+                                <div class="row">
+                                    {move || new_people.get().into_iter().map(|id| {
+                                        let i2 = id.clone();
+                                        view! {
+                                            <span class="chip new-room-person" data-person=id.clone()>{contact_name(&id)}
+                                                <button class="btn tiny ghost" aria-label="Take out" title="Take out"
+                                                    on:click=move |_| new_people.update(|l| l.retain(|x| *x != i2))><Icon name="x" small=true/></button>
+                                            </span>
+                                        }
+                                    }).collect_view()}
+                                    <label class="sr-only" for="new-room-pick">"Add a contact"</label>
+                                    <select id="new-room-pick" prop:value="" on:change=move |ev| {
+                                        let v = event_target_value(&ev);
+                                        if !v.is_empty() { new_people.update(|l| if !l.contains(&v) { l.push(v) }); }
+                                    }>
+                                        <option value="">"Add a contact..."</option>
+                                        {move || contacts.get().into_iter().filter(|c| !new_people.with(|l| l.contains(&c.id))).map(|c| view! {
+                                            <option value=c.id.clone()>{c.label()}</option>
+                                        }).collect_view()}
+                                    </select>
+                                </div>
+                            </div>
+                        </Show>
                         <ul id="rooms" class="list">
                             <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
                                 {room_card(r, data, contacts, invites, open, copied, copy, act)}
@@ -570,7 +648,8 @@ fn room_card(
                     <code class="room-link" title="The link guests open to join this room">{link.clone()}</code>
                 </div>
                 <span class="small muted">{summary}</span>
-                <super::person::RoomTrust room=name.clone() trusted=r.persons.clone() contacts=contacts/>
+                <super::person::RoomTrust room=name.clone() trusted=r.persons.clone() producers=r.producers.clone()
+                    devices=r.devices.clone() contacts=contacts/>
             </div>
             <Show when=move || count != 0>
                 <details class="past-calls" prop:open={let p = p3.clone(); move || open.past.with(|s| s.contains(&p))}
