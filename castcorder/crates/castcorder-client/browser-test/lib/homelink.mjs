@@ -39,6 +39,8 @@ export async function homeLinkChecks() {
   const P = await openGuest('H', [], HTTP11, undefined, 'Pat');
   await P.setViewportSize({ width: 1000, height: 500 });
   await P.goto(HTTP11 + '/');
+  // The You card is in Settings, a place of the home's left nav (cast-n56.1).
+  await P.click('#nav-settings');
   await P.waitForSelector('#person #link-device', { timeout: 15000 });
   // The card fills its fields from the host once; type after that.
   await waitFor(async () => (await P.inputValue('#device-name')).length > 0, 'the You card loaded the person', 10000);
@@ -83,6 +85,7 @@ export async function homeLinkChecks() {
 
   // Last: in Firefox a custom-scheme link leaves the page deaf to later clicks.
   // "Rooms you joined": say what it does, where the click happened.
+  await P.click('#nav-rooms');
   await P.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
   await P.locator('#joined-rooms').scrollIntoViewIfNeeded();
   await P.click('#joined-rooms');

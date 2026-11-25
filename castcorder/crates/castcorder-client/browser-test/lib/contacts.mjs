@@ -53,6 +53,8 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   page.on('console', (m) => logs.K.push(m.text()));
   page.on('pageerror', (e) => logs.K.push('[pageerror] ' + e.message));
   await page.goto(HTTP + '/');
+  // Contacts is a place of the home's left nav (cast-n56.1).
+  await page.click('#nav-contacts');
   await page.waitForSelector('#add-contact');
   await page.click('#add-contact');
   const link = await waitFor(async () => {
@@ -105,8 +107,12 @@ export async function contactsChecks({ HTTP, rendezvous }) {
     'contacts: the home shows the nickname', 10000);
   check(true, 'contacts: the nickname shows beside the name');
 
-  // Room trust for Bob, picked on a room's card.
+  // Room trust for Bob, picked on a room's card: Rooms, then the room's
+  // ... menu, People and settings.
+  await page.click('#nav-rooms');
   const card = page.locator('#rooms li.room-card').first();
+  await card.locator('.room-menu summary').click();
+  await card.locator('.room-people-toggle').click();
   await card.locator('.trust-pick').selectOption(bob.id);
   await card.locator('.trust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 1, 'contacts: the room lists Bob as trusted', 15000);
@@ -120,6 +126,7 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   check(shared.installs.length === 1 && rooms.some((r) => r.room === room && r.link),
     'contacts: over a contact link Bob learns Ann shares ' + room + ' with its call link: ' + JSON.stringify(shared));
   // And the home asks Bob's install the same way, from his row.
+  await page.click('#nav-contacts');
   await page.click('#contact-list li .shared-rooms');
   const line = await waitFor(async () => {
     const t = await text(page, '#contact-list li .contact-shared');
@@ -130,6 +137,7 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   await card.locator('.untrust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 0, 'contacts: the room no longer trusts Bob', 15000);
   check(true, 'contacts: trust taken back on the room card');
+  await page.click('#nav-contacts');
 
   // One-sided: Bob removes Ann; Ann still lists Bob.
   await call(HTTP2, '/contacts/remove', { person: ann.id });
