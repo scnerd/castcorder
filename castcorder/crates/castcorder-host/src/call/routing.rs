@@ -283,6 +283,7 @@ impl Call {
         self.forget_elsewhere();
         self.call_id = None;
         self.call_dir = None;
+        self.transcript.clear();
         self.last_take = 0;
         self.reset_call_state();
     }
@@ -359,6 +360,7 @@ impl Call {
         self.library = Some(library);
         self.last_take = takes.last().copied().unwrap_or(0);
         self.call_id = Some(id.to_string());
+        self.transcript = crate::transcript::load(&call_dir);
         self.call_dir = Some(call_dir);
         self.safety = SafetyWriter::spawn(
             SafetyRecorder::new(id, self.timeline.id()),

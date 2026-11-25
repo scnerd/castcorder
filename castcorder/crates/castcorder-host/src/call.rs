@@ -402,6 +402,10 @@ pub struct Call {
     /// Contact links ([`link`]): sync-only connections from contacts'
     /// installs, never counted as anyone in the call either.
     links: BTreeMap<GuestId, link::Linked>,
+    /// The live transcript's thread (`None`: transcription is off).
+    transcripts: Option<crate::transcript::Transcripts>,
+    /// The open call's transcript so far, for latecomers.
+    transcript: Vec<castcorder_protocol::TranscriptLine>,
 }
 
 /// How often the library volume's free space is read (host timeline, us).
@@ -526,6 +530,8 @@ impl Call {
             recorders_due_us: 0,
             syncers: BTreeMap::new(),
             links: BTreeMap::new(),
+            transcripts: None,
+            transcript: Vec::new(),
         };
         call.save_room();
         call
@@ -836,6 +842,57 @@ impl Call {
         self.save_room();
         self.broadcast_room();
         response
+    }
+
+    /// Transcribe what participants say while takes record (cast-7hm).
+    pub fn with_transcription(mut self, engine: crate::transcript::Engine) -> Self {
+        match crate::transcript::Transcripts::spawn(engine) {
+            Ok(t) => self.transcripts = Some(t),
+            Err(e) => warn!(error = %e, "no live transcript"),
+        }
+        self
+    }
+
+    /// Give the live transcript one Opus frame of participant `who`, if a
+    /// take records (nothing said between takes is transcribed).
+    fn transcribe(&self, who: u64, name: &str, rtp_time: u64, data: &[u8]) {
+        if let (Some(t), TakeStatus::Recording { take, .. }) = (&self.transcripts, self.status) {
+            t.audio(who, name, take, rtp_time, data, self.timeline.now_us());
+        }
+    }
+
+    /// File and send the transcript lines heard since the last turn.
+    fn publish_transcript(&mut self) {
+        let Some(t) = &self.transcripts else { return };
+        let lines = t.lines();
+        if lines.is_empty() {
+            return;
+        }
+        if let Some(dir) = &self.call_dir
+            && let Err(e) = crate::transcript::append(dir, &lines)
+        {
+            warn!(error = %e, "transcript lines not saved");
+        }
+        for (id, rpc) in &mut self.rpc {
+            if self.names.contains_key(id) && rpc.emit(Event::Transcript(lines.clone())).is_err() {
+                warn!(guest = id.0, "transcript not sent: channel closed");
+            }
+        }
+        self.transcript.extend(lines);
+    }
+
+    /// Tell a guest that just joined the transcript so far.
+    fn send_transcript(&mut self, to: GuestId) {
+        if self.transcript.is_empty() {
+            return;
+        }
+        if let Some(rpc) = self.rpc.get_mut(&to)
+            && rpc
+                .emit(Event::Transcript(self.transcript.clone()))
+                .is_err()
+        {
+            warn!(guest = to.0, "transcript not sent: channel closed");
+        }
     }
 
     /// Align each take once its guests' audio tracks and timing metadata
@@ -1316,6 +1373,9 @@ impl Call {
         self.mark_take(take, true, host_us);
         self.touch_due_us = 0;
         self.safety.stop_take();
+        if let Some(t) = &self.transcripts {
+            t.flush();
+        }
         if let Some(p) = &self.participant
             && p.takes.send(TakeCtl::Stop { done: None }).is_ok()
         {
@@ -1548,6 +1608,7 @@ impl Call {
                     self.send_call(&[id]);
                     self.send_roles(&[id.0]);
                     self.send_cameras(id);
+                    self.send_transcript(id);
                     self.calls_dirty = true;
                     self.save_room();
                     self.broadcast_room();
@@ -1596,6 +1657,9 @@ impl Call {
                                 self.rpc.remove(&guest);
                                 self.data.remove(&guest);
                                 self.names.remove(&guest);
+                                if let Some(t) = &self.transcripts {
+                                    t.gone(guest.0);
+                                }
                                 self.disk.remove(&guest);
                                 self.cameras.remove(&guest);
                                 self.unmet.remove(&guest);
@@ -1615,6 +1679,9 @@ impl Call {
                         }
                     }
                     while let Some(a) = host.next_guest_audio() {
+                        if let Some(who) = self.names.get(&a.guest) {
+                            self.transcribe(a.guest.0, who, a.rtp_time, &a.data);
+                        }
                         if self.safety.recording()
                             && let Some(who) = self.names.get(&a.guest)
                         {
@@ -1640,6 +1707,7 @@ impl Call {
                     self.publish_disk();
                     self.publish_recorders();
                     self.publish_calls();
+                    self.publish_transcript();
                     self.keep_active();
                     // The net port has no readiness wait: sleep until the
                     // deadline but never long, so datagrams are read promptly.
@@ -1925,6 +1993,9 @@ impl Call {
             Command::LocalAudio { rtp_time, data } => {
                 if let Some(local) = &self.local {
                     host.send_local_audio(local, rtp_time, &data);
+                    if let Some(p) = &self.participant {
+                        self.transcribe(local.id().0, &p.name, rtp_time, &data);
+                    }
                 }
             }
             Command::NativeSource { state } => self.native_source(state),

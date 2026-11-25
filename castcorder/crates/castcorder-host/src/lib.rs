@@ -29,6 +29,7 @@ mod rooms;
 mod tls;
 pub use tls::unverified_client;
 mod tracks;
+pub mod transcript;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -88,6 +89,8 @@ pub struct Config {
     pub keep_wav: bool,
     /// Aligned tracks (`None`: off).
     pub align: Option<castcorder_align::AlignConfig>,
+    /// The live transcript's engine (`--transcribe MODEL|off`; `None`: off).
+    pub transcribe: Option<transcript::Engine>,
     /// Make the call always open (saved with the call).
     pub open: bool,
     /// Set whether the call's takes record video (saved with the call;
@@ -124,6 +127,7 @@ impl Config {
             name: "host".into(),
             keep_wav: true,
             align: Some(castcorder_align::AlignConfig::default()),
+            transcribe: None,
             open: false,
             record_video: None,
             log: false,
@@ -969,6 +973,9 @@ pub fn start(
     );
     if let Some(cfg) = args.align {
         call = call.with_alignment(cfg);
+    }
+    if let Some(engine) = args.transcribe.clone() {
+        call = call.with_transcription(engine);
     }
     // The host's own participant, joined and left at runtime; its recorder
     // is told to finalise when the host finishes.

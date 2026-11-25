@@ -347,6 +347,10 @@ pub(super) fn pump_rpc(ui: Ui) {
                     ui.contact_offer
                         .set(Some(super::contact_offer::Offer { name, code }));
                 }
+                // The Transcript panel shows them (cast-7hm.3).
+                Event::Transcript(lines) => {
+                    info!(call = %ctx.call, lines = lines.len(), "transcript lines");
+                }
                 Event::JoinRefusedLocked { name } => {
                     info!(call = %ctx.call, device = %ctx.device, name = %name, "someone tried to join the locked call");
                     ui.notes
