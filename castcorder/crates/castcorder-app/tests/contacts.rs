@@ -10,7 +10,8 @@
 //! - Room trust for a person: Bob's install key, with its certificate, is
 //!   kept out of Ann's locked room until Ann trusts Bob's person there (Cy,
 //!   not a contact, cannot be trusted), then enters; taken back, it is kept
-//!   out again.
+//!   out again. A status query from Bob's install lists the room while Bob
+//!   is trusted there, though that install never joined it (cast-40e.11).
 
 #[path = "../../castcorder-transport/tests/support/mod.rs"]
 mod support;
@@ -87,6 +88,37 @@ fn offer(host: &Running, from: &Running) -> (u16, String) {
         &body.to_string(),
     )
     .unwrap()
+}
+
+/// A status query to `host` from `from`'s install key with its certificate:
+/// the rooms it is told about, as (room, producer, removed).
+fn status(host: &Running, from: &Running) -> Vec<(String, bool, bool)> {
+    let nonce = format!("nonce-{}", now_ms());
+    let proof = identity::sign_offer(&host_secret(from), host.host_id(), None, now_ms(), &nonce);
+    let body = serde_json::json!({
+        "type": "offer",
+        "status": true,
+        "sdp": nonce,
+        "proof": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&proof)
+        ).unwrap(),
+        "cert": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&from.person_cert())
+        ).unwrap(),
+    });
+    let (code, text) = lan_post(
+        &host.lan_links()[0],
+        "/offer?name=q",
+        "application/json",
+        &body.to_string(),
+    )
+    .unwrap();
+    assert_eq!(code, 200, "{text}");
+    let st: castcorder_link::wire::HostStatus = serde_json::from_str(&text).unwrap();
+    st.rooms
+        .into_iter()
+        .map(|r| (r.room, r.producer, r.removed))
+        .collect()
 }
 
 #[test]
@@ -170,7 +202,17 @@ fn two_persons_pair_mutually_and_a_room_can_trust_a_contact() {
         a.trust_person("show", &cy, true).is_err(),
         "Cy is no contact"
     );
+    assert!(
+        status(&a, &b).is_empty(),
+        "Bob was never in a room of Ann's"
+    );
     a.trust_person("show", &bob, true).unwrap();
+    assert_eq!(
+        status(&a, &b),
+        vec![("show".to_string(), false, false)],
+        "a trusted person's install is told about the room before it ever joins"
+    );
+    assert!(status(&a, &c).is_empty(), "Cy is not trusted");
     let (code, why) = offer(&a, &b);
     assert_eq!(code, 200, "{why}");
     let (code, _) = offer(&a, &c);
