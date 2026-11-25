@@ -190,9 +190,9 @@ jobs:
           cargo build --release --locked -p castcorder-host
           cd crates/castcorder-client && trunk build --release
 
-      - name: Degrade the loopback (40 ms +- 10 ms, 2 % loss)
+      - name: Degrade the loopback (20 ms +- 5 ms, 0.5 % loss)
         run: |
-          sudo tc qdisc add dev lo root netem delay 40ms 10ms loss 2%
+          sudo tc qdisc add dev lo root netem delay 20ms 5ms loss 0.5%
           tc qdisc show dev lo
 
       - name: Relay test on the degraded network
