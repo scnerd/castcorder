@@ -18,7 +18,11 @@
 //!   online is pinged every [`Timing::heartbeat`] unless heard from since, and
 //!   one not online every [`Timing::retry`] (it pings us when it starts).
 //!   What was heard holds for [`Timing::stale`]; a ping without an answer
-//!   ends it at once.
+//!   ends it at once, and so does a leaving ping: an install that stops or
+//!   starts to appear offline tells the installs it shows online, so sweeps
+//!   can be rare (cast-40e.12).
+//! - [`Traffic`] counts the pings, the cost on the rendezvous (each is a
+//!   Worker request and about 1.1 Durable Object requests).
 //! - [`Board`] is the I/O-free state (times are passed in); [`spawn`] is the
 //!   thread that sends the pings.
 
@@ -53,16 +57,19 @@ pub struct Timing {
     pub look: Duration,
     /// How long a ping waits for its answer.
     pub wait: Duration,
+    /// How long a leaving ping waits for its answer (stopping waits for it).
+    pub bye: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
         Self {
-            heartbeat: Duration::from_secs(30 * 60),
-            stale: Duration::from_secs(65 * 60),
-            retry: Duration::from_secs(60 * 60),
-            look: Duration::from_secs(2 * 60),
+            heartbeat: Duration::from_secs(60 * 60),
+            stale: Duration::from_secs(125 * 60),
+            retry: Duration::from_secs(120 * 60),
+            look: Duration::from_secs(10 * 60),
             wait: Duration::from_secs(10),
+            bye: Duration::from_secs(3),
         }
     }
 }
@@ -104,9 +111,28 @@ pub struct PresenceView {
     pub last_seen_ms: Option<u64>,
 }
 
+/// Presence pings since this app started (cast-40e.12): what this install
+/// asks of the rendezvous, and what its contacts ask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Traffic {
+    /// When counting started (ms since the Unix epoch; 0: not registered
+    /// yet).
+    pub since_ms: u64,
+    /// Pings sent, leaving pings included.
+    pub sent: u64,
+    /// Of those, how many were answered.
+    pub answered: u64,
+    /// Pings received from other installs (answered or not).
+    pub received: u64,
+}
+
 /// What this install knows about its contacts' installs, kept in memory.
 #[derive(Clone, Debug, Default)]
 pub struct Board {
+    /// Presence pings counted.
+    traffic: Traffic,
+    /// Tell the installs shown online that this one is leaving.
+    leave: bool,
     devices: BTreeMap<String, Seen>,
     /// Ping every install at the next chance.
     sweep: bool,
@@ -119,9 +145,57 @@ pub struct Board {
 impl Board {
     /// Registered with the rendezvous: from now on pings go out, starting
     /// with every install.
-    pub fn registered(&mut self) {
+    pub fn registered(&mut self, now_ms: u64) {
         self.ready = true;
         self.sweep = true;
+        if self.traffic.since_ms == 0 {
+            self.traffic.since_ms = now_ms;
+        }
+    }
+
+    /// Whether pings can go out (registered at least once).
+    pub fn ready(&self) -> bool {
+        self.ready
+    }
+
+    /// The pings counted so far.
+    pub fn traffic(&self) -> Traffic {
+        self.traffic
+    }
+
+    /// `n` pings went out.
+    pub fn sent(&mut self, n: usize) {
+        self.traffic.sent += n as u64;
+    }
+
+    /// A ping of ours was answered.
+    pub fn answered(&mut self) {
+        self.traffic.answered += 1;
+    }
+
+    /// A ping came in.
+    pub fn received(&mut self) {
+        self.traffic.received += 1;
+    }
+
+    /// This install starts to appear offline: tell the installs shown
+    /// online at the next chance.
+    pub fn leave(&mut self) {
+        self.leave = true;
+    }
+
+    /// Whether to tell them now (once per [`Board::leave`]).
+    pub fn take_leave(&mut self) -> bool {
+        std::mem::take(&mut self.leave)
+    }
+
+    /// The installs shown online at `now_ms`.
+    pub fn online(&self, now_ms: u64, t: &Timing) -> Vec<String> {
+        self.devices
+            .iter()
+            .filter(|(_, s)| s.online(now_ms, t))
+            .map(|(d, _)| d.clone())
+            .collect()
     }
 
     /// Ping every install at the next chance (a contact was added).
@@ -188,6 +262,7 @@ impl Board {
                 out.push(device.clone());
             }
         }
+        self.sent(out.len());
         out
     }
 
@@ -236,6 +311,8 @@ pub struct Me {
     /// To another app install of the person only: this one's contacts
     /// (cast-40e.9).
     pub sync: Option<castcorder_link::wire::OwnSync>,
+    /// This install is going offline (cast-40e.12).
+    pub leaving: bool,
 }
 
 /// Ping the contact install `to` once through `exchange`: its answer, or why
@@ -271,6 +348,7 @@ pub fn ping(
             device: me.device.clone(),
             revoked: me.revoked.clone(),
             sync: me.sync.clone(),
+            leaving: me.leaving,
         }),
     };
     let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
@@ -307,7 +385,59 @@ pub fn verify_ping(
     Ok((key, person))
 }
 
-/// Send presence pings through the rendezvous at `base` until `stop` is set.
+/// Send one ping to `to` (of `person`) on its own thread. A leaving ping
+/// waits [`Timing::bye`] and its answer teaches nothing.
+fn send(
+    contacts: &crate::contact::Contacts,
+    base: &str,
+    to: HostId,
+    person: String,
+    leaving: bool,
+) -> Option<thread::JoinHandle<()>> {
+    let (contacts, base) = (contacts.clone(), base.to_string());
+    let spawned = thread::Builder::new()
+        .name("presence-ping".into())
+        .spawn(move || {
+            let t = contacts.timing();
+            let wait = if leaving { t.bye } else { t.wait };
+            let mut me = contacts.me();
+            me.leaving = leaving;
+            // Another install of this person: send what this one knows
+            // (cast-40e.9).
+            if person == contacts.own_person() && !leaving {
+                me.sync = Some(contacts.snapshot());
+            }
+            let r = ping(&me, &to, crate::wall_ms(), &mut |sealed| {
+                crate::rendezvous::exchange_within(&base, &to, sealed, wait)
+            });
+            let device = device_id(&to.0);
+            match &r {
+                Ok(_) => debug!(device = %to.short(), leaving, "presence: online"),
+                Err(e) => {
+                    debug!(device = %to.short(), leaving, why = %e, "presence: no answer")
+                }
+            }
+            if leaving {
+                contacts.presence_left(r.is_ok());
+            } else {
+                contacts.presence_result(&device, &person, r, crate::wall_ms());
+            }
+        });
+    match spawned {
+        Ok(h) => Some(h),
+        Err(e) => {
+            tracing::warn!(error = %e, "presence ping not sent");
+            None
+        }
+    }
+}
+
+/// How often the counts of presence pings are logged.
+const TRAFFIC_LOG: Duration = Duration::from_secs(60 * 60);
+
+/// Send presence pings through the rendezvous at `base` until `stop` is set;
+/// then tell the installs shown online that this one is leaving, waiting at
+/// most [`Timing::bye`] for them.
 pub fn spawn(
     contacts: crate::contact::Contacts,
     base: String,
@@ -318,39 +448,43 @@ pub fn spawn(
         .spawn(move || {
             // Not "registered with the rendezvous": tests count that line.
             info!("presence pings will start after the first registration");
+            let mut logged = std::time::Instant::now();
             while !stop.load(Ordering::SeqCst) {
                 for (to, person) in contacts.presence_due(crate::wall_ms()) {
-                    let (contacts, base) = (contacts.clone(), base.clone());
-                    let spawned = thread::Builder::new().name("presence-ping".into()).spawn(
-                        move || {
-                            let wait = contacts.timing().wait;
-                            let mut me = contacts.me();
-                            // Another install of this person: send what
-                            // this one knows (cast-40e.9).
-                            if person == contacts.own_person() {
-                                me.sync = Some(contacts.snapshot());
-                            }
-                            let r = ping(&me, &to, crate::wall_ms(), &mut |sealed| {
-                                crate::rendezvous::exchange_within(&base, &to, sealed, wait)
-                            });
-                            let device = device_id(&to.0);
-                            match &r {
-                                Ok(_) => debug!(device = %to.short(), "presence: online"),
-                                Err(e) => {
-                                    debug!(device = %to.short(), why = %e, "presence: no answer")
-                                }
-                            }
-                            contacts.presence_result(&device, &person, r, crate::wall_ms());
-                        },
+                    send(&contacts, &base, to, person, false);
+                }
+                for (to, person) in contacts.leaving_due(crate::wall_ms()) {
+                    send(&contacts, &base, to, person, true);
+                }
+                if logged.elapsed() >= TRAFFIC_LOG {
+                    logged = std::time::Instant::now();
+                    let t = contacts.traffic();
+                    info!(
+                        sent = t.sent,
+                        answered = t.answered,
+                        received = t.received,
+                        since_ms = t.since_ms,
+                        "presence traffic"
                     );
-                    if let Err(e) = spawned {
-                        tracing::warn!(error = %e, "presence ping not sent");
-                    }
                 }
                 let until = std::time::Instant::now() + Duration::from_millis(250);
                 while std::time::Instant::now() < until && !stop.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(50));
                 }
+            }
+            let bye: Vec<_> = contacts
+                .leaving_all(crate::wall_ms())
+                .into_iter()
+                .filter_map(|(to, person)| send(&contacts, &base, to, person, true))
+                .collect();
+            if !bye.is_empty() {
+                info!(
+                    installs = bye.len(),
+                    "telling contacts this install is leaving"
+                );
+            }
+            for h in bye {
+                let _ = h.join();
             }
         })
         .expect("spawn presence thread")

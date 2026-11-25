@@ -77,6 +77,7 @@ fn start(root: &Path, name: &str, rv: SocketAddr) -> Running {
         retry: Duration::from_secs(2),
         look: Duration::from_secs(3),
         wait: Duration::from_secs(2),
+        bye: Duration::from_secs(2),
     };
     castcorder_host::start(c, |_| {}).unwrap()
 }
@@ -126,9 +127,10 @@ fn contacts_see_each_other_online_through_the_rendezvous() {
     b.set_appear_offline(false).unwrap();
     wait("Ann to see Bob again", || online(&a) == ["Laptop"]);
 
-    // Bob's app stops, then starts again.
+    // Bob's app stops, then starts again. Stopping tells Ann (cast-40e.12),
+    // so she shows him offline at once, not a sweep or a stale time later.
     b.stop();
-    wait("Ann to see Bob's app stopped", || online(&a).is_empty());
+    assert!(online(&a).is_empty(), "Ann still shows Bob online");
     let b = start(&root, "b", rv);
     wait("Ann to see Bob back", || online(&a) == ["Laptop"]);
     wait("Bob to see Ann after his restart", || {

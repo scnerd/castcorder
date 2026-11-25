@@ -324,12 +324,33 @@ fn ping_as(
     ping_with(to, key, cert, Vec::new(), now)
 }
 
+/// [`ping_as`], a leaving ping (cast-40e.12).
+fn ping_leaving(
+    to: &Install,
+    key: &HostKey,
+    cert: DeviceCert,
+    now: u64,
+) -> Result<castcorder_link::wire::PresenceAnswer, String> {
+    ping_full(to, key, cert, Vec::new(), true, now)
+}
+
 /// [`ping_as`], the ping carrying the revocations `revoked`.
 fn ping_with(
     to: &Install,
     key: &HostKey,
     cert: DeviceCert,
     revoked: Vec<castcorder_link::person::Revocation>,
+    now: u64,
+) -> Result<castcorder_link::wire::PresenceAnswer, String> {
+    ping_full(to, key, cert, revoked, false, now)
+}
+
+fn ping_full(
+    to: &Install,
+    key: &HostKey,
+    cert: DeviceCert,
+    revoked: Vec<castcorder_link::person::Revocation>,
+    leaving: bool,
     now: u64,
 ) -> Result<castcorder_link::wire::PresenceAnswer, String> {
     let me = crate::presence::Me {
@@ -339,6 +360,7 @@ fn ping_with(
         device: "Laptop".into(),
         revoked,
         sync: None,
+        leaving,
     };
     // A proof signed `skew` ms before the answering clock's now.
     let signed = now - to.skew.get();
@@ -385,6 +407,61 @@ fn a_contact_is_answered_and_both_sides_learn_who_is_online() {
     let v = b.contacts.view(now + 1);
     assert!(v.contacts[0].presence.online.is_empty());
     assert_eq!(v.contacts[0].presence.last_seen_ms, Some(now));
+}
+
+#[test]
+fn a_leaving_contact_is_shown_offline_at_once_and_counted() {
+    let (a, b) = paired(40);
+    let now = crate::wall_ms();
+    a.contacts.presence_registered();
+    let base = a.contacts.traffic();
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_ok());
+    assert_eq!(
+        a.contacts.view(now).contacts[0].presence.online,
+        vec!["Laptop"]
+    );
+    // Bob's install stops: it says so, and Ann shows it offline now rather
+    // than when it goes stale, keeping when it was last seen.
+    assert!(ping_leaving(&a, &b.host, b.persons.cert(), now + 1).is_ok());
+    let v = a.contacts.view(now + 1);
+    assert!(v.contacts[0].presence.online.is_empty());
+    assert_eq!(v.contacts[0].presence.last_seen_ms, Some(now));
+    assert_eq!(v.presence_traffic.received, base.received + 2);
+    // A stranger's leaving ping changes nothing.
+    let c = install("Cy", 42);
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now + 2).is_ok());
+    assert!(ping_leaving(&a, &c.host, c.persons.cert(), now + 3).is_err());
+    assert_eq!(
+        a.contacts.view(now + 3).contacts[0].presence.online,
+        vec!["Laptop"]
+    );
+}
+
+#[test]
+fn going_offline_tells_the_installs_shown_online_once() {
+    let (a, b) = paired(44);
+    let now = crate::wall_ms();
+    // Nothing to tell before registering or with nobody online.
+    assert!(a.contacts.leaving_all(now).is_empty());
+    a.contacts.presence_registered();
+    assert!(a.contacts.leaving_all(now).is_empty());
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_ok());
+    let sent = a.contacts.traffic().sent;
+    // Stopping: Bob's install is told.
+    let to = a.contacts.leaving_all(now);
+    assert_eq!(to.len(), 1);
+    assert_eq!(to[0].0, b.host.id());
+    assert_eq!(a.contacts.traffic().sent, sent + 1);
+    // Starting to appear offline: told once, at the next chance; and no
+    // more at the stop, since it already knows.
+    assert!(a.contacts.leaving_due(now).is_empty());
+    a.contacts.set_appear_offline(true).unwrap();
+    assert_eq!(a.contacts.leaving_due(now).len(), 1);
+    assert!(a.contacts.leaving_due(now).is_empty());
+    assert!(a.contacts.leaving_all(now).is_empty());
+    // Already appearing offline: setting it again tells nobody.
+    a.contacts.set_appear_offline(true).unwrap();
+    assert!(a.contacts.leaving_due(now).is_empty());
 }
 
 #[test]
@@ -451,6 +528,7 @@ fn link_as(to: &Install, key: &HostKey, cert: DeviceCert, now: u64) -> Result<Li
         device: "Laptop".into(),
         revoked: Vec::new(),
         sync: None,
+        leaving: false,
     };
     let mut admitted = None;
     let sdp = "v=0\r\nfake offer";
@@ -499,6 +577,7 @@ fn only_a_contacts_install_gets_a_contact_link_and_never_while_appearing_offline
         device: "Laptop".into(),
         revoked: Vec::new(),
         sync: None,
+        leaving: false,
     };
     let _ = crate::presence::ping(&me, &a.host.id(), now, &mut |sealed: &[u8]| {
         let (plain, _) = a.host.open_offer(sealed).map_err(|e| e.to_string())?;

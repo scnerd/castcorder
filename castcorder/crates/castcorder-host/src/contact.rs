@@ -225,6 +225,8 @@ pub struct View {
     pub presence: bool,
     /// This install appears offline to its contacts.
     pub appear_offline: bool,
+    /// Presence pings counted since this app started (cast-40e.12).
+    pub presence_traffic: crate::presence::Traffic,
     /// Invites to calls from contacts, oldest first.
     pub invites: Vec<crate::invite::Incoming>,
     /// Invites this install sent, oldest first.
@@ -329,6 +331,7 @@ impl Contacts {
             adding: g.adding.clone(),
             presence: self.presence_on.load(Ordering::SeqCst),
             appear_offline: g.saved.appear_offline,
+            presence_traffic: g.board.traffic(),
             invites: g.invites.incoming(now_ms),
             invited: g.invites.outgoing(now_ms),
         }
@@ -560,7 +563,7 @@ impl Contacts {
 
     /// Registered with the rendezvous: ping every contact install.
     pub fn presence_registered(&self) {
-        self.lock().board.registered();
+        self.lock().board.registered(crate::wall_ms());
     }
 
     /// The home is open: ping every contact install, at most every
@@ -572,6 +575,9 @@ impl Contacts {
     /// Appear offline (or stop): no pings out, none answered.
     pub fn set_appear_offline(&self, on: bool) -> Result<(), String> {
         let mut g = self.lock();
+        if on && !g.saved.appear_offline {
+            g.board.leave();
+        }
         g.saved.appear_offline = on;
         if !on {
             g.board.sweep();
@@ -591,7 +597,65 @@ impl Contacts {
             device,
             revoked: self.persons.revocations(),
             sync: None,
+            leaving: false,
         }
+    }
+
+    /// Presence pings counted since this app started (cast-40e.12).
+    pub fn traffic(&self) -> crate::presence::Traffic {
+        self.lock().board.traffic()
+    }
+
+    /// A leaving ping was sent; `answered`: and answered.
+    pub fn presence_left(&self, answered: bool) {
+        if answered {
+            self.lock().board.answered();
+        }
+    }
+
+    /// The contact installs (their key, their person id) shown online at
+    /// `now_ms`, counted as pinged: where leaving pings go.
+    fn leaving_to(
+        g: &mut Inner,
+        now_ms: u64,
+        t: &Timing,
+    ) -> Vec<(castcorder_link::HostId, String)> {
+        let online = g.board.online(now_ms, t);
+        let out: Vec<_> = g
+            .saved
+            .contacts
+            .iter()
+            .flat_map(|c| c.devices.iter().map(move |d| (c.id.clone(), d)))
+            .filter_map(|(person, d)| {
+                let key: [u8; 32] = unb64(&d.device)?.try_into().ok()?;
+                online
+                    .contains(&device_id(&key))
+                    .then_some((castcorder_link::HostId(key), person))
+            })
+            .collect();
+        g.board.sent(out.len());
+        out
+    }
+
+    /// Where to send leaving pings now: the installs shown online, once
+    /// this install has started to appear offline.
+    pub fn leaving_due(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, String)> {
+        let mut g = self.lock();
+        if !g.board.take_leave() {
+            return Vec::new();
+        }
+        Self::leaving_to(&mut g, now_ms, &self.timing)
+    }
+
+    /// Where to send leaving pings as this install stops: the installs
+    /// shown online, unless it already appears offline (they were told) or
+    /// never registered.
+    pub fn leaving_all(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, String)> {
+        let mut g = self.lock();
+        if g.saved.appear_offline || !g.board.ready() {
+            return Vec::new();
+        }
+        Self::leaving_to(&mut g, now_ms, &self.timing)
     }
 
     /// The contact installs to ping at `now_ms` (their key, their person
@@ -639,6 +703,9 @@ impl Contacts {
         r: Result<PresenceAnswer, String>,
         now_ms: u64,
     ) {
+        if r.is_ok() {
+            self.lock().board.answered();
+        }
         if person == self.persons.id() {
             if let Ok(a) = r {
                 self.persons.learn_own_revoked(&a.revoked);
@@ -682,6 +749,7 @@ impl Contacts {
     /// install is online; one not known yet is kept as the contact's.
     pub fn answer_presence(&self, o: &OfferPlain, now_ms: u64) -> Option<PresenceAnswer> {
         let ping = o.presence.as_ref()?;
+        self.lock().board.received();
         let (key, person) = match crate::presence::verify_ping(o, &self.host.id().encode(), now_ms)
         {
             Ok(k) => k,
@@ -734,12 +802,18 @@ impl Contacts {
             warn!(error = %e, "could not save the contact");
         }
         self.persons.note_revoked(new);
-        g.board.heard(
-            &device_id(&key),
-            &id,
-            &crate::http::clean_label(&ping.device),
-            now_ms,
-        );
+        if ping.leaving {
+            // It stops or starts to appear offline (cast-40e.12).
+            g.board.gone(&device_id(&key), now_ms);
+            debug!(person = %id, "a contact install is leaving");
+        } else {
+            g.board.heard(
+                &device_id(&key),
+                &id,
+                &crate::http::clean_label(&ping.device),
+                now_ms,
+            );
+        }
         Some(PresenceAnswer {
             name: me.name,
             device: me.device,
