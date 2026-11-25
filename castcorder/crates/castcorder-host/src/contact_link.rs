@@ -42,6 +42,9 @@ use crate::presence::Me;
 /// A link with nothing asked for this long is closed.
 pub const IDLE: Duration = Duration::from_secs(60);
 
+/// How often invites waiting for an install online are looked at.
+const INVITES_EVERY: Duration = Duration::from_millis(500);
+
 /// How long one request waits for its answer (opening the link included).
 pub const WAIT: Duration = Duration::from_secs(20);
 
@@ -212,14 +215,35 @@ pub fn spawn(
     stop: Arc<AtomicBool>,
 ) -> (Links, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<Ask>();
+    let links = Links { tx: tx.clone() };
     let handle = thread::Builder::new()
         .name("contact-links".into())
         .spawn(move || {
+            let mut invites_due = Instant::now();
             let (opened_tx, opened_rx) = mpsc::channel::<([u8; 32], Result<Dial, String>)>();
             let mut open: BTreeMap<[u8; 32], Open> = BTreeMap::new();
             let mut opening: BTreeMap<[u8; 32], Vec<(Request, Reply, Instant)>> = BTreeMap::new();
             while !stop.load(Ordering::SeqCst) {
                 let now = Instant::now();
+                // Invites waiting for an install shown online.
+                if now >= invites_due {
+                    invites_due = now + INVITES_EVERY;
+                    for (to, due) in contacts.invites_due(crate::wall_ms()) {
+                        let (links, contacts) = (links.clone(), contacts.clone());
+                        let spawned = thread::Builder::new().name("contact-invite".into()).spawn(move || {
+                            let r = links.ask(to, Request::Invite(due.invite.clone()));
+                            let ok = matches!(r, Ok(Response::Done));
+                            match &r {
+                                Ok(Response::Done) => info!(device = %to.short(), room = %due.invite.room, "invite delivered"),
+                                other => debug!(device = %to.short(), answer = ?other, "invite not delivered"),
+                            }
+                            contacts.invite_sent(&due, ok, crate::wall_ms());
+                        });
+                        if let Err(e) = spawned {
+                            warn!(error = %e, "invite not sent");
+                        }
+                    }
+                }
                 while let Ok(ask) = rx.try_recv() {
                     let key = ask.to.0;
                     if let Some(o) = open.get_mut(&key) {

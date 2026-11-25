@@ -15,6 +15,7 @@ mod call;
 pub mod contact;
 pub mod contact_link;
 mod http;
+pub mod invite;
 mod local;
 #[cfg(feature = "native-capture")]
 mod native;
@@ -373,6 +374,29 @@ impl Running {
     pub fn contacts_looked(&self) -> contact::View {
         self.contacts.look(wall_ms());
         self.contacts.view(wall_ms())
+    }
+
+    /// Invite contact `person` to `room`'s call: sent over contact links to
+    /// their installs online now, and to the others when next seen online.
+    pub fn invite(&self, person: &str, room: &str) -> Result<(), String> {
+        let (reply, rx) = mpsc::channel();
+        let in_call = self
+            .finisher
+            .tx
+            .send(call::Command::InCall {
+                room: room.to_string(),
+                reply,
+            })
+            .ok()
+            .and_then(|_| rx.recv_timeout(std::time::Duration::from_secs(10)).ok())
+            .unwrap_or_default();
+        let invite = invite::make(&self.call_links, room, in_call)?;
+        self.contacts.invite(person, invite, wall_ms())
+    }
+
+    /// Stop showing the invite `id` this install received.
+    pub fn dismiss_invite(&self, id: u64) -> Result<(), String> {
+        self.contacts.dismiss_invite(id)
     }
 
     /// The rooms contact `person` shares with this install, asked over
@@ -842,6 +866,7 @@ pub fn start(
             host_device: host_device.clone(),
             keep_wav: args.keep_wav,
             persons: persons.clone(),
+            contacts: contacts.clone(),
         },
         room,
         room_name.clone(),

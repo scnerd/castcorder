@@ -136,6 +136,21 @@ export async function contactsChecks({ HTTP, rendezvous }) {
     'contacts: the home asked Bob over a contact link: ' + line);
   // Back to Rooms: the room's card (and its open People panel) is there.
   await page.click('#nav-rooms');
+  // Invites (cast-40e.5): from the room's ... menu, Ann invites Bob to the
+  // room's call; it reaches his install over a contact link.
+  await card.locator('.room-menu summary').click();
+  await card.locator('.invite-toggle').click();
+  await card.locator('.invite-contact[data-person="' + bob.id + '"] .send-invite').click();
+  const invited = await waitFor(async () => {
+    const v = await call(HTTP2, '/contacts');
+    return v.invites.length === 1 ? v.invites[0] : null;
+  }, 'contacts: the invite reaches Bob', 30000, 500);
+  check(invited.from === 'Ann Host' && invited.room === room && invited.link.includes('#'),
+    'contacts: Bob is invited to ' + room + ' by Ann with the call link: ' + JSON.stringify(invited));
+  await waitFor(async () => (await text(page, '.invite-contact[data-person="' + bob.id + '"] .invite-state')) === 'Invited',
+    'contacts: the room card says Bob is invited', 15000);
+  await call(HTTP2, '/contacts/invite/dismiss', { id: invited.id });
+  check((await call(HTTP2, '/contacts')).invites.length === 0, 'contacts: Bob dismissed the invite');
   await card.locator('.untrust-person').click();
   await waitFor(async () => (await card.locator('.trusted-person').count()) === 0, 'contacts: the room no longer trusts Bob', 15000);
   check(true, 'contacts: trust taken back on the room card');

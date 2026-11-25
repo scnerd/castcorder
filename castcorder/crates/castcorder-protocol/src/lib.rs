@@ -191,6 +191,22 @@ pub enum Request {
     /// room trusts its person). Answered with [`Response::SharedRooms`]
     /// (appended).
     SharedRooms,
+    /// On a contact link only (ADR 0005, cast-40e.5): the asking contact
+    /// invites this install's person to a call. Answered with
+    /// [`Response::Done`] once it is shown (appended).
+    Invite(RoomInvite),
+}
+
+/// An invite to a call, from a contact (CONTEXT.md "Invite"): the room's call
+/// link and who sends it. The room's normal join rules apply to it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInvite {
+    /// The room's name.
+    pub room: String,
+    /// The room's call link.
+    pub link: String,
+    /// Who is in its call now, by display name (empty: nobody yet).
+    pub in_call: Vec<String>,
 }
 
 /// One room a contact shares, as the answering install sees it (answer to
@@ -784,6 +800,11 @@ mod tests {
             },
             Request::CameraState { on: true },
             Request::SharedRooms,
+            Request::Invite(RoomInvite {
+                room: "show".into(),
+                link: "https://example.test/v/1.2.3/#k".into(),
+                in_call: vec!["Ann".into()],
+            }),
         ]
     }
 

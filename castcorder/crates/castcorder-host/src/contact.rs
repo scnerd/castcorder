@@ -181,6 +181,10 @@ pub struct View {
     pub presence: bool,
     /// This install appears offline to its contacts.
     pub appear_offline: bool,
+    /// Invites to calls from contacts, oldest first.
+    pub invites: Vec<crate::invite::Incoming>,
+    /// Invites this install sent, oldest first.
+    pub invited: Vec<crate::invite::Outgoing>,
 }
 
 struct Inner {
@@ -189,6 +193,7 @@ struct Inner {
     codes: Vec<Code>,
     adding: Option<Adding>,
     board: Board,
+    invites: crate::invite::Invites,
 }
 
 /// This install's contacts, shared by the HTTP listeners, the rendezvous
@@ -227,6 +232,7 @@ impl Contacts {
                 codes: Vec::new(),
                 adding: None,
                 board: Board::default(),
+                invites: Default::default(),
             })),
             persons,
             host: Arc::new(HostKey::from_secret(host.secret())),
@@ -273,7 +279,115 @@ impl Contacts {
             adding: g.adding.clone(),
             presence: self.presence_on.load(Ordering::SeqCst),
             appear_offline: g.saved.appear_offline,
+            invites: g.invites.incoming(now_ms),
+            invited: g.invites.outgoing(now_ms),
         }
+    }
+
+    /// An invite from the contact install `peer` (over its contact link):
+    /// shown until dismissed. Only a current contact's, and only with a
+    /// call link.
+    pub fn receive_invite(
+        &self,
+        peer: &LinkPeer,
+        invite: castcorder_protocol::RoomInvite,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        castcorder_link::CallLink::parse(&invite.link)
+            .map_err(|e| format!("not a call link: {e}"))?;
+        if !invite.link.starts_with("https://") && !invite.link.starts_with("http://") {
+            return Err("not a call link".into());
+        }
+        let mut g = self.lock();
+        let c = g
+            .saved
+            .contacts
+            .iter()
+            .find(|c| c.id == peer.person)
+            .ok_or("not a contact")?;
+        let from = if c.nickname.is_empty() {
+            c.name.clone()
+        } else {
+            c.nickname.clone()
+        };
+        let invite = castcorder_protocol::RoomInvite {
+            room: crate::http::clean_label(&invite.room),
+            in_call: invite
+                .in_call
+                .iter()
+                .take(16)
+                .map(|n| crate::http::clean_label(n))
+                .collect(),
+            link: invite.link,
+        };
+        info!(person = %peer.person, room = %invite.room, "invited to a call");
+        g.invites.receive(&peer.person, &from, invite, now_ms);
+        Ok(())
+    }
+
+    /// Stop showing the invite `id`.
+    pub fn dismiss_invite(&self, id: u64) -> Result<(), String> {
+        if self.lock().invites.dismiss(id) {
+            Ok(())
+        } else {
+            Err("no such invite".into())
+        }
+    }
+
+    /// Invite contact `person` with `invite`: sent to their installs online
+    /// now, and to the others when next seen online.
+    pub fn invite(
+        &self,
+        person: &str,
+        invite: castcorder_protocol::RoomInvite,
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let mut g = self.lock();
+        if !g.saved.contacts.iter().any(|c| c.id == person) {
+            return Err("only a contact can be invited".into());
+        }
+        info!(person = %person, room = %invite.room, "inviting a contact");
+        g.invites.send(person, invite, now_ms);
+        Ok(())
+    }
+
+    /// The invite deliveries to start at `now_ms` (to installs shown
+    /// online), marked as being sent; none while appearing offline.
+    pub fn invites_due(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, crate::invite::Due)> {
+        let mut g = self.lock();
+        if g.saved.appear_offline {
+            return Vec::new();
+        }
+        let mut keys = std::collections::HashMap::new();
+        let installs: Vec<(String, String)> = g
+            .saved
+            .contacts
+            .iter()
+            .flat_map(|c| c.devices.iter().map(move |d| (c.id.clone(), d)))
+            .filter_map(|(person, d)| {
+                let key: [u8; 32] = unb64(&d.device)?.try_into().ok()?;
+                let id = device_id(&key);
+                keys.insert(id.clone(), key);
+                Some((person, id))
+            })
+            .filter(|(_, id)| g.board.is_online(id, now_ms, &self.timing))
+            .collect();
+        g.invites
+            .due(now_ms, |p| {
+                installs
+                    .iter()
+                    .filter(|(person, _)| person == p)
+                    .map(|(_, id)| id.clone())
+                    .collect()
+            })
+            .into_iter()
+            .filter_map(|d| Some((castcorder_link::HostId(*keys.get(&d.device)?), d)))
+            .collect()
+    }
+
+    /// How a delivery from [`Contacts::invites_due`] went.
+    pub fn invite_sent(&self, d: &crate::invite::Due, ok: bool, now_ms: u64) {
+        self.lock().invites.sent(d, ok, now_ms);
     }
 
     /// Whether there are no contacts.
@@ -354,6 +468,7 @@ impl Contacts {
             return Err("no such contact".into());
         }
         g.board.forget(id);
+        g.invites.forget(id);
         info!(person = %id, "removed a contact");
         g.save().map_err(|e| e.to_string())
     }

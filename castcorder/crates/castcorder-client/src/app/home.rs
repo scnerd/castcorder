@@ -87,6 +87,58 @@ struct Who {
     device_name: String,
 }
 
+/// An invite to a call from a contact (`GET /contacts`, `invites`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct InviteIn {
+    id: u64,
+    from: String,
+    room: String,
+    link: String,
+    #[serde(default)]
+    in_call: Vec<String>,
+}
+
+/// An invite this install sent (`GET /contacts`, `invited`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct InviteOut {
+    person: String,
+    room: String,
+    delivered: bool,
+}
+
+/// `GET /contacts`, as far as the home's invites need it.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct Invites {
+    #[serde(default)]
+    contacts: Vec<super::person::ContactItem>,
+    #[serde(default)]
+    invites: Vec<InviteIn>,
+    #[serde(default)]
+    invited: Vec<InviteOut>,
+}
+
+/// The app's own link for a call link: `castcorder://` in place of the
+/// scheme, which opens the app's call window on that room's lobby.
+fn app_link(link: &str) -> String {
+    match link.split_once("://") {
+        Some((_, rest)) => format!("castcorder://{rest}"),
+        None => link.to_string(),
+    }
+}
+
+/// "Ann and 2 others are in the call", or nothing.
+fn in_call_line(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => format!("{one} is in the call"),
+        [one, rest @ ..] => format!(
+            "{one} and {} other{} are in the call",
+            rest.len(),
+            if rest.len() == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 /// Where the home is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Place {
@@ -177,11 +229,13 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let contacts = RwSignal::new(Vec::<super::person::ContactItem>::new());
     let who = RwSignal::new(Who::default());
     let place = RwSignal::new(Place::Rooms);
+    let invites = RwSignal::new(Invites::default());
     // Which rooms show their people and their past calls: kept across the
     // re-render a changed room gets.
     let open = Opened {
         people: RwSignal::new(Default::default()),
         past: RwSignal::new(Default::default()),
+        invite: RwSignal::new(Default::default()),
     };
     let refresh = move || {
         spawn_local(async move {
@@ -195,6 +249,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     Err(e) => message.set(format!("rooms not readable: {e}")),
                 },
                 Err(e) => message.set(e),
+            }
+            if let Ok(t) = home_request("GET", "/contacts", None).await
+                && let Ok(v) = serde_json::from_str::<Invites>(&t)
+                && invites.get_untracked() != v
+            {
+                invites.set(v);
             }
             if let Ok(t) = home_request("GET", "/person", None).await
                 && let Ok(w) = serde_json::from_str::<Who>(&t)
@@ -274,6 +334,25 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     </div>
                 </nav>
                 <div class="home-main">
+                    <ul id="invites" class="list" hidden=move || invites.get().invites.is_empty()>
+                        <For each=move || invites.get().invites key=|i| i.id let:i>
+                            {
+                                let id = i.id;
+                                view! {
+                                    <li class="room-card invite" data-room=i.room.clone()>
+                                        <div class="room-head">
+                                            <div class="room-title"><h2>{format!("{} invites you to {}", i.from, i.room)}</h2></div>
+                                            <span class="small muted room-line">{in_call_line(&i.in_call)}</span>
+                                            <span class="room-actions">
+                                                <button class="btn dismiss-invite" on:click=move |_| act("/contacts/invite/dismiss", serde_json::json!({ "id": id }), "Dismissed.")>"Dismiss"</button>
+                                                <a class="btn primary join-invite" href=app_link(&i.link)>"Join"</a>
+                                            </span>
+                                        </div>
+                                    </li>
+                                }
+                            }
+                        </For>
+                    </ul>
                     <section id="home-rooms" class="home-place" hidden=move || place.get() != Place::Rooms>
                         <div class="home-head">
                             <h1>"Rooms"</h1>
@@ -288,7 +367,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                         </div>
                         <ul id="rooms" class="list">
                             <For each=move || data.get().rooms key=|r| format!("{r:?}") let:r>
-                                {room_card(r, data, contacts, open, copied, copy, act)}
+                                {room_card(r, data, contacts, invites, open, copied, copy, act)}
                             </For>
                         </ul>
                         <div class="home-head joined">
@@ -330,6 +409,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
 struct Opened {
     people: RwSignal<std::collections::BTreeSet<String>>,
     past: RwSignal<std::collections::BTreeSet<String>>,
+    invite: RwSignal<std::collections::BTreeSet<String>>,
 }
 
 /// Show or hide `room` in `set`.
@@ -346,10 +426,12 @@ fn flip(set: RwSignal<std::collections::BTreeSet<String>>, room: &str, on: bool)
 }
 
 /// One room on the home.
+#[allow(clippy::too_many_arguments)]
 fn room_card(
     r: HomeRoom,
     data: RwSignal<HomeData>,
     contacts: RwSignal<Vec<super::person::ContactItem>>,
+    invites: RwSignal<Invites>,
     open: Opened,
     copied: RwSignal<String>,
     copy: impl Fn(String, String) + Copy + Send + Sync + 'static,
@@ -381,6 +463,8 @@ fn room_card(
     calls.reverse();
     let count = calls.len();
     let (p1, p2, p3, p4) = (name.clone(), name.clone(), name.clone(), name.clone());
+    let (i1, i2, i3) = (name.clone(), name.clone(), name.clone());
+    let inviting = move || open.invite.with(|s| s.contains(&i1));
     let people = move || open.people.with(|s| s.contains(&p1));
     let menu = NodeRef::<leptos::html::Details>::new();
     let close_menu = move || {
@@ -406,6 +490,7 @@ fn room_card(
                         <summary class="btn icon" title="More for this room" aria-label="More for this room">"..."</summary>
                         <div class="room-menu-items">
                             <button class="menu-item new-call" on:click=move |_| { close_menu(); act("/rooms/call", serde_json::json!({ "room": n2.clone(), "call": null }), "New call started: the next to join lands in it."); }>"Start a fresh call"</button>
+                            <button class="menu-item invite-toggle" on:click=move |_| { close_menu(); flip(open.invite, &i2, !open.invite.with_untracked(|s| s.contains(&i2))); }>"Invite to a call now..."</button>
                             <button class="menu-item room-people-toggle" on:click=move |_| { close_menu(); flip(open.people, &p2, !open.people.with_untracked(|s| s.contains(&p2))); }>"People and settings..."</button>
                             <button class="menu-item open-room-folder" on:click=move |_| { close_menu(); act("/folder/open", serde_json::json!({ "room": n3.clone() }), "Folder opened."); }>"Open recordings folder"</button>
                             <button class="menu-item regen-room-link" title="The old link stops working; people in the call stay"
@@ -419,6 +504,37 @@ fn room_card(
                 Some(c) => format!("Joining continues the call of {c}"),
                 None => "Joining starts a new call".to_string(),
             }}</span>
+            <div class="room-people room-invite" hidden=move || !inviting()>
+                <span class="small muted">"Invite contacts to this room's call. Someone offline gets it when back online."</span>
+                <ul class="list invite-list">
+                    <For each=move || invites.get().contacts key=|c| c.id.clone() let:c>
+                        {
+                            let (person, room) = (c.id.clone(), i3.clone());
+                            let (pa, ra) = (person.clone(), room.clone());
+                            let state = move || {
+                                let v = invites.get();
+                                let online = v.contacts.iter().find(|x| x.id == person).is_some_and(|x| !x.online.is_empty());
+                                match v.invited.iter().find(|o| o.person == person && o.room == room) {
+                                    Some(o) if o.delivered => "Invited".to_string(),
+                                    Some(_) => "Gets it when back online".to_string(),
+                                    None if online => "Online".to_string(),
+                                    None => "Offline".to_string(),
+                                }
+                            };
+                            view! {
+                                <li class="call-row invite-contact" data-person=c.id.clone()>
+                                    <span class="contact-name">{c.label()}</span>
+                                    <span class="small muted invite-state">{state}</span>
+                                    <span class="call-actions">
+                                        <button class="btn tiny send-invite" on:click=move |_| act("/contacts/invite", serde_json::json!({ "person": pa.clone(), "room": ra.clone() }), "Invite sent.")>"Invite"</button>
+                                    </span>
+                                </li>
+                            }
+                        }
+                    </For>
+                </ul>
+                <Show when=move || invites.get().contacts.is_empty()><span class="small muted">"No contacts yet: add one under Contacts."</span></Show>
+            </div>
             <div class="room-people" hidden=move || !people()>
                 <div class="linkbar">
                     <span class="small muted">"Call link"</span>

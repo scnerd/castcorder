@@ -375,6 +375,10 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .room-people { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .room-people[hidden] { display: none; }
 .past-calls > summary { cursor: pointer; color: var(--muted); }
+#invites { gap: 8px; }
+#invites[hidden] { display: none; }
+.room-card.invite { border-color: var(--accent); }
+.invite-list { gap: 4px; }
 .past-calls[open] > summary { margin-bottom: 6px; }
 
 @media (max-width: 760px) {
