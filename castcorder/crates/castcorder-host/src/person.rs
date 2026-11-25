@@ -474,6 +474,11 @@ impl Persons {
         let Some(key) = unb64(&proof.key).and_then(|k| <[u8; 32]>::try_from(k).ok()) else {
             return LinkAnswer::Refused("malformed key".into());
         };
+        // A revoked device stays revoked: linking it again would make it
+        // the owner's here while contacts keep refusing it.
+        if g.own_revoked(&device) {
+            return LinkAnswer::Refused("this device was removed from the person".into());
+        }
         g.expire(now_ms);
         g.answer(ask, key, &device, now_ms)
     }
@@ -1070,6 +1075,12 @@ mod tests {
         // It survives a restart.
         let a2 = Persons::load_or_create(&dir_a, &host_a, NOW).unwrap();
         assert!(!a2.owns(Some(&g.cert), Some(&laptop.id().0)));
+        // It cannot be linked again.
+        let again = a2.new_code(NOW).unwrap();
+        assert!(matches!(
+            a2.answer(&ask(&again, &laptop, DeviceKind::Browser, NOW), NOW),
+            LinkAnswer::Refused(w) if w.contains("removed")
+        ));
         // An app linked later learns it with its grant.
         let code = a2.new_code(NOW).unwrap();
         a2.answer(&ask(&code, &host_c, DeviceKind::App, NOW), NOW);
