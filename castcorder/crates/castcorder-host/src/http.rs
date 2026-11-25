@@ -28,12 +28,15 @@
 //! - `POST /contact` (any listener) takes a sealed contact request the same
 //!   way (castcorder-host `contact`).
 //! - Contacts, for the host machine's own page only (the same guard):
-//!   `GET /contacts` answers [`crate::contact::View`]; `POST /contacts/code`
+//!   `GET /contacts` answers [`crate::contact::View`] (`?look=1`: the home
+//!   is open, so presence pings every contact install, at most every few
+//!   minutes); `POST /contacts/code`
 //!   answers `{"links":[...],"code":FRAGMENT}`, a new one-time contact code;
 //!   `POST /contacts/decide` `{"device":ID,"accept":B}`; `POST /contacts/add`
 //!   `{"code":CODE}` asks the code's person in the background;
 //!   `POST /contacts/nickname` `{"person":ID,"nickname":N}`;
-//!   `POST /contacts/remove` `{"person":ID}`. Each answers the view, or 409
+//!   `POST /contacts/remove` `{"person":ID}`; `POST /contacts/presence`
+//!   `{"appear_offline":B}`. Each answers the view, or 409
 //!   with why. `POST /rooms/trust` `{"room":R,"person":ID,"trust":B}` trusts
 //!   a contact's whole person in a room (or stops), answering `{}` or 409.
 //! - The person, for the host machine's own page only (the same guard as
@@ -151,6 +154,8 @@ struct ContactRequest {
     person: Option<String>,
     #[serde(default)]
     nickname: Option<String>,
+    #[serde(default)]
+    appear_offline: bool,
 }
 
 /// `POST /rooms/trust`.
@@ -198,6 +203,7 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
             app.contacts
                 .set_nickname(&p, r.nickname.as_deref().unwrap_or_default())
         })),
+        "/contacts/presence" => done(app.contacts.set_appear_offline(r.appear_offline)),
         _ => done(person().and_then(|p| app.contacts.remove(&p))),
     }
 }
@@ -736,16 +742,21 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
-            | "/contacts/remove" | "/rooms/trust",
+            | "/contacts/remove" | "/contacts/presence" | "/rooms/trust",
         ) if !native_allowed(req, producer) => text(
             403,
             "contacts are only available to the host machine's own page",
         ),
-        ("GET", "/contacts") => json(200, contacts_json(app)),
+        ("GET", "/contacts") => {
+            if query_param(&req.query, "look").as_deref() == Some("1") {
+                app.contacts.look(crate::wall_ms());
+            }
+            json(200, contacts_json(app))
+        }
         (
             "POST",
             "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
-            | "/contacts/remove",
+            | "/contacts/remove" | "/contacts/presence",
         ) => {
             let r = match serde_json::from_slice::<ContactRequest>(&req.body) {
                 Ok(r) => r,

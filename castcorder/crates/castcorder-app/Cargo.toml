@@ -64,5 +64,8 @@ castcorder-transfer.workspace = true
 castcorder-port-clock.workspace = true
 castcorder-port-net.workspace = true
 castcorder-transport.workspace = true
+# The presence test reaches contacts through the real Rust rendezvous.
+castcorder-rendezvous = { path = "../castcorder-rendezvous" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 serde_json.workspace = true
 str0m.workspace = true

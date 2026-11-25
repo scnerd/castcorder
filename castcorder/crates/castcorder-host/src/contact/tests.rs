@@ -14,6 +14,8 @@ struct Install {
     host: HostKey,
     persons: Persons,
     contacts: Contacts,
+    /// How far behind pings to this install are signed (`ping_as`).
+    skew: std::cell::Cell<u64>,
 }
 
 fn install(name: &str, n: u8) -> Install {
@@ -31,6 +33,7 @@ fn install(name: &str, n: u8) -> Install {
         host,
         persons,
         contacts,
+        skew: std::cell::Cell::new(0),
     }
 }
 
@@ -71,6 +74,7 @@ fn ask(code: &ContactCode, me: &HostKey, cert: Option<DeviceCert>, now: u64) -> 
             code: code.secret_text(),
             name: "Bob".into(),
         }),
+        presence: None,
     }
 }
 
@@ -306,4 +310,118 @@ fn an_unreadable_contacts_file_is_kept_aside() {
     let c = Contacts::load(&a.dir, &a.host, a.persons.clone(), 42).unwrap();
     assert!(c.is_empty());
     assert!(a.dir.join("contacts.json.bad-42").is_file());
+}
+
+/// `from` pings `to` through the real seal and `to`'s real answering code
+/// (as the rendezvous thread does): the answer, or `Err` for none.
+fn ping_as(
+    to: &Install,
+    key: &HostKey,
+    cert: DeviceCert,
+    now: u64,
+) -> Result<castcorder_link::wire::PresenceAnswer, String> {
+    let me = crate::presence::Me {
+        key: HostKey::from_secret(key.secret()),
+        cert,
+        name: "Bob".into(),
+        device: "Laptop".into(),
+    };
+    // A proof signed `skew` ms before the answering clock's now.
+    let signed = now - to.skew.get();
+    crate::presence::ping(&me, &to.host.id(), signed, &mut |sealed: &[u8]| {
+        let (plain, reply) = to.host.open_offer(sealed).map_err(|e| e.to_string())?;
+        let o: OfferPlain = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+        let a = to.contacts.answer_presence(&o, now).ok_or("no answer")?;
+        Ok(reply.seal(to_json(&AnswerPlain::Presence(a)).as_bytes()))
+    })
+}
+
+fn paired(n: u8) -> (Install, Install) {
+    let (a, b) = (install("Ann", n), install("Bob", n + 1));
+    let code = a.contacts.new_code(crate::wall_ms()).unwrap();
+    pair(&a, &b, &code, || {
+        let v = a.contacts.view(crate::wall_ms());
+        a.contacts.decide(&v.requests[0].device, true).unwrap();
+    })
+    .unwrap();
+    (a, b)
+}
+
+#[test]
+fn a_contact_is_answered_and_both_sides_learn_who_is_online() {
+    let (a, b) = paired(30);
+    let now = crate::wall_ms();
+    a.persons.set_names(None, Some("Desk")).unwrap();
+    let got = ping_as(&a, &b.host, b.persons.cert(), now).unwrap();
+    assert_eq!((got.name.as_str(), got.device.as_str()), ("Ann", "Desk"));
+    // The ping tells Ann that Bob's install is online, by its device name.
+    let v = a.contacts.view(now);
+    assert_eq!(v.contacts[0].presence.online, vec!["Laptop"]);
+    assert_eq!(v.contacts[0].presence.last_seen_ms, Some(now));
+    // What the answer tells Bob, as the pinging thread records it.
+    let ann = a.persons.id();
+    let dev = device_id(&a.host.id().0);
+    b.contacts.presence_result(&dev, &ann, Ok(got), now);
+    assert_eq!(
+        b.contacts.view(now).contacts[0].presence.online,
+        vec!["Desk"]
+    );
+    b.contacts
+        .presence_result(&dev, &ann, Err("host_offline".into()), now + 1);
+    let v = b.contacts.view(now + 1);
+    assert!(v.contacts[0].presence.online.is_empty());
+    assert_eq!(v.contacts[0].presence.last_seen_ms, Some(now));
+}
+
+#[test]
+fn strangers_removed_contacts_and_anyone_while_appearing_offline_hear_nothing() {
+    let (a, b) = paired(32);
+    let c = install("Cy", 34);
+    let now = crate::wall_ms();
+    // A stranger, with a valid certificate of its own person.
+    assert!(ping_as(&a, &c.host, c.persons.cert(), now).is_err());
+    // A contact's key with no certificate, or with another key's one.
+    assert!(ping_as(&a, &b.host, c.persons.cert(), now).is_err());
+    // A stale proof (a replay long after).
+    a.skew.set(11 * 60 * 1000);
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_err());
+    a.skew.set(0);
+    assert!(a.contacts.view(now).contacts[0].presence.online.is_empty());
+    // Appearing offline: no answer, and no pings out.
+    a.contacts.set_appear_offline(true).unwrap();
+    assert!(a.contacts.view(now).appear_offline);
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_err());
+    a.contacts.presence_registered();
+    assert!(a.contacts.presence_due(now).is_empty());
+    a.contacts.set_appear_offline(false).unwrap();
+    assert_eq!(a.contacts.presence_due(now).len(), 1, "Bob's install");
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_ok());
+    // The setting survives a restart.
+    a.contacts.set_appear_offline(true).unwrap();
+    let back = Contacts::load(&a.dir, &a.host, a.persons.clone(), NOW).unwrap();
+    assert!(back.view(now).appear_offline);
+    a.contacts.set_appear_offline(false).unwrap();
+    // Ann removes Bob: he is no longer answered (the one-sided removal shows).
+    a.contacts.remove(&b.persons.id()).unwrap();
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_err());
+}
+
+#[test]
+fn another_install_of_a_contacts_person_is_answered_and_kept() {
+    let (a, b) = paired(36);
+    let now = crate::wall_ms();
+    // A second app install of Bob's person, certified by his person key.
+    let other = HostKey::from_secret([38; 32]);
+    let cert = person_key(&b).certify(&other.id().0, DeviceKind::App, now);
+    assert!(ping_as(&a, &other, cert.clone(), now).is_ok());
+    let kept = a.contacts.get(&b.persons.id()).unwrap();
+    assert_eq!(kept.devices.len(), 2);
+    assert!(kept.devices.contains(&cert));
+    // A browser profile of his is not an app install: not answered.
+    let browser = HostKey::from_secret([39; 32]);
+    let bcert = person_key(&b).certify(&browser.id().0, DeviceKind::Browser, now);
+    assert!(ping_as(&a, &browser, bcert, now).is_err());
+    // Pings go to both of his installs now.
+    a.contacts.presence_registered();
+    assert_eq!(a.contacts.presence_due(now).len(), 2);
 }

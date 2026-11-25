@@ -269,6 +269,12 @@ pub(super) struct ContactItem {
     pub(super) name: String,
     #[serde(default)]
     pub(super) nickname: String,
+    /// The device names of their installs online now (presence).
+    #[serde(default)]
+    pub(super) online: Vec<String>,
+    /// When one of their installs was last heard from.
+    #[serde(default)]
+    pub(super) last_seen_ms: Option<u64>,
 }
 
 impl ContactItem {
@@ -279,6 +285,25 @@ impl ContactItem {
             (false, false) => format!("{} ({})", self.nickname, self.name),
             (true, false) => self.name.clone(),
             (true, true) => "Someone without a name".into(),
+        }
+    }
+
+    /// Their presence in words, at `now_ms`: online on which devices, when
+    /// last seen, or nothing when not known.
+    pub(super) fn presence(&self, now_ms: f64) -> String {
+        if !self.online.is_empty() {
+            return format!("Online on {}", self.online.join(", "));
+        }
+        match self.last_seen_ms {
+            Some(at) => {
+                let mins = ((now_ms - at as f64) / 60_000.0).max(0.0) as u64;
+                match mins {
+                    0 => "Offline, seen just now".into(),
+                    1..=59 => format!("Offline, seen {mins} min ago"),
+                    m => format!("Offline, seen {} h ago", m / 60),
+                }
+            }
+            None => "Offline".into(),
         }
     }
 }
@@ -297,6 +322,12 @@ struct ContactsView {
     contacts: Vec<ContactItem>,
     requests: Vec<ContactAskItem>,
     adding: Option<Joining>,
+    /// Presence pings run (the app has a rendezvous).
+    #[serde(default)]
+    presence: bool,
+    /// This app appears offline to its contacts.
+    #[serde(default)]
+    appear_offline: bool,
 }
 
 /// The contacts on the host machine's home (docs/design.md "Contacts"):
@@ -311,7 +342,16 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
     let code = RwSignal::new(String::new());
     let refresh = move || {
         spawn_local(async move {
-            match person_request("/contacts", None).await {
+            // While the home is visible, the host also pings contacts (at
+            // most every few minutes) so presence is fresh.
+            let visible =
+                string(&window().document().expect("document"), "visibilityState") == "visible";
+            let path = if visible {
+                "/contacts?look=1"
+            } else {
+                "/contacts"
+            };
+            match person_request(path, None).await {
                 Ok(t) => match serde_json::from_str::<ContactsView>(&t) {
                     Ok(v) => {
                         if data.get_untracked() != v {
@@ -422,13 +462,26 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                 </For>
             </ul>
             <ul id="contact-list" class="list">
-                <For each=move || data.get().contacts key=|c| format!("{c:?}") let:c>
+                <For each=move || data.get().contacts key=|c| format!("{}|{}|{}", c.id, c.name, c.nickname) let:c>
                     {
                         let nick = RwSignal::new(c.nickname.clone());
                         let (p1, p2) = (c.id.clone(), c.id.clone());
+                        let p3 = c.id.clone();
+                        let presence = move || {
+                            let v = data.get();
+                            if !v.presence {
+                                return String::new();
+                            }
+                            v.contacts
+                                .iter()
+                                .find(|x| x.id == p3)
+                                .map(|x| x.presence(js_sys::Date::now()))
+                                .unwrap_or_default()
+                        };
                         view! {
                             <li class="call-row contact" data-person=c.id.clone()>
                                 <span class="contact-name">{c.label()}</span>
+                                <span class="small muted contact-presence">{presence}</span>
                                 <span class="call-actions">
                                     <input class="contact-nickname" placeholder="Nickname (only you see it)" prop:value=move || nick.get()
                                         on:input=move |ev| nick.set(event_target_value(&ev)) />
@@ -443,6 +496,13 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                 </For>
             </ul>
             <Show when=move || data.get().contacts.is_empty()><span class="small muted">"No contacts yet."</span></Show>
+            <Show when=move || data.get().presence>
+                <label class="small muted">
+                    <input id="appear-offline" type="checkbox" prop:checked=move || data.get().appear_offline
+                        on:change=move |ev| post("/contacts/presence", serde_json::json!({ "appear_offline": event_target_checked(&ev) }), "Saved.") />
+                    " Appear offline to your contacts"
+                </label>
+            </Show>
         </section>
     }
 }
@@ -605,6 +665,7 @@ async fn link_this(code: LinkCode, name: String) -> Result<LinkGrant, String> {
                 kind: DeviceKind::Browser,
             }),
             contact: None,
+            presence: None,
         };
         match ask(&code, &plain).await? {
             AnswerPlain::Link(LinkAnswer::Pending) => {}

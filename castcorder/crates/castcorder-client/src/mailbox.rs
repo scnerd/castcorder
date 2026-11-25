@@ -156,11 +156,15 @@ impl Mailbox {
             cert: crate::identity::cert(),
             link: None,
             contact: None,
+            presence: None,
         };
         match self.ask(link, &plain).await? {
             AnswerPlain::Sdp(sdp) => Ok(sdp),
             AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
-            AnswerPlain::Status(_) | AnswerPlain::Link(_) | AnswerPlain::Contact(_) => {
+            AnswerPlain::Status(_)
+            | AnswerPlain::Link(_)
+            | AnswerPlain::Contact(_)
+            | AnswerPlain::Presence(_) => {
                 Err(JsValue::from_str("the host answered something else"))
             }
         }
@@ -190,14 +194,16 @@ impl Mailbox {
             cert: crate::identity::cert(),
             link: None,
             contact: None,
+            presence: None,
         };
         match self.ask(link, &plain).await? {
             AnswerPlain::Status(st) => Ok(st),
             AnswerPlain::Rejected(why) => Err(JsValue::from_str(&format!("{REJECTED}: {why}"))),
             // An older host takes it for an offer.
-            AnswerPlain::Sdp(_) | AnswerPlain::Link(_) | AnswerPlain::Contact(_) => {
-                Err(JsValue::from_str("no_status: the host is too old"))
-            }
+            AnswerPlain::Sdp(_)
+            | AnswerPlain::Link(_)
+            | AnswerPlain::Contact(_)
+            | AnswerPlain::Presence(_) => Err(JsValue::from_str("no_status: the host is too old")),
         }
     }
 

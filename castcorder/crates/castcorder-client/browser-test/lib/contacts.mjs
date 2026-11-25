@@ -10,6 +10,8 @@ import { check, text, waitFor } from './helpers.mjs';
 //   naming the rendezvous; a second host install (another person) asks with
 //   it through the mailbox; the request shows on the home by name and
 //   fingerprint, is accepted there, and each install lists the other;
+// - presence: each install sees the other online through the mailbox, and
+//   the home shows Bob online by device name; appear offline toggles there;
 // - a nickname given on the home shows in the list;
 // - the home trusts the contact in a room with the room card's picker, and
 //   stops trusting them;
@@ -76,6 +78,25 @@ export async function contactsChecks({ HTTP, rendezvous }) {
     'contacts: Bob lists Ann');
   await waitFor(async () => (await text(page, '#contact-list')).includes('Bob Guest'), 'contacts: the home lists Bob', 10000);
   check((await call(HTTP, '/contacts')).contacts.some((c) => c.id === bob.id), 'contacts: Ann lists Bob');
+
+  // Presence (cast-40e.3): sealed pings through the mailbox, sent once they
+  // pair, show each online to the other; the home says so on Bob's row.
+  const seen = await waitFor(async () => {
+    const t = await text(page, '#contact-list li .contact-presence');
+    return t.startsWith('Online on ') ? t : null;
+  }, 'contacts: the home shows Bob online', 30000, 250);
+  check(seen === 'Online on ' + bob.device_name, 'contacts: Bob online by his device name: ' + seen);
+  await waitFor(async () => {
+    const c = (await call(HTTP2, '/contacts')).contacts.find((x) => x.id === ann.id);
+    return c && c.online.length === 1;
+  }, 'contacts: Bob sees Ann online', 30000, 250);
+  check(true, 'contacts: Bob sees Ann online through the mailbox');
+  // Appear offline, on the home, is kept (and taken back).
+  await page.click('#appear-offline');
+  await waitFor(async () => (await call(HTTP, '/contacts')).appear_offline, 'contacts: Ann appears offline', 10000);
+  await page.click('#appear-offline');
+  await waitFor(async () => !(await call(HTTP, '/contacts')).appear_offline, 'contacts: Ann appears online again', 10000);
+  check(true, 'contacts: appear offline toggles on the home');
 
   // A nickname, given on the home.
   await page.fill('#contact-list li .contact-nickname', 'Bobby');

@@ -19,6 +19,7 @@ mod local;
 mod native;
 mod participant;
 pub mod person;
+pub mod presence;
 mod recorders;
 mod rendezvous;
 mod room;
@@ -57,6 +58,8 @@ pub struct Config {
     /// What "now" is for routing joiners to calls (`None`: the system
     /// clock). Tests drive it through the clock port.
     pub clock: Option<RoutingClock>,
+    /// When presence pings go out and how long they hold (tests shorten it).
+    pub presence: presence::Timing,
     /// The address every listener and the UDP socket bind to.
     pub bind: IpAddr,
     /// The HTTPS (LAN guests) port; 0 lets the OS pick.
@@ -105,6 +108,7 @@ impl Config {
             room: String::new(),
             idle_gap: rooms::DEFAULT_IDLE_GAP,
             clock: None,
+            presence: presence::Timing::default(),
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             https_port: 27800,
             http_port: 27801,
@@ -359,6 +363,19 @@ impl Running {
     /// This install's contacts as the home shows them.
     pub fn contacts(&self) -> contact::View {
         self.contacts.view(wall_ms())
+    }
+
+    /// The contacts as the open home shows them: also pings every contact
+    /// install, at most every [`presence::Timing::look`].
+    pub fn contacts_looked(&self) -> contact::View {
+        self.contacts.look(wall_ms());
+        self.contacts.view(wall_ms())
+    }
+
+    /// Appear offline to contacts (or stop): no presence pings out, none
+    /// answered.
+    pub fn set_appear_offline(&self, on: bool) -> Result<(), String> {
+        self.contacts.set_appear_offline(on)
     }
 
     /// The contact with person id `id`, as kept on disk.
@@ -697,7 +714,8 @@ pub fn start(
     let persons = person::Persons::load_or_create(&args.library, &host_key, wall_ms())
         .map_err(|e| format!("person: {e}"))?;
     let contacts = contact::Contacts::load(&args.library, &host_key, persons.clone(), wall_ms())
-        .map_err(|e| format!("contacts: {e}"))?;
+        .map_err(|e| format!("contacts: {e}"))?
+        .with_timing(args.presence);
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
@@ -872,6 +890,13 @@ pub fn start(
     tracing::info!(room = %room_name, links = ?links, udp = %udp, "host ready");
     if let Some(cfg) = rendezvous {
         tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
+        // Presence pings to contacts go through the same rendezvous.
+        contacts.presence_started();
+        threads.push(presence::spawn(
+            contacts.clone(),
+            cfg.base.clone(),
+            stop.clone(),
+        ));
         let registered = call_links.registered.clone();
         threads.push(rendezvous::spawn(
             cfg,
