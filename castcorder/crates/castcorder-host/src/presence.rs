@@ -191,6 +191,21 @@ impl Board {
         out
     }
 
+    /// Whether the install `device` is shown online at `now_ms`.
+    pub fn is_online(&self, device: &str, now_ms: u64, t: &Timing) -> bool {
+        self.devices
+            .get(device)
+            .is_some_and(|s| s.online(now_ms, t))
+    }
+
+    /// The install `device`'s name, as it last said (empty: not known).
+    pub fn name(&self, device: &str) -> String {
+        self.devices
+            .get(device)
+            .map(|s| s.name.clone())
+            .unwrap_or_default()
+    }
+
     /// `person`'s presence at `now_ms`.
     pub fn view(&self, person: &str, now_ms: u64, t: &Timing) -> PresenceView {
         let mine = || self.devices.values().filter(|s| s.person == person);

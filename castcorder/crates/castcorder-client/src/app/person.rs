@@ -316,6 +316,62 @@ struct ContactAskItem {
     name: String,
 }
 
+/// One room a contact shares (`GET /contacts/rooms`, castcorder-protocol
+/// `SharedRoom`).
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SharedRoomItem {
+    room: String,
+    #[serde(default)]
+    live: bool,
+    #[serde(default)]
+    in_call: Vec<String>,
+}
+
+/// One install's answer (`GET /contacts/rooms`).
+#[derive(Clone, Debug, Default, Deserialize)]
+struct InstallRoomsItem {
+    #[serde(default)]
+    rooms: Vec<SharedRoomItem>,
+}
+
+/// `GET /contacts/rooms`: the rooms a contact shares, over contact links.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct SharedView {
+    #[serde(default)]
+    installs: Vec<InstallRoomsItem>,
+    #[serde(default)]
+    failed: Vec<String>,
+}
+
+impl SharedView {
+    /// One line for the contact's row.
+    fn line(&self) -> String {
+        let rooms: Vec<String> = self
+            .installs
+            .iter()
+            .flat_map(|i| i.rooms.iter())
+            .map(|r| {
+                if r.live && !r.in_call.is_empty() {
+                    format!("{} (live: {})", r.room, r.in_call.join(", "))
+                } else if r.live {
+                    format!("{} (live)", r.room)
+                } else {
+                    r.room.clone()
+                }
+            })
+            .collect();
+        if !rooms.is_empty() {
+            format!("Rooms you share: {}", rooms.join(", "))
+        } else if self.installs.is_empty() && self.failed.is_empty() {
+            "Not online: shared rooms unknown".into()
+        } else if self.installs.is_empty() {
+            format!("Shared rooms not reachable ({})", self.failed.join("; "))
+        } else {
+            "No rooms you share".into()
+        }
+    }
+}
+
 /// `GET /contacts`.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct ContactsView {
@@ -479,7 +535,25 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                     {
                         let nick = RwSignal::new(c.nickname.clone());
                         let (p1, p2) = (c.id.clone(), c.id.clone());
-                        let p3 = c.id.clone();
+                        let (p3, p4) = (c.id.clone(), c.id.clone());
+                        let shared = RwSignal::new(String::new());
+                        let look_shared = move |_| {
+                            let person = p4.clone();
+                            shared.set("Asking...".into());
+                            spawn_local(async move {
+                                let path = format!(
+                                    "/contacts/rooms?person={}",
+                                    String::from(js_sys::encode_uri_component(&person))
+                                );
+                                let line = match person_request(&path, None).await {
+                                    Ok(t) => serde_json::from_str::<SharedView>(&t)
+                                        .map(|v| v.line())
+                                        .unwrap_or_else(|e| format!("bad answer: {e}")),
+                                    Err(e) => e,
+                                };
+                                shared.set(line);
+                            });
+                        };
                         let presence = move || {
                             let v = data.get();
                             if !v.presence {
@@ -495,11 +569,14 @@ pub(super) fn ContactsCard(list: RwSignal<Vec<ContactItem>>) -> impl IntoView {
                             <li class="call-row contact" data-person=c.id.clone()>
                                 <span class="contact-name">{c.label()}</span>
                                 <span class="small muted contact-presence">{presence}</span>
+                                <span class="small muted contact-shared">{move || shared.get()}</span>
                                 <span class="call-actions">
                                     <input class="contact-nickname" placeholder="Nickname (only you see it)" prop:value=move || nick.get()
                                         on:input=move |ev| nick.set(event_target_value(&ev)) />
                                     <button class="btn tiny save-nickname"
                                         on:click=move |_| post("/contacts/nickname", serde_json::json!({ "person": p1.clone(), "nickname": nick.get_untracked() }), "Saved.")>"Save"</button>
+                                    <button class="btn tiny outline shared-rooms"
+                                        on:click=look_shared>"Shared rooms"</button>
                                     <button class="btn tiny outline remove-contact"
                                         on:click=move |_| post("/contacts/remove", serde_json::json!({ "person": p2.clone() }), "Removed.")>"Remove"</button>
                                 </span>
