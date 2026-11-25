@@ -173,7 +173,7 @@ fn secret_of(saved: &Saved) -> Option<[u8; 32]> {
     unb64(&saved.key).and_then(|b| b.try_into().ok())
 }
 
-fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
@@ -241,6 +241,16 @@ impl Persons {
     /// This install's certificate (for its host key).
     pub fn cert(&self) -> DeviceCert {
         self.lock().saved.cert.clone()
+    }
+
+    /// The person public key.
+    pub fn public(&self) -> [u8; 32] {
+        self.lock().person.public()
+    }
+
+    /// The person's display name (empty: not set).
+    pub fn name(&self) -> String {
+        self.lock().saved.name.clone()
     }
 
     /// Whether `cert` makes the device whose key is `device` (the key that
@@ -411,18 +421,7 @@ impl Persons {
     /// when the code names none.
     pub fn join(&self, code: &str, rendezvous: Option<String>) -> Result<(), String> {
         let parsed = LinkCode::parse(code).map_err(|e| e.to_string())?;
-        let base = code
-            .trim()
-            .split_once('#')
-            .map(|(b, _)| b.to_string())
-            .filter(|b| !b.is_empty());
-        let route = match base {
-            Some(b) if b.contains("/v/") => {
-                Route::Rendezvous(b.split("/v/").next().unwrap_or_default().to_string())
-            }
-            Some(b) => Route::Lan(b),
-            None => Route::Rendezvous(rendezvous.ok_or("this link code names no rendezvous")?),
-        };
+        let route = Route::of(code, rendezvous)?;
         let (host, name) = {
             let mut g = self.lock();
             if g.joining == Some(Joining::Waiting) {
@@ -441,7 +440,7 @@ impl Persons {
         std::thread::Builder::new()
             .name("person-link".into())
             .spawn(move || {
-                let mut exchange = |sealed: &[u8]| route.exchange(&parsed, sealed);
+                let mut exchange = |sealed: &[u8]| route.exchange(&parsed.host, "/link", sealed);
                 let r = request_link(
                     &parsed,
                     &host,
@@ -536,6 +535,12 @@ impl Inner {
     }
 }
 
+/// The person key `cert` vouches for, if it verifies for the device key
+/// `device` (the key that signed the offer); any person, not only this one.
+pub fn cert_person(cert: Option<&DeviceCert>, device: Option<&[u8; 32]>) -> Option<[u8; 32]> {
+    verify_cert(cert?, device?).ok()
+}
+
 /// Carries one sealed request to a device and returns its sealed answer.
 pub type Exchange<'a> = dyn FnMut(&[u8]) -> Result<Vec<u8>, String> + 'a;
 
@@ -576,6 +581,8 @@ pub fn request_link(
                 name: name.to_string(),
                 kind,
             }),
+            contact: None,
+            presence: None,
         };
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
         let (sealed, guest) = GuestSeal::seal(&code.host, eph, to_json(&plain).as_bytes())
@@ -595,7 +602,10 @@ pub fn request_link(
             AnswerPlain::Link(LinkAnswer::Refused(why)) | AnswerPlain::Rejected(why) => {
                 return Err(why);
             }
-            AnswerPlain::Sdp(_) | AnswerPlain::Status(_) => {
+            AnswerPlain::Sdp(_)
+            | AnswerPlain::Status(_)
+            | AnswerPlain::Contact(_)
+            | AnswerPlain::Presence(_) => {
                 return Err("the other device is too old to link devices".into());
             }
         }
@@ -606,8 +616,8 @@ pub fn request_link(
     }
 }
 
-/// How a link request reaches the device that made the code.
-enum Route {
+/// How a link (or contact) request reaches the device that made the code.
+pub(crate) enum Route {
     /// Through this rendezvous's mailbox.
     Rendezvous(String),
     /// Straight to its LAN listener (`https://ip:port`).
@@ -615,20 +625,45 @@ enum Route {
 }
 
 impl Route {
-    fn exchange(&self, code: &LinkCode, sealed: &[u8]) -> Result<Vec<u8>, String> {
+    /// The route a code's text names: a rendezvous link (`.../v/...#code`),
+    /// a LAN link (`https://ip:port/#code`), or a bare fragment, which goes
+    /// through `rendezvous` (this host's own).
+    pub(crate) fn of(code: &str, rendezvous: Option<String>) -> Result<Self, String> {
+        let base = code
+            .trim()
+            .split_once('#')
+            .map(|(b, _)| b.to_string())
+            .filter(|b| !b.is_empty());
+        Ok(match base {
+            Some(b) if b.contains("/v/") => {
+                Route::Rendezvous(b.split("/v/").next().unwrap_or_default().to_string())
+            }
+            Some(b) => Route::Lan(b),
+            None => Route::Rendezvous(rendezvous.ok_or("this code names no rendezvous")?),
+        })
+    }
+
+    /// Carry one sealed request to `host`: through the mailbox, or to the
+    /// LAN listener's `lan_path`.
+    pub(crate) fn exchange(
+        &self,
+        host: &castcorder_link::HostId,
+        lan_path: &str,
+        sealed: &[u8],
+    ) -> Result<Vec<u8>, String> {
         match self {
-            Route::Rendezvous(base) => crate::rendezvous::exchange(base, &code.host, sealed),
-            Route::Lan(base) => lan_exchange(base, sealed),
+            Route::Rendezvous(base) => crate::rendezvous::exchange(base, host, sealed),
+            Route::Lan(base) => lan_exchange(base, lan_path, sealed),
         }
     }
 }
 
-/// `POST /link` on a host's LAN listener: the sealed request as base64url
-/// text in, the sealed answer out.
-fn lan_exchange(base: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
-    let (status, body) = lan_post(base, "/link", "text/plain", &b64(sealed))?;
+/// `POST <path>` (`/link`, `/contact`) on a host's LAN listener: the sealed
+/// request as base64url text in, the sealed answer out.
+fn lan_exchange(base: &str, path: &str, sealed: &[u8]) -> Result<Vec<u8>, String> {
+    let (status, body) = lan_post(base, path, "text/plain", &b64(sealed))?;
     if status != 200 {
-        return Err(format!("link request refused ({status}): {body}"));
+        return Err(format!("request refused ({status}): {body}"));
     }
     unb64(body.trim()).ok_or_else(|| "the answer is not base64url".into())
 }
@@ -713,6 +748,8 @@ mod tests {
                 name: "Laptop".into(),
                 kind,
             }),
+            contact: None,
+            presence: None,
         }
     }
 

@@ -198,8 +198,8 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 #remote .tile::after { content: ""; position: absolute; inset: 0; z-index: 3; border-radius: inherit;
   box-shadow: inset 0 0 0 3px var(--ok); opacity: 0; transition: opacity 0.15s; pointer-events: none; }
 #remote .tile.speaking::after { opacity: 1; }
-/* Muted in the call (meters.rs): a slashed mic and the waveform dimmed but still moving with
-   their raw microphone, which keeps recording. Not red: red is REC. */
+/* Muted in the call (meters.rs): a slashed mic and a flat, dimmed waveform (nobody hears
+   them; the track chip says they still record). Not red: red is REC. */
 .tile-mic { display: none; }
 .tile.mic-muted .tile-mic { display: block; }
 .tile.mic-muted .tile-wave { opacity: 0.45; }
@@ -309,6 +309,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   /* Above the full-screen side panel (open by default for producers). */
   .dock { position: relative; z-index: 11; }
   .side { position: fixed; inset: 0; width: auto; z-index: 10; }
+  /* The Devices dialog fits the viewport, not its dock button (cast-lg7). */
+  .dialog { position: fixed; left: 12px; right: 12px; bottom: 84px; transform: none; width: auto;
+    max-width: none; box-sizing: border-box; }
 }
 
 /* Call link (lobby and top bar) */

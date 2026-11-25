@@ -149,6 +149,18 @@ pub enum Command {
         /// The call's id, or why not.
         reply: mpsc::Sender<Result<String, String>>,
     },
+    /// Trust (or stop trusting) a whole person in a room (the host
+    /// machine's home; ADR 0005).
+    TrustPerson {
+        /// The room.
+        room: String,
+        /// The person id.
+        person: String,
+        /// Trust, or stop trusting.
+        trust: bool,
+        /// Done, or why not.
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     /// The open call (room, call id, folder), if a call is open.
     Current {
         /// Where it goes.
@@ -615,6 +627,21 @@ impl Call {
         }
     }
 
+    /// Someone was refused at the locked call: tell every producer in it, so
+    /// the guest's wait is not silent on this side.
+    fn tell_producers_locked(&mut self, name: &str) {
+        let event = Event::JoinRefusedLocked {
+            name: name.to_string(),
+        };
+        for p in self.room.producers() {
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(p))
+                && rpc.emit(event.clone()).is_err()
+            {
+                warn!(guest = p, "locked-join notice not sent: channel closed");
+            }
+        }
+    }
+
     /// A device cannot meet the recording profile: warn, and tell every
     /// producer. The take goes on.
     fn profile_unmet(&mut self, id: GuestId, issue: ProfileIssue) -> Response {
@@ -740,6 +767,11 @@ impl Call {
             Ok(Effect::Changed) => Response::Done,
             Ok(Effect::Remove(conns)) => {
                 self.remove.extend(conns.into_iter().map(GuestId));
+                // The kicked device's sync-only connections of this room go
+                // too: its pull ends and the partial file is kept as a
+                // resumable partial, never counted as landed.
+                let banned = self.banned_syncers();
+                self.remove.extend(banned);
                 Response::Done
             }
             Ok(Effect::Roles(conns)) => {
@@ -1182,11 +1214,28 @@ impl Call {
         info!(room = %self.room_name, call = ?self.call_id, take = take.0, host_us, video, "take started");
         self.calls_dirty = true;
         self.touch_due_us = 0;
-        let dir = match self.library.as_mut().map(|l| l.take_dir(take).cloned()) {
-            Some(Ok(d)) => Ok(d),
-            Some(Err(e)) => Err(e),
-            None => Err(std::io::Error::other("no call is open")),
-        };
+        // Tell the guests first: they start recording when this arrives, and
+        // creating the take directory (mkdir, manifest, directory fsync) took
+        // 80-137 ms on a loaded machine. The host's own capture and safety
+        // tracks start once the directory is ready, as they always did; the
+        // stamped host_us is unchanged. If the directory cannot be made the
+        // take still runs for guests (their tracks arrive later) and the host
+        // says so below.
+        let dir = announce_then_prepare(
+            self,
+            |c| {
+                c.broadcast();
+                info!(
+                    take = take.0,
+                    after_start_us = c.timeline.now_us() - host_us,
+                    "take start broadcast"
+                );
+            },
+            |c| match c.library.as_mut().map(|l| l.take_dir(take).cloned()) {
+                Some(r) => r,
+                None => Err(std::io::Error::other("no call is open")),
+            },
+        );
         match dir {
             Ok(dir) => {
                 self.safety.start_take(take.0, dir.clone());
@@ -1201,12 +1250,6 @@ impl Call {
                 warn!(take = take.0, error = %e, "no take directory; safety tracks and host microphone not recorded")
             }
         }
-        self.broadcast();
-        info!(
-            take = take.0,
-            after_start_us = self.timeline.now_us() - host_us,
-            "take start broadcast"
-        );
         // Everyone is Starting until their device acks: said at once, so
         // producers see it however soon the acks come.
         self.recorders.take_started(take);
@@ -1559,7 +1602,17 @@ impl Call {
                     .rooms
                     .persons
                     .owns(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
-                let seat = crate::room::Seat { at_host, owner };
+                // The person it vouches for (any person): a room may trust
+                // a whole person.
+                let person = crate::person::cert_person(
+                    cert.as_ref(),
+                    routing::proof_key(proof.as_ref()).as_ref(),
+                );
+                let seat = crate::room::Seat {
+                    at_host,
+                    owner,
+                    person,
+                };
                 if sync_only {
                     // Beside any live call, in any room: not a participant.
                     let r = self.offer_sync(
@@ -1593,10 +1646,14 @@ impl Call {
                 let device = verified.clone().unwrap_or(device);
                 // The old id the signature covers (migration from pre-key ids).
                 let alias = proof.as_ref().and_then(|p| p.alias.as_deref());
-                let r = match verified.and_then(|d| {
+                let admitted = verified.and_then(|d| {
                     self.room
                         .admit_offer_as(&d, alias, seat, password.as_deref())
-                }) {
+                });
+                if matches!(admitted, Err(crate::room::Refusal::Locked)) {
+                    self.tell_producers_locked(&name);
+                }
+                let r = match admitted {
                     Err(refusal) => Err(refusal.message().to_string()),
                     Ok(Admission::Wait) => Err(crate::room::WAITING.to_string()),
                     // The first one in opens the room's current call (or
@@ -1687,6 +1744,14 @@ impl Call {
             Command::ChooseCall { room, call, reply } => {
                 let _ = reply.send(self.choose_call(&room, call));
             }
+            Command::TrustPerson {
+                room,
+                person,
+                trust,
+                reply,
+            } => {
+                let _ = reply.send(self.trust_person(&room, &person, trust));
+            }
             Command::Current { reply } => {
                 let current = match (&self.call_id, &self.call_dir) {
                     (Some(c), Some(d)) => Some((self.room_name.clone(), c.clone(), d.clone())),
@@ -1773,5 +1838,68 @@ impl Call {
                 }
             }
         }
+    }
+}
+
+/// Announce a take to the guests, then do the disk work it needs. The order
+/// is the point: guests record from the announcement, so the disk must not
+/// delay it (cast-6ma).
+fn announce_then_prepare<C, D>(
+    cx: &mut C,
+    announce: impl FnOnce(&mut C),
+    prepare: impl FnOnce(&mut C) -> std::io::Result<D>,
+) -> std::io::Result<D> {
+    announce(cx);
+    prepare(cx)
+}
+
+#[cfg(test)]
+mod start_order_tests {
+    use super::announce_then_prepare;
+    use std::time::{Duration, Instant};
+
+    struct Trace {
+        began: Instant,
+        announced_at: Option<Duration>,
+        prepared_after_announce: bool,
+    }
+
+    /// A slow disk (the 137 ms seen on a loaded runner, rounded up) must not
+    /// hold back the announcement.
+    #[test]
+    fn slow_take_dir_does_not_delay_the_announcement() {
+        let mut t = Trace {
+            began: Instant::now(),
+            announced_at: None,
+            prepared_after_announce: false,
+        };
+        let r = announce_then_prepare(
+            &mut t,
+            |t| t.announced_at = Some(t.began.elapsed()),
+            |t| {
+                t.prepared_after_announce = t.announced_at.is_some();
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(())
+            },
+        );
+        assert!(r.is_ok());
+        assert!(
+            t.prepared_after_announce,
+            "disk work ran before the announcement"
+        );
+        assert!(t.announced_at.unwrap() < Duration::from_millis(50));
+        assert!(t.began.elapsed() >= Duration::from_millis(150));
+    }
+
+    /// A failed directory is reported to the caller, after the announcement.
+    #[test]
+    fn failed_take_dir_is_returned_after_announcing() {
+        let mut announced = false;
+        let r: std::io::Result<()> = announce_then_prepare(
+            &mut announced,
+            |a| *a = true,
+            |_| Err(std::io::Error::other("disk full")),
+        );
+        assert!(announced && r.is_err());
     }
 }

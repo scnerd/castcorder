@@ -20,6 +20,8 @@ export async function takeChecks(A, B) {
   await chipsBeforeTake(A, B);
   await A.click('#take-start');
   await waitFor(async () => (await text(A, '#take-result')).includes('"take":1'), 'take 1 started', 10000);
+  const takeLine = await A.locator('#take-status').locator('..').innerText();
+  check(!takeLine.includes('{'), 'the Take line shows no debug JSON: ' + takeLine);
   const take1StartUs = JSON.parse(await text(A, '#take-result')).hostUs;
   check(typeof take1StartUs === 'number', 'host reports take 1 start on its timeline (' + take1StartUs + ' us)');
   await waitFor(async () => buttons(A).then((b) => !b.start && b.stop), 'producer offers Stop take only', 10000);

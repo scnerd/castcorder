@@ -25,6 +25,20 @@
 //! - `POST /link` (any listener) takes a sealed link request (castcorder-link
 //!   `person`; base64url text) and answers the sealed answer as text, or 400
 //!   if it does not open with this host's key (castcorder-host `person`).
+//! - `POST /contact` (any listener) takes a sealed contact request the same
+//!   way (castcorder-host `contact`).
+//! - Contacts, for the host machine's own page only (the same guard):
+//!   `GET /contacts` answers [`crate::contact::View`] (`?look=1`: the home
+//!   is open, so presence pings every contact install, at most every few
+//!   minutes); `POST /contacts/code`
+//!   answers `{"links":[...],"code":FRAGMENT}`, a new one-time contact code;
+//!   `POST /contacts/decide` `{"device":ID,"accept":B}`; `POST /contacts/add`
+//!   `{"code":CODE}` asks the code's person in the background;
+//!   `POST /contacts/nickname` `{"person":ID,"nickname":N}`;
+//!   `POST /contacts/remove` `{"person":ID}`; `POST /contacts/presence`
+//!   `{"appear_offline":B}`. Each answers the view, or 409
+//!   with why. `POST /rooms/trust` `{"room":R,"person":ID,"trust":B}` trusts
+//!   a contact's whole person in a room (or stops), answering `{}` or 409.
 //! - The person, for the host machine's own page only (the same guard as
 //!   `/native`): `GET /person` answers [`crate::person::View`] (never the
 //!   key); `POST /person` `{"name":N?,"device_name":D?}` renames;
@@ -87,6 +101,8 @@ pub struct App {
     pub lan_links: Vec<String>,
     /// This install's person (`/person...`, `/link`).
     pub persons: crate::person::Persons,
+    /// This install's contacts (`/contacts...`, `/contact`).
+    pub contacts: crate::contact::Contacts,
 }
 
 /// `GET /person`: the person as the home shows it (never the key).
@@ -94,12 +110,12 @@ fn person_json(app: &App) -> String {
     serde_json::to_string(&app.persons.view(crate::wall_ms())).unwrap_or_default()
 }
 
-/// A link code's links: through the rendezvous once registered, and to each
-/// LAN listener.
+/// A link or contact code's links (its `fragment`): through the rendezvous
+/// once registered, and to each LAN listener.
 pub fn code_links(
     app_links: &crate::rendezvous::Links,
     lan: &[String],
-    code: &castcorder_link::LinkCode,
+    fragment: &str,
 ) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(b) = app_links.base.as_ref()
@@ -107,13 +123,89 @@ pub fn code_links(
             .registered
             .load(std::sync::atomic::Ordering::SeqCst)
     {
-        out.push(code.url(&b.base, &b.version));
+        out.push(format!(
+            "{}/v/{}/#{fragment}",
+            b.base.trim_end_matches('/'),
+            b.version
+        ));
     }
     out.extend(
         lan.iter()
-            .map(|l| format!("{}/#{}", l.trim_end_matches('/'), code.fragment())),
+            .map(|l| format!("{}/#{fragment}", l.trim_end_matches('/'))),
     );
     out
+}
+
+/// `GET /contacts`: the contacts as the home shows them.
+fn contacts_json(app: &App) -> String {
+    serde_json::to_string(&app.contacts.view(crate::wall_ms())).unwrap_or_default()
+}
+
+/// The body of the home's contact requests (`/contacts...`).
+#[derive(serde::Deserialize, Default)]
+struct ContactRequest {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    device: Option<String>,
+    #[serde(default)]
+    accept: bool,
+    #[serde(default)]
+    person: Option<String>,
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    appear_offline: bool,
+}
+
+/// `POST /rooms/trust`.
+#[derive(serde::Deserialize)]
+struct TrustRequest {
+    room: String,
+    person: String,
+    trust: bool,
+}
+
+fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
+    let done = |res: Result<(), String>| match res {
+        Ok(()) => json(200, contacts_json(app)),
+        Err(e) => text(409, e),
+    };
+    let person = || r.person.clone().ok_or_else(|| "no person".to_string());
+    match path {
+        "/contacts/code" => match app.contacts.new_code(crate::wall_ms()) {
+            Ok(code) => json(
+                200,
+                serde_json::json!({
+                    "links": code_links(&app.call_links, &app.lan_links, &code.fragment()),
+                    "code": code.fragment(),
+                })
+                .to_string(),
+            ),
+            Err(e) => text(409, e.to_string()),
+        },
+        "/contacts/decide" => done(
+            r.device
+                .clone()
+                .ok_or_else(|| "no device".to_string())
+                .and_then(|d| app.contacts.decide(&d, r.accept)),
+        ),
+        "/contacts/add" => done(
+            r.code
+                .clone()
+                .ok_or_else(|| "no contact code".to_string())
+                .and_then(|c| {
+                    app.contacts
+                        .add(&c, app.call_links.base.as_ref().map(|b| b.base.clone()))
+                }),
+        ),
+        "/contacts/nickname" => done(person().and_then(|p| {
+            app.contacts
+                .set_nickname(&p, r.nickname.as_deref().unwrap_or_default())
+        })),
+        "/contacts/presence" => done(app.contacts.set_appear_offline(r.appear_offline)),
+        _ => done(person().and_then(|p| app.contacts.remove(&p))),
+    }
 }
 
 fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
@@ -132,7 +224,7 @@ fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
             Ok(code) => json(
                 200,
                 serde_json::json!({
-                    "links": code_links(&app.call_links, &app.lan_links, &code),
+                    "links": code_links(&app.call_links, &app.lan_links, &code.fragment()),
                     "code": code.fragment(),
                 })
                 .to_string(),
@@ -148,8 +240,8 @@ fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
             r.code
                 .ok_or_else(|| "no link code".to_string())
                 .and_then(|c| {
-                    app.persons
-                        .join(&c, app.call_links.base.as_ref().map(|b| b.base.clone()))
+                    app.contacts
+                        .join_person(&c, app.call_links.base.as_ref().map(|b| b.base.clone()))
                 }),
         ),
     }
@@ -451,6 +543,8 @@ fn refusal_status(message: &str) -> u16 {
     match code {
         "waiting" => 503,
         "kicked" | "locked" | "wrong_password" | "bad_device" | "not_current" => 403,
+        // A room this host does not have: the guest's page stops asking.
+        "unknown_room" => 404,
         _ => 400,
     }
 }
@@ -629,6 +723,67 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 None => text(400, "not a sealed link request for this host"),
             }
         }
+        // A sealed contact request, on any listener (castcorder-host `contact`).
+        ("POST", "/contact") => {
+            match app
+                .contacts
+                .answer_sealed(&String::from_utf8_lossy(&req.body), crate::wall_ms())
+            {
+                Some(sealed) => Response {
+                    status: 200,
+                    content_type: "text/plain",
+                    body: sealed.into_bytes(),
+                },
+                None => text(400, "not a sealed contact request for this host"),
+            }
+        }
+        // Contacts and room trust for a person: the host machine's own page.
+        ("GET", "/contacts")
+        | (
+            "POST",
+            "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
+            | "/contacts/remove" | "/contacts/presence" | "/rooms/trust",
+        ) if !native_allowed(req, producer) => text(
+            403,
+            "contacts are only available to the host machine's own page",
+        ),
+        ("GET", "/contacts") => {
+            if query_param(&req.query, "look").as_deref() == Some("1") {
+                app.contacts.look(crate::wall_ms());
+            }
+            json(200, contacts_json(app))
+        }
+        (
+            "POST",
+            "/contacts/code" | "/contacts/decide" | "/contacts/add" | "/contacts/nickname"
+            | "/contacts/remove" | "/contacts/presence",
+        ) => {
+            let r = match serde_json::from_slice::<ContactRequest>(&req.body) {
+                Ok(r) => r,
+                Err(e) => return text(400, format!("bad json: {e}")),
+            };
+            contact_post(app, &req.path, r)
+        }
+        ("POST", "/rooms/trust") => {
+            let r = match serde_json::from_slice::<TrustRequest>(&req.body) {
+                Ok(r) => r,
+                Err(e) => return text(400, format!("bad json: {e}")),
+            };
+            // Only a contact can be picked; taking trust back works for anyone.
+            if r.trust && app.contacts.get(&r.person).is_none() {
+                return text(409, "only a contact can be trusted in a room");
+            }
+            match ask(app, |reply| Command::TrustPerson {
+                room: r.room,
+                person: r.person,
+                trust: r.trust,
+                reply,
+            }) {
+                Some(Ok(())) => json(200, "{}".into()),
+                Some(Err(e)) => text(409, e),
+                None => gone(),
+            }
+        }
         ("GET", "/native" | "/rooms" | "/person")
         | (
             "POST",
@@ -763,7 +918,7 @@ fn serve_file(dir: &Path, path: &str) -> Response {
     let name = path.trim_start_matches('/');
     let name = if name.is_empty() { "index.html" } else { name };
     if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains(':') {
-        return text(404, "not found");
+        return missing_page();
     }
     let content_type = match name.rsplit_once('.').map(|(_, e)| e) {
         Some("html") => "text/html; charset=utf-8",
@@ -784,8 +939,26 @@ fn serve_file(dir: &Path, path: &str) -> Response {
             if name == "index.html" {
                 warn!(dist = %dir.display(), error = %e, "client build missing");
             }
-            text(404, "not found")
+            missing_page()
         }
+    }
+}
+
+/// What a browser sees at an address this host does not serve: plain words,
+/// not a bare "not found".
+fn missing_page() -> Response {
+    let body = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>Page not found - Castcorder</title></head><body>\
+<main id=\"page-missing\" style=\"font-family:sans-serif;max-width:32em;margin:3em auto;padding:0 1em\">\
+<h1>This page doesn't exist</h1>\
+<p>The address may have a typo, or the link may be old. Open the call link the host sent you, \
+or ask them for a new one.</p>\
+<p><a href=\"/\">Go to the start page</a></p></main></body></html>";
+    Response {
+        status: 404,
+        content_type: "text/html; charset=utf-8",
+        body: body.as_bytes().to_vec(),
     }
 }
 
@@ -802,6 +975,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let key = castcorder_link::HostKey::from_secret([4; 32]);
         crate::person::Persons::load_or_create(&dir, &key, 1).unwrap()
+    }
+
+    /// Contacts of a person of their own, in a fresh folder.
+    fn test_contacts() -> crate::contact::Contacts {
+        let persons = test_persons();
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "castcorder-http-contacts-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = castcorder_link::HostKey::from_secret([4; 32]);
+        crate::contact::Contacts::load(&dir, &key, persons, 1).unwrap()
     }
 
     /// Two rooms' links through a rendezvous, registered.
@@ -893,6 +1080,7 @@ mod tests {
             call_links: test_links(),
             lan_links: Vec::new(),
             persons: test_persons(),
+            contacts: test_contacts(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -948,6 +1136,7 @@ mod tests {
             call_links: test_links(),
             lan_links: vec!["https://192.168.1.5:27800/".into()],
             persons: test_persons(),
+            contacts: test_contacts(),
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -987,6 +1176,7 @@ mod tests {
             call_links: test_links(),
             lan_links: Vec::new(),
             persons: test_persons(),
+            contacts: test_contacts(),
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

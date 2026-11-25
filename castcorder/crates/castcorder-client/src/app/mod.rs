@@ -374,6 +374,13 @@ struct Ui {
     errors: RwSignal<Vec<String>>,
     /// Problems that do not stop the call (e.g. no local recording).
     warning: RwSignal<String>,
+    /// Plain-words notes in the call (camera blocked, someone refused at a
+    /// locked call), each dismissable.
+    notes: RwSignal<Vec<String>>,
+    /// Why the last Join did not get in, in plain words, shown beside Join
+    /// (empty: nothing to say). `join_retry`: offer a Try again button.
+    join_note: RwSignal<String>,
+    join_retry: RwSignal<bool>,
     /// The call password to present at Join.
     password: RwSignal<String>,
     /// This connection's role, from the host.

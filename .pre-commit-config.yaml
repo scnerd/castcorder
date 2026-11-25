@@ -49,6 +49,14 @@ repos:
         files: '^castcorder/worker/.*\.rs$'
         pass_filenames: false
 
+      # The Worker's own lockfile goes stale when the crates it path-depends on change deps.
+      - id: worker-lock
+        name: castcorder/worker/Cargo.lock up to date (fix with task worker:lock)
+        language: system
+        entry: uv run scripts/check_worker_lock.py
+        files: '^castcorder/(Cargo\.lock|crates/castcorder-(link|mailbox)/Cargo\.toml|worker/(Cargo\.toml|Cargo\.lock))$'
+        pass_filenames: false
+
       # deploy/tofu (OpenTofu). Checks only; `tofu -chdir=deploy/tofu fmt` fixes.
       - id: tofu-fmt
         name: tofu fmt (deploy/tofu)

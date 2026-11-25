@@ -215,6 +215,67 @@ pub struct OfferPlain {
     /// [`AnswerPlain::Link`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<LinkAsk>,
+    /// A contact request, not an offer ([`crate::person::ContactCode`]):
+    /// `secret` is ignored, `sdp` is a fresh random nonce the proof signs,
+    /// `cert` must be the asking app install's certificate, and the host
+    /// answers [`AnswerPlain::Contact`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<ContactAsk>,
+    /// A presence ping, not an offer (ADR 0005): `secret` is ignored, `name`
+    /// is the asking person's name, `sdp` is a fresh random nonce the proof
+    /// signs, and `cert` must be the asking app install's certificate. Only
+    /// a contact's install is answered, with [`AnswerPlain::Presence`];
+    /// anyone else gets no answer at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<PresencePing>,
+}
+
+/// A presence ping from one of a contact's app installs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresencePing {
+    /// The asking install's device name.
+    pub device: String,
+}
+
+/// The answer to a presence ping: the answering install is online.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PresenceAnswer {
+    /// The answering person's name.
+    pub name: String,
+    /// The answering install's device name.
+    pub device: String,
+}
+
+/// A person asks to become a contact of the person whose app install made a
+/// contact code. The asking install's certificate is the offer's `cert`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactAsk {
+    /// The contact code's secret ([`crate::person::ContactCode::secret_text`]).
+    pub code: String,
+    /// The asking person's display name, shown to the person deciding.
+    pub name: String,
+}
+
+/// The answer to a contact request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactAnswer {
+    /// Nobody has decided yet: ask again.
+    Pending,
+    /// Accepted: the two persons are now contacts.
+    Accepted(ContactGrant),
+    /// Declined, expired, unknown, or claimed by another device.
+    Refused(String),
+}
+
+/// What the asking person learns once accepted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContactGrant {
+    /// The certificate of the app install that made the code (for the host
+    /// key the code names, which is the key the answer was sealed with).
+    pub cert: crate::person::DeviceCert,
+    /// The accepting person's display name.
+    pub name: String,
 }
 
 /// A new device asks to be linked to the person of the device that made a
@@ -269,6 +330,10 @@ pub enum AnswerPlain {
     Status(HostStatus),
     /// The answer to a link request ([`OfferPlain::link`]).
     Link(LinkAnswer),
+    /// The answer to a contact request ([`OfferPlain::contact`]).
+    Contact(ContactAnswer),
+    /// The answer to a presence ping ([`OfferPlain::presence`]).
+    Presence(PresenceAnswer),
 }
 
 /// What a host tells a device about the rooms it was in (a status query).
@@ -276,6 +341,10 @@ pub enum AnswerPlain {
 pub struct HostStatus {
     /// Every room of this host the device was in, by name.
     pub rooms: Vec<RoomStatus>,
+    /// The call link this query came through is no longer any room's current
+    /// link (it was regenerated). Says nothing about which room it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub link_changed: bool,
 }
 
 /// One room as a device that was in it sees it.
@@ -455,6 +524,63 @@ mod tests {
             }))),
             r#"{"link":{"granted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"person_name":"Ann"}}}"#
         );
+        // Contact requests and their answers.
+        assert_eq!(
+            to_json(&ContactAsk {
+                code: "c".into(),
+                name: "Bob".into(),
+            }),
+            r#"{"code":"c","name":"Bob"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Pending)),
+            r#"{"contact":"pending"}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Refused("no".into()))),
+            r#"{"contact":{"refused":"no"}}"#
+        );
+        assert_eq!(
+            to_json(&AnswerPlain::Contact(ContactAnswer::Accepted(
+                ContactGrant {
+                    cert: crate::person::DeviceCert {
+                        person: "P".into(),
+                        device: "D".into(),
+                        kind: crate::person::DeviceKind::App,
+                        issued_ms: 5,
+                        sig: "S".into(),
+                    },
+                    name: "Ann".into(),
+                }
+            ))),
+            r#"{"contact":{"accepted":{"cert":{"person":"P","device":"D","kind":"app","issued_ms":5,"sig":"S"},"name":"Ann"}}}"#
+        );
+        let asked: OfferPlain =
+            from_json(r#"{"secret":"","name":"n","sdp":"x","contact":{"code":"c","name":"Bob"}}"#)
+                .unwrap();
+        assert_eq!(asked.contact.unwrap().name, "Bob");
+        let plain: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
+        assert!(!to_json(&plain).contains("contact"));
+        // Presence pings and their answers.
+        assert!(plain.presence.is_none() && !to_json(&plain).contains("presence"));
+        let ping: OfferPlain =
+            from_json(r#"{"secret":"","name":"Bob","sdp":"x","presence":{"device":"Laptop"}}"#)
+                .unwrap();
+        assert_eq!(
+            ping.presence,
+            Some(PresencePing {
+                device: "Laptop".into()
+            })
+        );
+        let pa = AnswerPlain::Presence(PresenceAnswer {
+            name: "Ann".into(),
+            device: "Desk".into(),
+        });
+        assert_eq!(
+            to_json(&pa),
+            r#"{"presence":{"name":"Ann","device":"Desk"}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&pa)), Some(pa));
         // An offer from an older page (no device, no password) still parses.
         let old: OfferPlain = from_json(r#"{"secret":"s","name":"n","sdp":"v=0"}"#).unwrap();
         assert_eq!((old.device.as_str(), old.password), ("", None));
@@ -480,12 +606,22 @@ mod tests {
                 }],
                 ..Default::default()
             }],
+            ..Default::default()
         });
         assert_eq!(
             to_json(&st),
             r#"{"status":{"rooms":[{"room":"show","live":true,"busy":false,"current":"2026-11-16","in_call":["Pat"],"producer":false,"calls":[{"id":"2026-11-16","started_ms":5,"takes":2}]}]}}"#
         );
         assert_eq!(from_json::<AnswerPlain>(&to_json(&st)), Some(st));
+        let old = AnswerPlain::Status(HostStatus {
+            link_changed: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            to_json(&old),
+            r#"{"status":{"rooms":[],"link_changed":true}}"#
+        );
+        assert_eq!(from_json::<AnswerPlain>(&to_json(&old)), Some(old));
         let gone: RoomStatus = from_json(r#"{"room":"x","removed":true}"#).unwrap();
         assert!(gone.removed && gone.calls.is_empty());
     }

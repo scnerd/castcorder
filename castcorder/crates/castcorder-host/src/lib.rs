@@ -12,17 +12,20 @@
 
 mod args;
 mod call;
+pub mod contact;
 mod http;
 mod local;
 #[cfg(feature = "native-capture")]
 mod native;
 mod participant;
 pub mod person;
+pub mod presence;
 mod recorders;
 mod rendezvous;
 mod room;
 mod rooms;
 mod tls;
+pub use tls::unverified_client;
 mod tracks;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
@@ -56,6 +59,8 @@ pub struct Config {
     /// What "now" is for routing joiners to calls (`None`: the system
     /// clock). Tests drive it through the clock port.
     pub clock: Option<RoutingClock>,
+    /// When presence pings go out and how long they hold (tests shorten it).
+    pub presence: presence::Timing,
     /// The address every listener and the UDP socket bind to.
     pub bind: IpAddr,
     /// The HTTPS (LAN guests) port; 0 lets the OS pick.
@@ -104,6 +109,7 @@ impl Config {
             room: String::new(),
             idle_gap: rooms::DEFAULT_IDLE_GAP,
             clock: None,
+            presence: presence::Timing::default(),
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             https_port: 27800,
             http_port: 27801,
@@ -311,6 +317,7 @@ pub struct Running {
     finisher: Finisher,
     native: Arc<participant::NativeCtl>,
     persons: person::Persons,
+    contacts: contact::Contacts,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -335,7 +342,11 @@ impl Running {
             .persons
             .new_code(wall_ms())
             .map_err(|e| e.to_string())?;
-        Ok(http::code_links(&self.call_links, &self.links, &code))
+        Ok(http::code_links(
+            &self.call_links,
+            &self.links,
+            &code.fragment(),
+        ))
     }
 
     /// Approve or decline a device's link request.
@@ -346,8 +357,87 @@ impl Running {
     /// Link this install to the person of the device that made `code`, in
     /// the background ([`Running::person`]'s `joining` follows it).
     pub fn join_person(&self, code: &str) -> Result<(), String> {
-        self.persons
-            .join(code, self.call_links.base.as_ref().map(|b| b.base.clone()))
+        self.contacts
+            .join_person(code, self.call_links.base.as_ref().map(|b| b.base.clone()))
+    }
+
+    /// This install's contacts as the home shows them.
+    pub fn contacts(&self) -> contact::View {
+        self.contacts.view(wall_ms())
+    }
+
+    /// The contacts as the open home shows them: also pings every contact
+    /// install, at most every [`presence::Timing::look`].
+    pub fn contacts_looked(&self) -> contact::View {
+        self.contacts.look(wall_ms());
+        self.contacts.view(wall_ms())
+    }
+
+    /// Appear offline to contacts (or stop): no presence pings out, none
+    /// answered.
+    pub fn set_appear_offline(&self, on: bool) -> Result<(), String> {
+        self.contacts.set_appear_offline(on)
+    }
+
+    /// The contact with person id `id`, as kept on disk.
+    pub fn contact(&self, id: &str) -> Option<contact::Contact> {
+        self.contacts.get(id)
+    }
+
+    /// Make a one-time contact code: its links (through the rendezvous once
+    /// registered, then each LAN link).
+    pub fn contact_code(&self) -> Result<Vec<String>, String> {
+        let code = self
+            .contacts
+            .new_code(wall_ms())
+            .map_err(|e| e.to_string())?;
+        Ok(http::code_links(
+            &self.call_links,
+            &self.links,
+            &code.fragment(),
+        ))
+    }
+
+    /// Accept or decline the contact request of an app install.
+    pub fn decide_contact(&self, device: &str, accept: bool) -> Result<(), String> {
+        self.contacts.decide(device, accept)
+    }
+
+    /// Ask the person whose app made `code` to become a contact, in the
+    /// background ([Running::contacts]' `adding` follows it).
+    pub fn add_contact(&self, code: &str) -> Result<(), String> {
+        self.contacts
+            .add(code, self.call_links.base.as_ref().map(|b| b.base.clone()))
+    }
+
+    /// Give a contact a local nickname.
+    pub fn set_contact_nickname(&self, id: &str, nickname: &str) -> Result<(), String> {
+        self.contacts.set_nickname(id, nickname)
+    }
+
+    /// Remove a contact (here only).
+    pub fn remove_contact(&self, id: &str) -> Result<(), String> {
+        self.contacts.remove(id)
+    }
+
+    /// Trust (or stop trusting) a whole person in `room`: only a contact
+    /// can be trusted.
+    pub fn trust_person(&self, room: &str, person: &str, trust: bool) -> Result<(), String> {
+        if trust && self.contacts.get(person).is_none() {
+            return Err("only a contact can be trusted in a room".into());
+        }
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::TrustPerson {
+                room: room.to_string(),
+                person: person.to_string(),
+                trust,
+                reply,
+            })
+            .map_err(|_| "the host is not running".to_string())?;
+        rx.recv()
+            .map_err(|_| "the host is not running".to_string())?
     }
 
     /// This install's certificate (for its host key): what its offers carry
@@ -624,6 +714,9 @@ pub fn start(
     let host_device = format!("host-{}", host_key.id());
     let persons = person::Persons::load_or_create(&args.library, &host_key, wall_ms())
         .map_err(|e| format!("person: {e}"))?;
+    let contacts = contact::Contacts::load(&args.library, &host_key, persons.clone(), wall_ms())
+        .map_err(|e| format!("contacts: {e}"))?
+        .with_timing(args.presence);
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
@@ -713,6 +806,7 @@ pub fn start(
         secret: secrets.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         persons: persons.clone(),
+        contacts: contacts.clone(),
     });
     let call_links = rendezvous::Links {
         secrets: secrets.clone(),
@@ -783,6 +877,7 @@ pub fn start(
         call_links: call_links.clone(),
         lan_links: links.clone(),
         persons: persons.clone(),
+        contacts: contacts.clone(),
     });
     threads.push(http::serve(
         https,
@@ -796,6 +891,13 @@ pub fn start(
     tracing::info!(room = %room_name, links = ?links, udp = %udp, "host ready");
     if let Some(cfg) = rendezvous {
         tracing::info!(rendezvous = %cfg.base, host = %cfg.key.id().short(), "connecting to the rendezvous");
+        // Presence pings to contacts go through the same rendezvous.
+        contacts.presence_started();
+        threads.push(presence::spawn(
+            contacts.clone(),
+            cfg.base.clone(),
+            stop.clone(),
+        ));
         let registered = call_links.registered.clone();
         threads.push(rendezvous::spawn(
             cfg,
@@ -824,6 +926,7 @@ pub fn start(
         finisher,
         native,
         persons,
+        contacts,
         stop,
         threads,
     })

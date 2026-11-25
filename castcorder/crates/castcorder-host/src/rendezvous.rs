@@ -236,6 +236,8 @@ pub struct Config {
     pub version: String,
     /// This install's person (link requests are answered here).
     pub persons: crate::person::Persons,
+    /// This install's contacts (contact requests are answered here).
+    pub contacts: crate::contact::Contacts,
 }
 
 impl Config {
@@ -387,6 +389,18 @@ pub fn exchange(
     to: &castcorder_link::HostId,
     sealed: &[u8],
 ) -> Result<Vec<u8>, String> {
+    exchange_within(base, to, sealed, Duration::from_secs(20))
+}
+
+/// [`exchange`], waiting at most `wait` for the answer (a presence ping,
+/// castcorder-host `presence`). An install that is not registered fails at
+/// once with the rendezvous's `host_offline`.
+pub fn exchange_within(
+    base: &str,
+    to: &castcorder_link::HostId,
+    sealed: &[u8],
+    wait: Duration,
+) -> Result<Vec<u8>, String> {
     let t = target(base)?;
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
     let url = castcorder_link::wire::mailbox_url(&t.ws_url, to);
@@ -401,7 +415,7 @@ pub fn exchange(
             sealed: b64(sealed),
         },
     )?;
-    let until = Instant::now() + Duration::from_secs(20);
+    let until = Instant::now() + wait;
     loop {
         match read_msg_until(&mut ws, Some(until), None)? {
             Some(ServerMsg::Answer { sealed }) => {
@@ -527,7 +541,8 @@ fn session(
     match turn_server(&ice_servers) {
         Some((server, expires)) => {
             let renewed = turn_held.is_some();
-            info!(server = %server.addr, expires = ?expires, renewed, "relay (TURN) server from the rendezvous");
+            let alternates: Vec<String> = server.alternates.iter().map(|a| a.to_string()).collect();
+            info!(server = %server.addr, alternates = ?alternates, expires = ?expires, renewed, "relay (TURN) server from the rendezvous");
             *turn_held = Some(Held { expires });
             let _ = tx.send(Command::Turn { server });
         }
@@ -567,6 +582,9 @@ fn session(
     {
         f(&link);
     }
+    // Every registration (start, reconnect) pings every contact install:
+    // they may have missed us while we were away.
+    cfg.contacts.presence_registered();
     loop {
         let Some(msg) = read_msg_until(&mut ws, renew_at, Some(stop))? else {
             info!("renewing relay credentials: reconnecting to the rendezvous");
@@ -595,26 +613,33 @@ fn session(
     }
 }
 
-/// The first UDP `turn:` server with credentials among `servers`, resolved,
-/// and when its credentials expire (if known).
+/// The first server with credentials and a UDP `turn:` URL among `servers`,
+/// resolved, and when its credentials expire (if known). Its other UDP URLs
+/// (Cloudflare's UDP 443 beside 3478) are the alternates the transport moves
+/// on to when an address goes unanswered.
 fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     servers.iter().find_map(|s| {
         let (username, password) = (s.username.clone()?, s.credential.clone()?);
-        s.urls.iter().find_map(|u| {
+        let mut addrs: Vec<SocketAddr> = vec![];
+        for u in &s.urls {
             if is_stream_turn(u) {
                 info!(url = %u, "relay URL skipped: the host's TURN client is UDP only (no turn TCP or turns TLS yet)");
-                return None;
+            } else if let Some(a) = turn_addr(u)
+                && !addrs.contains(&a)
+            {
+                addrs.push(a);
             }
-            let addr = turn_addr(u)?;
-            Some((
-                TurnServer {
-                    addr,
-                    username: username.clone(),
-                    password: password.clone(),
-                },
-                expiry_of(s),
-            ))
-        })
+        }
+        let (&addr, alternates) = addrs.split_first()?;
+        Some((
+            TurnServer {
+                addr,
+                username,
+                password,
+                alternates: alternates.to_vec(),
+            },
+            expiry_of(s),
+        ))
     })
 }
 
@@ -663,7 +688,8 @@ fn resolve_udp(hostport: &str) -> Option<SocketAddr> {
 }
 
 /// Open one guest's offer and produce the sealed answer (or `None` if it
-/// cannot be opened, so no answer can be sealed either).
+/// cannot be opened, so no answer can be sealed either, or if it is a
+/// presence ping that gets no answer).
 fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> Option<String> {
     let Some((plain, reply)) = unb64(sealed).and_then(|s| cfg.key.open_offer(&s).ok()) else {
         warn!(
@@ -680,9 +706,21 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         Ok((_, o)) if o.link.is_some() => {
             AnswerPlain::Link(cfg.persons.answer(&o, crate::wall_ms()))
         }
+        // A presence ping: only a contact's install is answered, and anyone
+        // else hears nothing at all (castcorder-host `presence`).
+        Ok((_, o)) if o.presence.is_some() => {
+            AnswerPlain::Presence(cfg.contacts.answer_presence(&o, crate::wall_ms())?)
+        }
+        // A contact request needs no call secret either: the contact code
+        // is its own.
+        Ok((_, o)) if o.contact.is_some() => {
+            AnswerPlain::Contact(cfg.contacts.answer(&o, crate::wall_ms()))
+        }
         // A status query needs no call secret: the host answers for the
         // rooms the device's key was in, so a regenerated link still works.
-        Ok((_, o)) if o.status => {
+        Ok((current, o)) if o.status => {
+            // Only whether the link it came through still opens a room (cast-lot).
+            let link_changed = current.is_none();
             let (reply_tx, rx) = mpsc::channel();
             let sent = tx.send(Command::HostStatus {
                 device: o.device,
@@ -696,7 +734,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
                 .ok()
                 .and_then(|_| rx.recv_timeout(Duration::from_secs(10)).ok())
             {
-                Some(Ok(st)) => AnswerPlain::Status(st),
+                Some(Ok(mut st)) => {
+                    st.link_changed = link_changed;
+                    AnswerPlain::Status(st)
+                }
                 Some(Err(e)) => AnswerPlain::Rejected(e),
                 None => AnswerPlain::Rejected("host thread not answering".into()),
             }
@@ -750,6 +791,16 @@ mod tests {
             std::env::temp_dir().join(format!("castcorder-rv-person-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::person::Persons::load_or_create(&dir, &HostKey::from_secret([3; 32]), 1).unwrap()
+    }
+
+    fn test_contacts() -> crate::contact::Contacts {
+        let persons = test_persons();
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("castcorder-rv-contacts-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::contact::Contacts::load(&dir, &HostKey::from_secret([3; 32]), persons, 1).unwrap()
     }
 
     #[test]
@@ -826,12 +877,16 @@ mod tests {
                 urls: vec![
                     "turn:127.0.0.1:3478?transport=tcp".into(),
                     "turn:127.0.0.1:3478?transport=udp".into(),
+                    "turns:127.0.0.1:5349?transport=tcp".into(),
+                    "turn:127.0.0.1:443?transport=udp".into(),
+                    "turn:127.0.0.1:3478".into(),
                 ],
                 username: Some("1:h".into()),
                 credential: Some("pw".into()),
                 expires: None,
             },
         ];
+        // Every UDP URL, in order and once: the rest are alternates.
         assert_eq!(
             turn_server(&servers),
             Some((
@@ -839,6 +894,7 @@ mod tests {
                     addr: "127.0.0.1:3478".parse().unwrap(),
                     username: "1:h".into(),
                     password: "pw".into(),
+                    alternates: vec!["127.0.0.1:443".parse().unwrap()],
                 },
                 Some(1)
             ))
@@ -878,6 +934,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let (tx, rx) = mpsc::channel();
         let seal = |secret: &CallSecret, eph: u8| {
@@ -899,6 +956,8 @@ mod tests {
                 call: None,
                 cert: None,
                 link: None,
+                contact: None,
+                presence: None,
             };
             castcorder_link::GuestSeal::seal(&key.id(), [eph; 32], to_json(&plain).as_bytes())
                 .unwrap()
@@ -973,6 +1032,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let code = cfg.persons.new_code(crate::wall_ms()).unwrap();
         let me = HostKey::from_secret([8; 32]);
@@ -1009,6 +1069,60 @@ mod tests {
         assert_eq!(cfg.persons.view(crate::wall_ms()).requests.len(), 1);
     }
 
+    /// A contact request (an empty call secret) is answered by the contacts,
+    /// not the host thread, through the real sealing: pending until someone
+    /// accepts it.
+    #[test]
+    fn a_contact_request_needs_no_call_secret_and_skips_the_host_thread() {
+        let cfg = Config {
+            base: "http://127.0.0.1:1".into(),
+            key: HostKey::from_secret([3; 32]),
+            secret: Arc::new(Mutex::new(Secrets {
+                rooms: [("show".to_string(), CallSecret([7; 16]))].into(),
+                default: "show".into(),
+            })),
+            version: "0.0.0".into(),
+            persons: test_persons(),
+            contacts: test_contacts(),
+        };
+        let code = cfg.contacts.new_code(crate::wall_ms()).unwrap();
+        // Another person's app install.
+        let me = HostKey::from_secret([8; 32]);
+        let dir = std::env::temp_dir().join(format!("castcorder-rv-other-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let other = crate::person::Persons::load_or_create(&dir, &me, 1).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut exchange = |sealed: &[u8]| {
+            answer(&cfg, &tx, 1, &b64(sealed))
+                .and_then(|a| unb64(&a))
+                .ok_or_else(|| "no answer".to_string())
+        };
+        let mut bogus = code.clone();
+        bogus.secret = [0; 16];
+        let r = crate::contact::request_contact(
+            &bogus,
+            &me,
+            &other.cert(),
+            "Bob",
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("unknown")));
+        let r = crate::contact::request_contact(
+            &code,
+            &me,
+            &other.cert(),
+            "Bob",
+            &mut exchange,
+            Instant::now(),
+        );
+        assert!(matches!(r, Err(w) if w.contains("in time")));
+        assert!(rx.try_recv().is_err());
+        let v = cfg.contacts.view(crate::wall_ms());
+        assert_eq!(v.requests.len(), 1);
+        assert_eq!(v.requests[0].name, "Bob");
+    }
+
     /// Regenerating the link: the old secret no longer admits, the new one
     /// does, and the file holds the new one (so it survives a restart).
     #[test]
@@ -1025,6 +1139,7 @@ mod tests {
             })),
             version: "0.0.0".into(),
             persons: test_persons(),
+            contacts: test_contacts(),
         };
         let old_link = cfg.link();
         let new = regenerate_secret(&dir, "show", &cfg.secret).unwrap();
@@ -1051,6 +1166,8 @@ mod tests {
             call: None,
             cert: None,
             link: None,
+            contact: None,
+            presence: None,
         };
         let (sealed, guest) =
             castcorder_link::GuestSeal::seal(&cfg.key.id(), [4; 32], to_json(&plain).as_bytes())
@@ -1083,6 +1200,7 @@ mod tests {
                         room: "show".into(),
                         ..Default::default()
                     }],
+                    ..Default::default()
                 };
                 reply.send(Ok(st)).unwrap();
             }
@@ -1092,7 +1210,10 @@ mod tests {
         host.join().unwrap();
         let r: AnswerPlain =
             serde_json::from_slice(&guest.open_reply(&unb64(&a).unwrap()).unwrap()).unwrap();
-        assert!(matches!(r, AnswerPlain::Status(st) if st.rooms[0].room == "show"));
+        // The old link is named as old (cast-lot), nothing more.
+        assert!(
+            matches!(r, AnswerPlain::Status(st) if st.rooms[0].room == "show" && st.link_changed)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

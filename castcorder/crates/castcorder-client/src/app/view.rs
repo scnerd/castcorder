@@ -273,7 +273,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                         {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
                 </div>
                 <span class="small muted">"Take: " <span id="take-status">{move || take.get()}</span>
-                    " " <code id="take-result">{move || ui.producer_result.get()}</code></span>
+                    " " <code id="take-result" hidden=move || { let t = ui.producer_result.get(); t.starts_with('{') || t == "done" }>{move || ui.producer_result.get()}</code></span>
                 <span class="small muted">"Host library: " <span id="library-disk">{move || ui.disk.get().into_iter().find(|d| d.participant.is_none()).map(|d| format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))).unwrap_or_else(|| "not known".into())}</span></span>
                 <ul id="profile-warnings" class="list">
                     <For each=move || ui.profile_warnings.get() key=|w| w.clone() let:w>
@@ -289,6 +289,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
 #[component]
 fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
     let on_join = move |_| {
+        ui.join_note.set(String::new());
+        ui.join_retry.set(false);
         spawn_local(async move {
             if let Err(e) = join(ui).await {
                 ui.error("join", &e);
@@ -342,7 +344,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                 </div>
                 <div class="lobby-form">
                     <div>
-                        <span class="small muted">"You're joining"</span>
+                        <span class="small muted">"You're joining "</span>
                         <Show when=move || !ui.room_name.get().is_empty()>
                             <span class="small muted lobby-room">"Room " <strong id="lobby-room">{move || ui.room_name.get()}</strong>
                                 <Show when=home::is_local_page> " - " <a href="/" id="back-to-rooms">"All rooms"</a></Show></span>
@@ -371,9 +373,12 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
                         <span>"This call is recorded. Your microphone, and your camera if it is on, record on this computer at full quality and go to the host after each take. Producers can see and switch which microphone and camera you use."</span>
                     </div>
                     <button id="join" class="btn primary big" disabled=move || ui.joined.get() on:click=on_join>"Join call"</button>
-                    <span class="lobby-status">{status}</span>
+                    <div id="join-note" class="lobby-error" role="alert" hidden=move || ui.join_note.get().is_empty()>
+                        <span>{move || ui.join_note.get()}</span>
+                        <button id="join-retry" class="btn" hidden=move || !ui.join_retry.get() on:click=on_join>"Try again"</button></div>
+                    <span class="lobby-status" hidden=move || !ui.join_note.get().is_empty()>{status}</span>
                     <span class="lobby-status" id="sync-state" hidden=move || sync_text().is_empty()>{sync_text}</span>
-                    <span class="lobby-error" hidden=move || ui.errors.get().is_empty()>{last_error}</span>
+                    <span class="lobby-error" hidden=move || ui.errors.get().is_empty() || !ui.join_note.get().is_empty()>{last_error}</span>
                     // Below Join: it can appear after the lobby is drawn.
                     <devices::LobbyAllowNames ui=ui/>
                     <details class="advanced">
@@ -410,6 +415,12 @@ fn Call(ui: Ui) -> impl IntoView {
         ui.panel.set(if now == p { Panel::Closed } else { p });
     };
     let pressed = move |p: Panel| if panel() == p { "true" } else { "false" };
+    // Opening a side panel closes the Devices dialog (cast-3u9).
+    Effect::new(move |_| {
+        if !matches!(ui.panel.get(), Panel::Closed | Panel::Auto) {
+            ui.devices.open.set(false);
+        }
+    });
     // This device's tracks not yet confirmed by the host.
     let unsent = move || {
         let delivered = ui.delivered.get();
@@ -527,6 +538,9 @@ fn Call(ui: Ui) -> impl IntoView {
                 <main class="main">
                     <div id="warning" class="banner" role="alert" hidden=move || ui.warning.get().is_empty()>
                         {move || ui.warning.get()}</div>
+                    <div id="call-notes" class="banner" role="status" hidden=move || ui.notes.get().is_empty()>
+                        <span>{move || ui.notes.get().join(" ")}</span>
+                        <button id="call-notes-dismiss" class="btn" on:click=move |_| ui.notes.set(Vec::new())>"Dismiss"</button></div>
                     <div id="disk-warning" class="banner" role="status" hidden=move || !ui.disk.get().iter().any(|d| d.low)>
                         <Icon name="alert" small=true/>
                         <span><strong>"Low disk space"</strong>
@@ -691,8 +705,9 @@ pub(super) fn App() -> impl IntoView {
     let hash = window().location().hash().unwrap_or_default();
     let link = CallLink::parse_fragment(&hash).ok();
     // A link code (`#link.<host-id>.<secret>`) opens the page that links
-    // this browser to a person, not a call.
-    let link_page = hash.starts_with("#link.");
+    // this browser to a person, not a call; a contact code
+    // (`#contact.<host-id>.<secret>`) says to paste it into the app.
+    let link_page = hash.starts_with("#link.") || hash.starts_with("#contact.");
     let bad_link = hash.len() > 1 && link.is_none() && !link_page;
     // A LAN or host machine page joins the room its `?room=` names.
     let room_param = query_param("room").unwrap_or_default();
@@ -720,6 +735,9 @@ pub(super) fn App() -> impl IntoView {
         inbound_json: RwSignal::new("[]".into()),
         errors: RwSignal::new(Vec::new()),
         warning: RwSignal::new(String::new()),
+        notes: RwSignal::new(Vec::new()),
+        join_note: RwSignal::new(String::new()),
+        join_retry: RwSignal::new(false),
         password: RwSignal::new(String::new()),
         role: RwSignal::new(Role::default()),
         room: RwSignal::new(None),
@@ -772,6 +790,16 @@ pub(super) fn App() -> impl IntoView {
             Err(e) => ui.error("device key", &e),
         }
     });
+    // On the host machine the lobby starts with the name saved on the home.
+    if home::is_local_page() && ui.name.get_untracked().trim().is_empty() {
+        spawn_local(async move {
+            if let Some(n) = person::host_person_name().await
+                && ui.name.get_untracked().trim().is_empty()
+            {
+                ui.name.set(n);
+            }
+        });
+    }
     // Page-wide listeners, installed once (never per join).
     let listen = |target: &web_sys::EventTarget, event: &str, f: Box<dyn FnMut()>| {
         let cb = Closure::<dyn FnMut()>::wrap(f);
@@ -781,8 +809,26 @@ pub(super) fn App() -> impl IntoView {
     if let Some(d) = window().document() {
         listen(&d, "click", Box::new(resume_audio));
         listen(&d, "visibilitychange", Box::new(move || on_wake(ui)));
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::new(move |ev: web_sys::Event| {
+            close_mute_tip_on(ui, &ev);
+        });
+        let _ = d.add_event_listener_with_callback("click", cb.as_ref().unchecked_ref());
+        cb.forget();
     }
     listen(&window(), "online", Box::new(move || on_wake(ui)));
+    // Escape closes the Devices dialog (cast-3u9).
+    if let Some(d) = window().document() {
+        let cb = Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |ev: web_sys::Event| {
+            let key = js_sys::Reflect::get(&ev, &JsValue::from_str("key")).ok();
+            if key.and_then(|k| k.as_string()).as_deref() == Some("Escape")
+                && ui.devices.open.get_untracked()
+            {
+                ui.devices.open.set(false);
+            }
+        }));
+        let _ = d.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
     // The tab title and icon say "recording" too, for a guest in another tab.
     Effect::new(move |_| {
         let take = ui.take.get();

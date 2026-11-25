@@ -48,7 +48,10 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             to.set_path(&format!("{p}/"));
             Response::redirect_with_status(to, 301)
         }
-        _ => Response::error("not found", 404),
+        _ => Response::error(
+            "This page does not exist. Open the call link the host sent you, or ask them for a new one.",
+            404,
+        ),
     }
 }
 
