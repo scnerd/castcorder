@@ -219,6 +219,8 @@ pub(super) fn disconnect() {
         e.camera_requests.clear();
         // The host sends every camera's state again after the next join.
         e.cameras.clear();
+        // And every connection's path.
+        e.relayed.clear();
         e.join_request = None;
         e.status_request = None;
         e.participant = None;

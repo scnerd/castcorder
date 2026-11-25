@@ -375,6 +375,9 @@ pub struct Call {
     /// Each joined guest's camera as it last reported it
     /// ([`Request::CameraState`]), for latecomers: it is sent only on change.
     cameras: BTreeMap<GuestId, bool>,
+    /// Each connection's path to the host: through a TURN relay or direct
+    /// (cast-9ok), as the transport last told it.
+    paths: BTreeMap<GuestId, bool>,
     /// The library volume's free bytes as last read, and when it is read next
     /// (host timeline, us): a syscall per half second would be needless, and
     /// this thread answers clock pings.
@@ -519,6 +522,7 @@ impl Call {
             tracks_due_us: 0,
             disk: BTreeMap::new(),
             cameras: BTreeMap::new(),
+            paths: BTreeMap::new(),
             library_free: None,
             library_free_due_us: 0,
             disk_due_us: 0,
@@ -664,6 +668,46 @@ impl Call {
             };
             if rpc.emit(event).is_err() {
                 warn!(guest = to.0, "camera states not sent: channel closed");
+                return;
+            }
+        }
+    }
+
+    /// Tell everyone joined (`who` included) whether `who`'s connection goes
+    /// through a relay, if known and `who` has joined.
+    fn tell_path(&mut self, who: GuestId) {
+        let Some(&relayed) = self.paths.get(&who) else {
+            return;
+        };
+        if !self.names.contains_key(&who) {
+            return;
+        }
+        let event = Event::Relayed {
+            participant: ParticipantId(who.0),
+            relayed,
+        };
+        for (id, rpc) in &mut self.rpc {
+            if self.names.contains_key(id) && rpc.emit(event.clone()).is_err() {
+                warn!(guest = id.0, "connection path not sent: channel closed");
+            }
+        }
+    }
+
+    /// Tell a guest that just joined every other joined participant's path.
+    fn send_paths(&mut self, to: GuestId) {
+        let Some(rpc) = self.rpc.get_mut(&to) else {
+            return;
+        };
+        for (&from, &relayed) in &self.paths {
+            if from == to || !self.names.contains_key(&from) {
+                continue;
+            }
+            let event = Event::Relayed {
+                participant: ParticipantId(from.0),
+                relayed,
+            };
+            if rpc.emit(event).is_err() {
+                warn!(guest = to.0, "connection paths not sent: channel closed");
                 return;
             }
         }
@@ -1608,6 +1652,8 @@ impl Call {
                     self.send_call(&[id]);
                     self.send_roles(&[id.0]);
                     self.send_cameras(id);
+                    self.send_paths(id);
+                    self.tell_path(id);
                     self.send_transcript(id);
                     self.calls_dirty = true;
                     self.save_room();
@@ -1662,6 +1708,7 @@ impl Call {
                                 }
                                 self.disk.remove(&guest);
                                 self.cameras.remove(&guest);
+                                self.paths.remove(&guest);
                                 self.unmet.remove(&guest);
                                 self.recorders.left(guest.0);
                                 self.recorders_dirty = true;
@@ -1674,6 +1721,10 @@ impl Call {
                             }
                             HostEvent::GuestConnected { guest } => {
                                 info!(guest = guest.0, "guest connected");
+                            }
+                            HostEvent::GuestPath { guest, relayed } => {
+                                self.paths.insert(guest, relayed);
+                                self.tell_path(guest);
                             }
                             HostEvent::ChannelOpen { .. } => {}
                         }

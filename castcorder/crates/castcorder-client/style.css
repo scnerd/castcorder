@@ -248,6 +248,10 @@ details.advanced summary { cursor: pointer; font-size: 12px; color: var(--muted)
 .tile-track[data-state="unavailable"] { color: #fbbf24; }
 .tile-track[data-state="mic-lost"] .dot, .tile-track[data-state="no-video"] .dot,
 .tile-track[data-state="unavailable"] .dot { background: #fbbf24; border-color: #fbbf24; }
+/* Through a TURN relay (cast-9ok, rpc.rs and view.rs): a quiet badge at the top right. */
+.tile-relay { position: absolute; right: 10px; top: 10px; z-index: 2; padding: 4px 9px; border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6); color: #e8eaed; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.tile-relay[hidden] { display: none; }
 
 /* Side panel */
 .side { width: 360px; flex: none; border-left: 1px solid var(--border); background: var(--surface);

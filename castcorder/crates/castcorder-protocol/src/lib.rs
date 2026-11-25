@@ -594,6 +594,16 @@ pub enum Event {
     /// heard. Lines come in the order they were transcribed, which may
     /// differ from the order they were spoken (`host_us` says that).
     Transcript(Vec<TranscriptLine>),
+    /// Whether a participant's connection to the host goes through a TURN
+    /// relay (cast-9ok; appended): sent to everyone, the participant
+    /// included, when it is first known and whenever it changes, and every
+    /// participant's latest to a device right after it joins.
+    Relayed {
+        /// Whose connection.
+        participant: ParticipantId,
+        /// Through a relay (false: direct).
+        relayed: bool,
+    },
 }
 
 /// One line of the live transcript: what one participant said in one
@@ -955,6 +965,10 @@ mod tests {
                 host_us: 12_345_678,
                 text: "Welcome back to the show.".into(),
             }])),
+            CoreMessage::Event(Event::Relayed {
+                participant: ParticipantId(2),
+                relayed: true,
+            }),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,

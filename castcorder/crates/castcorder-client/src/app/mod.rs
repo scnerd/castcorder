@@ -238,6 +238,9 @@ struct Engine {
     /// participant id: their tile shows camera-off while it says off,
     /// whatever its video track reports.
     cameras: Vec<(u64, bool)>,
+    /// Participants whose connection goes through a relay
+    /// (`Event::Relayed`): their tile shows a Relay badge.
+    relayed: Vec<u64>,
     /// Disk reports awaiting their answer, and when (Date.now() ms) the next
     /// is due while nothing else triggers one.
     disk_requests: Vec<RequestId>,
@@ -409,6 +412,9 @@ struct Ui {
     /// Each participant's recording as the host shares it: everyone's for a
     /// producer, else only this participant's (the track chips, the roll-up).
     recorders: RwSignal<Vec<castcorder_protocol::Recorder>>,
+    /// Participants whose connection to the host goes through a TURN relay
+    /// (`Event::Relayed`, cast-9ok), this one included.
+    relayed: RwSignal<Vec<u64>>,
     /// When the recording take started on the host timeline (us), from its status.
     take_started_us: RwSignal<Option<i64>>,
     /// How long the take has run ("1:05"), empty until this device knows the host's clock.

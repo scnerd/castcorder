@@ -258,6 +258,12 @@ pub(crate) struct Guest {
     last_seen: Option<Duration>,
     next_heartbeat: Duration,
     last_pair: Option<String>,
+    /// The selected candidate pair's local and remote addresses.
+    pub(crate) pair: Option<(SocketAddr, SocketAddr)>,
+    /// The guest's relay candidates' addresses, from its SDP (cast-9ok).
+    pub(crate) remote_relays: Vec<SocketAddr>,
+    /// Whether the selected pair goes through a TURN relay, as last told.
+    pub(crate) relayed: Option<bool>,
     /// The next renegotiation restarts ICE (the host's relayed address changed).
     ice_restart: bool,
     /// The initial bandwidth estimate, or `None` without estimation.
@@ -307,6 +313,9 @@ impl Guest {
             last_seen: None,
             next_heartbeat: now,
             last_pair: None,
+            pair: None,
+            remote_relays: Vec::new(),
+            relayed: None,
             ice_restart: false,
             bwe_initial,
             bwe_cap,
@@ -575,6 +584,7 @@ impl Guest {
             }
             Event::PeerStats(p) => {
                 if let Some(pair) = p.selected_candidate_pair {
+                    self.pair = Some((pair.local.addr, pair.remote.addr));
                     let desc = format!(
                         "{:?} {} -> {}",
                         pair.protocol, pair.local.addr, pair.remote.addr
@@ -690,6 +700,11 @@ impl Guest {
     }
 
     fn handle_answer(&mut self, sdp: &str) {
+        for a in crate::relay_candidates(sdp) {
+            if !self.remote_relays.contains(&a) {
+                self.remote_relays.push(a);
+            }
+        }
         let answer = match SdpAnswer::from_sdp_string(sdp) {
             Ok(a) => a,
             Err(e) => {
