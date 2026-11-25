@@ -580,6 +580,9 @@ impl Contacts {
         }
         g.saved.appear_offline = on;
         if !on {
+            // Back before the leaving pings went: they must not go after
+            // the sweep that says it is online.
+            g.board.take_leave();
             g.board.sweep();
         }
         info!(appear_offline = on, "presence setting changed");
@@ -641,7 +644,7 @@ impl Contacts {
     /// this install has started to appear offline.
     pub fn leaving_due(&self, now_ms: u64) -> Vec<(castcorder_link::HostId, String)> {
         let mut g = self.lock();
-        if !g.board.take_leave() {
+        if !g.board.take_leave() || !g.saved.appear_offline {
             return Vec::new();
         }
         Self::leaving_to(&mut g, now_ms, &self.timing)

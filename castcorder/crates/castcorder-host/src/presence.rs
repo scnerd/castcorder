@@ -450,11 +450,11 @@ pub fn spawn(
             info!("presence pings will start after the first registration");
             let mut logged = std::time::Instant::now();
             while !stop.load(Ordering::SeqCst) {
-                for (to, person) in contacts.presence_due(crate::wall_ms()) {
-                    send(&contacts, &base, to, person, false);
-                }
                 for (to, person) in contacts.leaving_due(crate::wall_ms()) {
                     send(&contacts, &base, to, person, true);
+                }
+                for (to, person) in contacts.presence_due(crate::wall_ms()) {
+                    send(&contacts, &base, to, person, false);
                 }
                 if logged.elapsed() >= TRAFFIC_LOG {
                     logged = std::time::Instant::now();

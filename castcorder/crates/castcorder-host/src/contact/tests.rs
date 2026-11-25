@@ -462,6 +462,13 @@ fn going_offline_tells_the_installs_shown_online_once() {
     // Already appearing offline: setting it again tells nobody.
     a.contacts.set_appear_offline(true).unwrap();
     assert!(a.contacts.leaving_due(now).is_empty());
+    // Off and on and off again before the pings went: nobody is told it is
+    // leaving after the sweep that says it is back.
+    a.contacts.set_appear_offline(false).unwrap();
+    assert!(ping_as(&a, &b.host, b.persons.cert(), now).is_ok());
+    a.contacts.set_appear_offline(true).unwrap();
+    a.contacts.set_appear_offline(false).unwrap();
+    assert!(a.contacts.leaving_due(now).is_empty());
 }
 
 #[test]
