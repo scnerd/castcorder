@@ -541,6 +541,89 @@ fn an_unanswered_address_moves_on_to_the_servers_next_address() {
     assert_eq!(turn.allocates, 2, "the 401, then the authenticated request");
 }
 
+/// cast-sfn: a credential renewal starts on the address that worked, so a path
+/// that black-holes the first address does not pay the timeout on every renewal.
+#[test]
+fn a_renewal_starts_on_the_address_that_worked() {
+    init_log();
+    let time = SimTime::new();
+    let net = SimNetwork::new(time.clone(), SEED);
+    let silent = net.bind(ip(TURN_IP));
+    let mut turn = SimTurn::new(&net, &time);
+    let mut host = Host::new(
+        net.bind(ip(1)),
+        time.clock(SimClockConfig::default()),
+        HostConfig::default(),
+    );
+    host.set_spare_socket(net.bind(ip(1)));
+    let creds = |turn: &mut SimTurn| TurnServer {
+        addr: silent.local_addr(),
+        alternates: vec![turn.addr()],
+        ..mint(turn, Duration::from_secs(600))
+    };
+    host.set_turn_server(Some(creds(&mut turn)));
+    let end = time.now() + castcorder_transport::ALLOCATE_TIMEOUT + Duration::from_secs(5);
+    while host.relayed().is_none() {
+        assert!(time.now() < end, "no allocation on the alternate address");
+        host.poll();
+        turn.step();
+        time.advance(Duration::from_millis(10));
+    }
+    assert_eq!(host.relay_stats().timeouts, 1);
+    // Renew: the new allocation is up well before another timeout could pass.
+    let renewed_at = time.now();
+    host.set_turn_server(Some(creds(&mut turn)));
+    while host.relay_stats().allocations < 2 {
+        assert!(
+            time.now() - renewed_at < Duration::from_secs(3),
+            "the renewal did not start on the working address: {:?}",
+            host.relay_stats()
+        );
+        host.poll();
+        turn.step();
+        time.advance(Duration::from_millis(10));
+    }
+    assert_eq!(host.relay_stats().timeouts, 1, "no second timeout");
+}
+
+/// cast-7bu: a path that drops one socket's flow to the server for good (the
+/// only address, here) is retried from the host's other socket, another source
+/// port, once the address goes unanswered.
+#[test]
+fn an_unanswered_server_is_retried_from_a_fresh_source_port() {
+    init_log();
+    let time = SimTime::new();
+    let net = SimNetwork::new(time.clone(), SEED);
+    let mut turn = SimTurn::new(&net, &time);
+    let mut host = Host::new(
+        net.bind(ip(1)),
+        time.clock(SimClockConfig::default()),
+        HostConfig::default(),
+    );
+    // The first socket's flow is dropped; the spare is another flow (the sim
+    // partitions by address, so the spare sits on another one).
+    net.partition(ip(1), ip(TURN_IP));
+    host.set_spare_socket(net.bind(ip(9)));
+    host.set_turn_server(Some(TurnServer {
+        addr: turn.addr(),
+        username: USER.into(),
+        password: PASS.into(),
+        alternates: vec![],
+    }));
+    let start = time.now();
+    let end = start + castcorder_transport::ALLOCATE_TIMEOUT + Duration::from_secs(3);
+    while host.relayed().is_none() {
+        assert!(time.now() < end, "no allocation from the fresh port");
+        host.poll();
+        turn.step();
+        time.advance(Duration::from_millis(10));
+    }
+    // At once after the timeout, not a retry interval later.
+    assert!(time.now() - start >= castcorder_transport::ALLOCATE_TIMEOUT);
+    let stats = host.relay_stats();
+    assert_eq!((stats.timeouts, stats.allocations), (1, 1), "{stats:?}");
+}
+
 /// RFC 8489 retransmission: an Allocate whose first datagrams are lost is
 /// sent again, so a lossy path allocates late rather than timing out.
 #[test]
