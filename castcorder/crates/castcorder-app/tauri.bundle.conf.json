@@ -11,6 +11,9 @@
       "client": "client",
       "licenses/third-party": "licenses/third-party"
     },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"
