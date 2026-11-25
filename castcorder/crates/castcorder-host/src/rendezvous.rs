@@ -158,6 +158,30 @@ pub fn regenerate_secret(
     Ok(secret)
 }
 
+/// How the rendezvous connection stands now (Settings > Connection,
+/// cast-n56.2).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Health {
+    /// Registered now (links and presence work), not only once.
+    pub connected: bool,
+    /// The relay (TURN) for strict networks: `"ready"` (credentials held),
+    /// `"none"` (the rendezvous offers none), `"unavailable"` (it gave none;
+    /// see `relay_detail`), or empty before the first registration.
+    pub relay: String,
+    /// Why the relay is unavailable (the rendezvous's reason).
+    pub relay_detail: String,
+}
+
+/// [`Health`], shared by the rendezvous thread and the HTTP side.
+pub type SharedHealth = Arc<Mutex<Health>>;
+
+fn set_health(h: &SharedHealth, f: impl FnOnce(&mut Health)) {
+    match h.lock() {
+        Ok(mut g) => f(&mut g),
+        Err(p) => f(&mut p.into_inner()),
+    }
+}
+
 /// Every room's call link once the host is registered with a rendezvous
 /// (shared by the HTTP side, the app and the host thread).
 #[derive(Clone)]
@@ -168,6 +192,8 @@ pub struct Links {
     pub base: Option<LinkBase>,
     /// Registered at least once (links work).
     pub registered: Arc<AtomicBool>,
+    /// How the connection stands now.
+    pub health: SharedHealth,
 }
 
 impl Links {
@@ -238,6 +264,8 @@ pub struct Config {
     pub persons: crate::person::Persons,
     /// This install's contacts (contact requests are answered here).
     pub contacts: crate::contact::Contacts,
+    /// How the connection stands, updated by its thread.
+    pub health: SharedHealth,
 }
 
 impl Config {
@@ -448,7 +476,9 @@ pub fn spawn(
             let mut turn_held: Option<Held> = None;
             let mut backoff = Duration::from_secs(1);
             while !stop.load(Ordering::SeqCst) {
-                match session(&cfg, &tx, &mut on_link, &mut turn_held, &stop) {
+                let ended = session(&cfg, &tx, &mut on_link, &mut turn_held, &stop);
+                set_health(&cfg.health, |h| h.connected = false);
+                match ended {
                     Ok(()) => backoff = Duration::from_secs(1),
                     Err(_) if stop.load(Ordering::SeqCst) => break,
                     Err(e) => {
@@ -538,6 +568,18 @@ fn session(
             None => warn!(url = %url, "cannot resolve the STUN server the rendezvous named"),
         }
     }
+    let relay = match (turn_server(&ice_servers).is_some(), &relay_error) {
+        (true, _) => ("ready", String::new()),
+        (false, Some(e)) if turn_held.is_some() => ("ready", e.clone()),
+        (false, Some(e)) => ("unavailable", e.clone()),
+        (false, None) if turn_held.is_some() => ("ready", String::new()),
+        (false, None) => ("none", String::new()),
+    };
+    set_health(&cfg.health, |h| {
+        h.connected = true;
+        h.relay = relay.0.into();
+        h.relay_detail = relay.1;
+    });
     match turn_server(&ice_servers) {
         Some((server, expires)) => {
             let renewed = turn_held.is_some();
@@ -943,6 +985,7 @@ mod tests {
     fn wrong_call_secret_is_rejected() {
         let key = HostKey::from_secret([3; 32]);
         let cfg = Config {
+            health: Default::default(),
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
             secret: Arc::new(Mutex::new(Secrets {
@@ -1046,6 +1089,7 @@ mod tests {
     #[test]
     fn a_link_request_needs_no_call_secret_and_skips_the_host_thread() {
         let cfg = Config {
+            health: Default::default(),
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
             secret: Arc::new(Mutex::new(Secrets {
@@ -1097,6 +1141,7 @@ mod tests {
     #[test]
     fn a_contact_request_needs_no_call_secret_and_skips_the_host_thread() {
         let cfg = Config {
+            health: Default::default(),
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
             secret: Arc::new(Mutex::new(Secrets {
@@ -1153,6 +1198,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let old = call_secret(&dir).unwrap();
         let cfg = Config {
+            health: Default::default(),
             base: "http://127.0.0.1:1".into(),
             key: HostKey::from_secret([3; 32]),
             secret: Arc::new(Mutex::new(Secrets {

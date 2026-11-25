@@ -86,6 +86,14 @@ pub(super) fn Icon(name: &'static str, #[prop(optional)] small: bool) -> impl In
             <circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>
         }
         .into_any(),
+        "screen" => view! {
+            <rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>
+        }
+        .into_any(),
+        "globe" => view! {
+            <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>
+        }
+        .into_any(),
         _ => view! {
             <path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>
             <path d="M12 9v4"/><path d="M12 17h.01"/>
@@ -146,14 +154,14 @@ fn LinkBar(ui: Ui, id: &'static str) -> impl IntoView {
 pub(super) fn ThemeToggle(ui: Ui) -> impl IntoView {
     let choice = move |t: &'static str| {
         view! {
-            <button class="btn tiny outline" data-theme-set=t aria-pressed=move || if ui.theme.get() == t { "true" } else { "false" }
+            <button type="button" data-theme-set=t aria-pressed=move || if ui.theme.get() == t { "true" } else { "false" }
                 on:click=move |_| { apply_theme(t); ui.theme.set(t.into()); }>
                 {match t { "dark" => "Dark", "light" => "Light", _ => "System" }}</button>
         }
     };
     view! {
-        <div class="theme-toggle" role="group" aria-label="Colour theme">
-            {choice("system")}{choice("dark")}{choice("light")}
+        <div class="seg theme-toggle" role="group" aria-label="Colour theme">
+            {choice("system")}{choice("light")}{choice("dark")}
         </div>
     }
 }
@@ -334,7 +342,7 @@ fn Lobby(ui: Ui, placeholder: RwSignal<String>) -> impl IntoView {
     let last_error = move || ui.errors.get().last().cloned().unwrap_or_default();
     view! {
         <div class="lobby" hidden=move || ui.joined.get()>
-            <div class="brand"><Mark/> "Castcorder"<ThemeToggle ui=ui/></div>
+            <div class="brand"><Mark/> "Castcorder"</div>
             <div class="lobby-main">
                 <div class="lobby-preview">
                     <div class="preview-box">
@@ -521,7 +529,6 @@ fn Call(ui: Ui) -> impl IntoView {
                     <Icon name="alert" small=true/>
                     {move || { let n = ui.errors.get().len(); format!("{n} problem{}", if n == 1 { "" } else { "s" }) }}</button>
                 <div class="right">
-                    <ThemeToggle ui=ui/>
                     <Show when=producer><LinkBar ui=ui id="call-link-top"/></Show>
                     <Show when=producer>
                         <button class="btn" aria-pressed=move || pressed(Panel::People) on:click=move |_| toggle(Panel::People)>

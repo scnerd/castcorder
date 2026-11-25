@@ -195,23 +195,57 @@ pub(super) fn PersonCard() -> impl IntoView {
         )
     };
     view! {
-        <section id="person" class="room-card">
-            <div class="room-head">
-                <h2>"You"</h2>
-                <span class="small muted">"Your devices trust each other: any of them is a producer in the rooms of the others."</span>
-            </div>
-            <div class="row">
-                <label class="sr-only" for="person-name">"Your name"</label>
-                <input id="person-name" placeholder="Your name" prop:value=move || name.get()
-                    on:input=move |ev| name.set(event_target_value(&ev)) />
-                <label class="sr-only" for="device-name">"This device's name"</label>
-                <input id="device-name" placeholder="This device's name" prop:value=move || device_name.get()
-                    on:input=move |ev| device_name.set(event_target_value(&ev)) />
+        <section id="person" class="settings-card" aria-labelledby="h-you">
+            <h2 id="h-you">"You and your devices"</h2>
+            <div class="settings-fields">
+                <label class="field-col" for="person-name">"Your name"
+                    <input id="person-name" placeholder="Your name" prop:value=move || name.get()
+                        on:input=move |ev| name.set(event_target_value(&ev)) /></label>
+                <label class="field-col" for="device-name">"This computer"
+                    <input id="device-name" placeholder="This device's name" prop:value=move || device_name.get()
+                        on:input=move |ev| device_name.set(event_target_value(&ev)) /></label>
                 <button id="save-person" class="btn" on:click=save>"Save"</button>
-                <span class="small muted">{move || format!("This device: {}", data.get().fingerprint)}</span>
             </div>
+            <span class="small muted">"Your devices trust each other: on any of them you are a producer in your own rooms."</span>
+            <ul id="link-requests" class="list">
+                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
+                    {
+                        let (d1, d2) = (r.device.clone(), r.device.clone());
+                        view! {
+                            <li class="call-row" data-device=r.device.clone()>
+                                <span>{format!("{} ({}) wants to be linked", r.name, if r.kind == "app" { "app" } else { "browser" })}</span>
+                                <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
+                                <span class="call-actions">
+                                    <button class="btn tiny outline decline-link"
+                                        on:click=move |_| post("/person/decide", serde_json::json!({ "device": d2.clone(), "approve": false }), "Declined.")>"Decline"</button>
+                                    <button class="btn tiny primary approve-link"
+                                        on:click=move |_| post("/person/decide", serde_json::json!({ "device": d1.clone(), "approve": true }), "Device linked.")>"Approve"</button>
+                                </span>
+                            </li>
+                        }
+                    }
+                </For>
+            </ul>
+            <ul id="linked-devices" class="device-list">
+                <li class="device-row this-device">
+                    <Icon name="screen" small=true/>
+                    <span class="contact-text">
+                        <span class="contact-name">{move || data.get().device_name}" "<span class="muted">"(this computer)"</span></span>
+                        <span class="small muted">{move || format!("Castcorder app \u{b7} fingerprint {}", data.get().fingerprint)}</span>
+                    </span>
+                </li>
+                <For each=move || data.get().devices key=|d| d.id.clone() let:d>
+                    <li class="device-row" data-device=d.id.clone()>
+                        <Icon name=if d.kind == "app" { "screen" } else { "globe" } small=true/>
+                        <span class="contact-text">
+                            <span class="contact-name">{d.name.clone()}</span>
+                            <span class="small muted">{if d.kind == "app" { "Castcorder app" } else { "Browser" }}</span>
+                        </span>
+                    </li>
+                </For>
+            </ul>
             <div class="row">
-                <button id="link-device" class="btn primary" on:click=make_code>"Link a device"</button>
+                <button id="link-device" class="btn primary" on:click=make_code>"Link another device"</button>
                 <span id="person-message" class="small muted">{move || message.get()}</span>
             </div>
             <ul id="link-codes" class="list">
@@ -219,45 +253,22 @@ pub(super) fn PersonCard() -> impl IntoView {
                     <li class="linkbar"><code class="link-code">{l}</code></li>
                 </For>
             </ul>
-            <ul id="link-requests" class="list">
-                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
-                    {
-                        let (d1, d2) = (r.device.clone(), r.device.clone());
-                        view! {
-                            <li class="call-row" data-device=r.device.clone()>
-                                <span>{format!("{} ({})", r.name, if r.kind == "app" { "app" } else { "browser" })}</span>
-                                <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
-                                <span class="call-actions">
-                                    <button class="btn tiny primary approve-link"
-                                        on:click=move |_| post("/person/decide", serde_json::json!({ "device": d1.clone(), "approve": true }), "Device linked.")>"Approve"</button>
-                                    <button class="btn tiny outline decline-link"
-                                        on:click=move |_| post("/person/decide", serde_json::json!({ "device": d2.clone(), "approve": false }), "Declined.")>"Decline"</button>
-                                </span>
-                            </li>
-                        }
-                    }
-                </For>
-            </ul>
-            <ul id="linked-devices" class="list">
-                <For each=move || data.get().devices key=|d| d.id.clone() let:d>
-                    <li class="call-row" data-device=d.id.clone()>
-                        <span>{d.name.clone()}</span>
-                        <span class="small muted">{d.kind.clone()}</span>
-                    </li>
-                </For>
-            </ul>
-            <div class="row">
-                <label class="sr-only" for="join-code">"Link from another device"</label>
-                <input id="join-code" placeholder="Paste a link from your other device" prop:value=move || code.get()
-                    on:input=move |ev| code.set(event_target_value(&ev)) />
-                <button id="join-person" class="btn" disabled=move || code.get().trim().is_empty() on:click=join>"Link this app"</button>
-                <span id="joining" class="small muted">{move || match data.get().joining {
-                    Some(j) if j.state == "waiting" => "Waiting for approval on the other device".to_string(),
-                    Some(j) if j.state == "linked" => "Linked".to_string(),
-                    Some(j) => format!("Not linked: {}", j.detail.unwrap_or_default()),
-                    None => String::new(),
-                }}</span>
-            </div>
+            <details class="join-existing">
+                <summary>"This computer belongs to someone already set up elsewhere?"</summary>
+                <span class="small muted">"Make a link on your other device (Settings > Link another device) and paste it here. Then approve it there."</span>
+                <div class="row">
+                    <label class="sr-only" for="join-code">"Link from another device"</label>
+                    <input id="join-code" placeholder="Paste a link from your other device" prop:value=move || code.get()
+                        on:input=move |ev| code.set(event_target_value(&ev)) />
+                    <button id="join-person" class="btn" disabled=move || code.get().trim().is_empty() on:click=join>"Link this app"</button>
+                </div>
+            </details>
+            <span id="joining" class="small muted">{move || match data.get().joining {
+                Some(j) if j.state == "waiting" => "Waiting for approval on the other device".to_string(),
+                Some(j) if j.state == "linked" => "Linked".to_string(),
+                Some(j) => format!("Not linked: {}", j.detail.unwrap_or_default()),
+                None => String::new(),
+            }}</span>
         </section>
     }
 }
@@ -899,7 +910,11 @@ pub(super) fn RoomTrust(
 pub(super) fn show_element(id: &'static str) {
     let cb = Closure::once_into_js(move || {
         if let Some(el) = window().document().and_then(|d| d.get_element_by_id(id)) {
-            let _ = call(&el, "scrollIntoView", &[]);
+            // Centred: aligned to the top, a fractional layout can leave it
+            // half a pixel above the viewport.
+            let opts = object();
+            set(&opts, "block", "center");
+            let _ = call(&el, "scrollIntoView", &[&opts]);
         }
     });
     let _ = window().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), 50);

@@ -190,6 +190,21 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   }, 'contacts: Bob hears the decline', 30000, 500);
   check(declined.state === 'failed' && declined.detail === 'declined', 'contacts: declined: ' + JSON.stringify(declined));
   check((await call(HTTP2, '/contacts')).contacts.length === 0, 'contacts: after a decline Bob lists nobody');
+  // Settings > Connection and Recordings folder (cast-n56.2), on Ann's
+  // home: registered with the rendezvous, presence on, the folder and its
+  // free space.
+  await page.click('#nav-settings');
+  const reach = await waitFor(async () => {
+    const t = await text(page, '#status-reach');
+    return t && t.includes('Guests can reach you from anywhere') ? t : null;
+  }, 'settings: Ann reachable from anywhere', 15000, 250);
+  check(true, 'settings: ' + reach);
+  const settings = await call(HTTP, '/settings');
+  check(settings.health.connected === true && ['ready', 'none'].includes(settings.health.relay),
+    'settings: the rendezvous connection and relay: ' + JSON.stringify(settings.health));
+  check((await text(page, '#status-presence')).includes('Contacts see you as online'), 'settings: presence on');
+  check((await text(page, '#library-path')).length > 0 && (await text(page, '#disk-free')).includes(' free'),
+    'settings: the folder and its free space: ' + (await text(page, '#disk-free')));
   check(!logs.K.some((l) => l.startsWith('[pageerror]')), 'contacts: the home raised no page errors');
   ctx.host10.kill();
 }

@@ -37,6 +37,18 @@ impl FsStorage {
         }
     }
 
+    /// Size in bytes of the volume of the storage directory.
+    pub fn volume_total_space(&self) -> io::Result<u64> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            fs4::total_space(&self.root)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
     fn path(&self, name: &str) -> io::Result<PathBuf> {
         validate_name(name)?;
         Ok(self.root.join(name))
