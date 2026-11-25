@@ -165,6 +165,22 @@ export async function roomsChecks() {
   check(takes[0] === '1 take' && takes[1] === '2 takes', 'each call shows its takes: ' + takes.join(', '));
   check((await rows.first().getAttribute('data-call')) === second && (await rows.first().getAttribute('class')).includes('next'),
     'the newest call is where the next join lands');
+  // Archive the older call (cast-bc4): hidden from the list, folder untouched,
+  // shown on demand, restored by Unarchive.
+  const summary = P.locator('#rooms li[data-room="' + ROOM + '"] .past-calls summary');
+  const toggle = P.locator('#rooms li[data-room="' + ROOM + '"] .toggle-archived');
+  const oldRow = P.locator('#rooms li[data-room="' + ROOM + '"] .call-row[data-call="' + first + '"]');
+  await oldRow.locator('.archive-call').click();
+  await waitFor(async () => !(await oldRow.isVisible()), 'an archived call leaves the list', 10000);
+  check((await summary.textContent()).includes('Past calls (1)') && (await toggle.textContent()).includes('Show archived (1)'),
+    'the list counts what is left and offers the archived one: ' + (await summary.textContent()));
+  check(callDirs(LIB, ROOM).length === 2, 'archiving deletes nothing: both call folders remain');
+  await toggle.click();
+  await waitFor(async () => await oldRow.isVisible(), 'Show archived lists the call again', 5000);
+  check((await oldRow.textContent()).includes('Archived'), 'an archived call says so');
+  await oldRow.locator('.archive-call').click();
+  await waitFor(async () => (await toggle.count()) === 0 || !(await toggle.isVisible()), 'Unarchive puts the call back for good', 10000);
+  check((await oldRow.isVisible()) && (await summary.textContent()).includes('Past calls (2)'), 'an unarchived call is in the list again');
   // Continue the first call from the home: it becomes the next join's.
   await rows.nth(1).locator('.continue-call').click();
   await waitFor(async () => (await rooms()).find((r) => r.name === ROOM).current === first, 'Continue makes the old call the current one', 10000);

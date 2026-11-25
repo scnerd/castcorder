@@ -22,6 +22,9 @@ struct HomeCall {
     started_ms: u64,
     takes: u32,
     live: bool,
+    /// Hidden until "Show archived" (cast-bc4).
+    #[serde(default)]
+    archived: bool,
 }
 
 /// One room, as `GET /rooms` says.
@@ -256,6 +259,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         past: RwSignal::new(Default::default()),
         invite: RwSignal::new(Default::default()),
         replace: RwSignal::new(Default::default()),
+        archived: RwSignal::new(Default::default()),
     };
     let refresh = move || {
         spawn_local(async move {
@@ -569,6 +573,8 @@ struct Opened {
     invite: RwSignal<std::collections::BTreeSet<String>>,
     /// Rooms asking "replace the link?" (cast-7jv).
     replace: RwSignal<std::collections::BTreeSet<String>>,
+    /// Rooms showing their archived calls too (cast-bc4).
+    archived: RwSignal<std::collections::BTreeSet<String>>,
 }
 
 /// Show or hide `room` in `set`.
@@ -621,6 +627,9 @@ fn room_card(
     let mut calls = r.calls.clone();
     calls.reverse();
     let count = calls.len();
+    let hidden = calls.iter().filter(|c| c.archived).count();
+    let nm = StoredValue::new(name.clone());
+    let archived_shown = move || open.archived.with(|s| s.contains(&nm.get_value()));
     let (p1, p2, p3, p4) = (name.clone(), name.clone(), name.clone(), name.clone());
     let (i1, i2, i3) = (name.clone(), name.clone(), name.clone());
     let inviting = move || open.invite.with(|s| s.contains(&i1));
@@ -722,24 +731,38 @@ fn room_card(
             <Show when=move || count != 0>
                 <details class="past-calls" prop:open={let p = p3.clone(); move || open.past.with(|s| s.contains(&p))}
                     on:toggle={let p = p4.clone(); move |ev| flip(open.past, &p, event_target::<web_sys::HtmlDetailsElement>(&ev).open())}>
-                    <summary class="small">{format!("Past calls ({count})")}</summary>
+                    <summary class="small">{format!("Past calls ({})", count - hidden)}</summary>
+                    <Show when=move || hidden != 0>
+                        <button class="btn tiny outline toggle-archived" on:click=move |_| flip(open.archived, &nm.get_value(), !archived_shown())>
+                            {move || if archived_shown() { format!("Hide archived ({hidden})") } else { format!("Show archived ({hidden})") }}
+                        </button>
+                    </Show>
                     <ul class="list calls">
                         {calls.clone().into_iter().map(|c| {
-                            let (room_a, room_b, id_a, id_b) = (r.name.clone(), r.name.clone(), c.id.clone(), c.id.clone());
+                            let (room_a, room_b, room_c, id_a, id_b, id_c) = (r.name.clone(), r.name.clone(), r.name.clone(), c.id.clone(), c.id.clone(), c.id.clone());
                             let next = current.as_deref() == Some(c.id.as_str());
                             let clive = c.live;
+                            let is_archived = c.archived;
+                            let shown = move || !is_archived || archived_shown();
                             view! {
-                                <li class="call-row" data-call=c.id.clone() class:next=next>
+                                <li class="call-row" data-call=c.id.clone() class:next=next class:archived=is_archived hidden=move || !shown()>
                                     <span class="call-when" title=when(c.started_ms)>{day(c.started_ms)}</span>
                                     <span class="small call-takes">{takes(c.takes)}</span>
                                     <span class="small muted call-id">{c.id.clone()}</span>
                                     <Show when=move || clive><span class="chip ok">"Live"</span></Show>
                                     <Show when=move || next && !clive><span class="chip">"Next join"</span></Show>
+                                    <Show when=move || is_archived><span class="chip">"Archived"</span></Show>
                                     <span class="call-actions">
                                         <button class="btn tiny continue-call" disabled=next
                                             on:click=move |_| act("/rooms/call", serde_json::json!({ "room": room_a.clone(), "call": id_a.clone() }), "This call continues: the next to join lands in it.")>"Continue this call"</button>
                                         <button class="btn tiny outline open-call-folder"
                                             on:click=move |_| act("/folder/open", serde_json::json!({ "room": room_b.clone(), "call": id_b.clone() }), "Folder opened.")>"Open folder"</button>
+                                        <button class="btn tiny outline archive-call" disabled=clive
+                                            title=if is_archived { "Show this call in the list again" } else { "Hide this call from the list; its recordings stay" }
+                                            on:click=move |_| act("/rooms/archive", serde_json::json!({ "room": room_c.clone(), "call": id_c.clone(), "archived": !is_archived }),
+                                                if is_archived { "Call restored to the list." } else { "Call archived: its recordings stay on disk." })>
+                                            {if is_archived { "Unarchive" } else { "Archive" }}
+                                        </button>
                                     </span>
                                 </li>
                             }

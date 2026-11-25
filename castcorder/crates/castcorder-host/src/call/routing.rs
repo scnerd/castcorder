@@ -169,6 +169,8 @@ pub struct CallView {
     pub takes: u32,
     /// Someone is in it now.
     pub live: bool,
+    /// Hidden from the home's list until shown (cast-bc4).
+    pub archived: bool,
 }
 
 /// A device that joined a room with its link (Room settings > People).
@@ -446,12 +448,43 @@ impl Call {
                     return Err(format!("no call {id} in room {room}"));
                 }
                 rooms::touch(&dir, now).map_err(|e| e.to_string())?;
+                // Continuing a call brings it back from the archive.
+                rooms::set_archived(&dir, false).map_err(|e| e.to_string())?;
                 id
             }
         };
         info!(room = %room, call = %id, "call chosen: the next to join lands in it");
         self.calls_dirty = true;
         Ok(id)
+    }
+
+    /// The home's Archive / Unarchive of one call of `room` (cast-bc4): hides
+    /// it from the lists, or brings it back. Nothing is deleted. A call
+    /// someone is in cannot be archived.
+    pub(super) fn archive_call(
+        &mut self,
+        room: &str,
+        call: &str,
+        archived: bool,
+    ) -> Result<(), String> {
+        if !self.rooms.exists(room) {
+            return Err(format!("no room named {room}"));
+        }
+        let dir = self.rooms.room_dir(room).join(call);
+        if !rooms::is_call_id(call) || rooms::read_meta(&dir).is_none() {
+            return Err(format!("no call {call} in room {room}"));
+        }
+        if archived
+            && self.is_live()
+            && room == self.room_name
+            && self.call_id.as_deref() == Some(call)
+        {
+            return Err("this call is live: it cannot be archived while someone is in it".into());
+        }
+        rooms::set_archived(&dir, archived).map_err(|e| e.to_string())?;
+        info!(room = %room, call = %call, archived, "call archived or restored");
+        self.calls_dirty = true;
+        Ok(())
     }
 
     /// Mark the open call active now.
@@ -675,6 +708,7 @@ impl Call {
                             started_ms: c.meta.started_ms,
                             last_active_ms: c.meta.last_active_ms,
                             takes: c.takes,
+                            archived: c.meta.archived,
                         })
                         .collect(),
                     default: name == default,

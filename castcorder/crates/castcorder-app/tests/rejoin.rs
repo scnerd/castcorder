@@ -285,3 +285,72 @@ fn a_device_sees_its_rooms_and_rejoins_a_call() {
     host.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Archiving a call (cast-bc4) hides it from the home's lists and nothing
+/// else: it stays on disk, routing ignores the flag, a live call cannot be
+/// hidden, and continuing a call brings it back.
+#[test]
+fn an_archived_call_is_hidden_not_deleted_and_continuing_it_restores_it() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dist = root.join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
+    let mut c = Config::new(dist);
+    c.library = root.join("library");
+    c.room = "show".into();
+    c.open = true;
+    c.bind = std::net::Ipv4Addr::LOCALHOST.into();
+    c.https_port = 0;
+    c.http_port = 0;
+    c.udp_port = 0;
+    c.align = None;
+    let host = castcorder_host::start(c, |_| {}).unwrap();
+    let archived = |call: &str| {
+        host.rooms()
+            .into_iter()
+            .find(|r| r.name == "show")
+            .and_then(|r| r.calls.into_iter().find(|c| c.id == call))
+            .map(|c| c.archived)
+    };
+
+    let first = host.choose_call("show", None).unwrap();
+    let second = host.choose_call("show", None).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(archived(&first), Some(false));
+
+    host.archive_call("show", &first, true).unwrap();
+    assert_eq!(archived(&first), Some(true));
+    assert_eq!(archived(&second), Some(false), "only that call");
+    assert!(
+        root.join("library/show")
+            .join(&first)
+            .join("call.json")
+            .exists(),
+        "nothing is deleted"
+    );
+    // It survives a look at the list again, and unarchiving works.
+    host.archive_call("show", &first, false).unwrap();
+    assert_eq!(archived(&first), Some(false));
+    host.archive_call("show", &first, true).unwrap();
+
+    // Nonsense is refused.
+    assert!(host.archive_call("show", "2001-01-01", true).is_err());
+    assert!(host.archive_call("nowhere", &first, true).is_err());
+    assert!(host.archive_call("show", "../x", true).is_err());
+
+    // Continuing the archived call brings it back.
+    host.choose_call("show", Some(&first)).unwrap();
+    assert_eq!(archived(&first), Some(false), "continuing restores it");
+
+    // A call someone is in cannot be hidden.
+    let (a, a_rpc, landed) = join(&host, "show", 1, None).unwrap();
+    assert_eq!(landed.call, first);
+    let e = host.archive_call("show", &first, true).unwrap_err();
+    assert!(e.contains("live"), "{e}");
+    drop(a_rpc);
+    drop(a);
+    wait("the show empties", || !live(&host));
+    host.archive_call("show", &first, true).unwrap();
+    assert_eq!(archived(&first), Some(true));
+}
