@@ -58,3 +58,33 @@ pub fn end_is_sticky<H: CaptureHarness>(h: &H) {
 pub fn same_settings_same_bytes<H: CaptureHarness>(h: &H) {
     assert_eq!(drain(h.source()), drain(h.source()));
 }
+
+/// The live half of the contract, for sources that never end (a microphone):
+/// each check reads for a while instead of to the end, and a harness's
+/// `expected_frames` is not used.
+///
+/// Buffers are non-empty, whole frames and contiguous from frame 0 over the
+/// first `min_frames` frames, with the format constant throughout. Returns the
+/// frames read, which is at least `min_frames` or the source ended or timed out
+/// first (callers decide whether that is a skip or a failure).
+pub fn live_buffers_are_contiguous_whole_frames<H: CaptureHarness>(
+    h: &H,
+    min_frames: u64,
+    timeout: std::time::Duration,
+) -> u64 {
+    let mut s = h.source();
+    let format = s.format();
+    let deadline = std::time::Instant::now() + timeout;
+    let mut next = 0u64;
+    while next < min_frames && std::time::Instant::now() < deadline {
+        let Some(b) = s.next_buffer().expect("next_buffer failed") else {
+            break;
+        };
+        assert_eq!(s.format(), format, "format changed mid-stream");
+        assert!(!b.data.is_empty(), "empty buffer");
+        assert_eq!(b.data.len() % format.frame_bytes(), 0, "partial frame");
+        assert_eq!(b.first_frame, next, "gap or overlap");
+        next += b.frames(&format);
+    }
+    next
+}
