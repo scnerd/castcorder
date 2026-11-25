@@ -54,6 +54,7 @@ mod devices;
 mod home;
 mod join;
 mod lifecycle;
+mod lobby;
 mod media;
 mod meters;
 mod native;

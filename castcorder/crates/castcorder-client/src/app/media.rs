@@ -231,6 +231,7 @@ pub(super) fn toggle_camera(ui: Ui) {
     if !ui.joined.get_untracked() {
         ui.camera_state
             .set(if on { "on at join" } else { "off" }.into());
+        super::lobby::restart(ui);
         return;
     }
     if on {

@@ -82,6 +82,8 @@ export async function roomsChecks() {
   await card.locator('.join-room').click();
   await P.waitForSelector('#join');
   check((await text(P, '#lobby-room')) === ROOM, 'Join on the home opens that room\x27s lobby');
+  // No person name set on this home: the lobby asks for one (cast-n56.3).
+  await P.fill('#name', 'Pat');
   await P.click('#join');
   await waitFor(async () => (await text(G, '#state')) === 'connected', 'G gets in once the producer opened the room', 40000);
   await waitFor(async () => (await text(P, '#current-call')).length > 0, 'the producer sees which call this is', 15000);
