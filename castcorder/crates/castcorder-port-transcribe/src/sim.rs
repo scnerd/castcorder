@@ -22,7 +22,7 @@ pub const SEGMENT_GAP_MS: u64 = 400;
 /// The tone for "a", in Hz.
 pub const BASE_HZ: f32 = 400.0;
 /// The step between letters' tones, in Hz.
-pub const STEP_HZ: f32 = 40.0;
+pub const STEP_HZ: f32 = 80.0;
 /// The tones' amplitude.
 const AMPLITUDE: f32 = 0.3;
 /// A block this loud (RMS) or louder is a tone.
@@ -92,6 +92,9 @@ fn tones(pcm: &[f32]) -> Vec<(usize, usize)> {
 
 /// The letter whose tone is nearest the frequency of `pcm` (zero crossings).
 fn letter(pcm: &[f32]) -> char {
+    // The middle of the tone: its edges are where a codec smears it.
+    let trim = pcm.len() / 8;
+    let pcm = &pcm[trim..pcm.len() - trim];
     let crossings = pcm
         .windows(2)
         .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))

@@ -162,7 +162,9 @@ impl Segmenter {
             frame,
             pending: Vec::new(),
             pos: 0,
-            recent: VecDeque::new(),
+            // Assume quiet before the stream started, so speech in its first
+            // moments counts; the assumption ages out like any frame.
+            recent: VecDeque::from([-90.0]),
             pre: VecDeque::new(),
             open: None,
         }
@@ -371,6 +373,17 @@ mod tests {
     }
 
     #[test]
+    fn speech_at_the_very_start_of_a_stream_counts() {
+        let r = 16_000;
+        let mut s = Segmenter::new(SegmenterConfig::default());
+        let mut pcm = tone(300.0, r, 500, 0.2);
+        pcm.extend(silence(r, 1_000));
+        let got = s.push(&pcm);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].start, 0);
+    }
+
+    #[test]
     fn clicks_are_dropped_and_a_stream_that_ends_mid_speech_is_kept() {
         let r = 16_000;
         let mut s = Segmenter::new(SegmenterConfig::default());
@@ -422,7 +435,13 @@ mod tests {
         let mut s = Segmenter::new(SegmenterConfig::default());
         // A loud hum at -30 dBFS for 10 s, then speech 20 dB above it.
         let hum = tone(60.0, r, 10_000, 0.045);
-        assert!(s.push(&hum).is_empty());
+        // Until the floor has seen it (2 s), a sound at the very start counts.
+        let early = s.push(&hum);
+        assert!(
+            early.len() <= 1 && early.iter().all(|u| u.pcm.len() <= 2_600 * 16),
+            "{:?}",
+            early.iter().map(|u| u.pcm.len()).collect::<Vec<_>>()
+        );
         let mut speech: Vec<f32> = tone(60.0, r, 800, 0.045)
             .iter()
             .zip(tone(300.0, r, 800, 0.45))
