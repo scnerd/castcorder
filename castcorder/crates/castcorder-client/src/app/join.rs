@@ -379,6 +379,14 @@ async fn renew_relay(
         if !current() || closed {
             return;
         }
+        // A direct connection needs no relay: renewing would cost a credential
+        // (against the host key's cap) and an ICE restart for nothing
+        // (cast-lxt.13). If it falls back to a relay later, the call drops and
+        // reconnects with fresh credentials.
+        if selected_pair_relayed(&pc).await == Some(false) {
+            info!("connection is direct; relay credentials are not renewed");
+            return;
+        }
         let fresh = match crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, &link)).await {
             Ok(mb) => match mb.relay_expires {
                 Some(e) => Ok((e, mb.ice_servers.clone())),
@@ -414,6 +422,43 @@ async fn renew_relay(
             }
         }
     }
+}
+
+/// Whether the connection's selected candidate pair uses a relay, from
+/// `getStats` (`None` when the browser does not say).
+async fn selected_pair_relayed(pc: &RtcPeerConnection) -> Option<bool> {
+    let report = JsFuture::from(pc.get_stats()).await.ok()?;
+    let stats = std::rc::Rc::new(std::cell::RefCell::new(Vec::<JsValue>::new()));
+    let sink = stats.clone();
+    let each = Closure::<dyn FnMut(JsValue)>::new(move |s: JsValue| sink.borrow_mut().push(s));
+    call(&report, "forEach", &[each.as_ref()]).ok()?;
+    let stats = stats.borrow();
+    let by_id = |id: &str| stats.iter().find(|s| string(s, "id") == id);
+    // The transport names the selected pair; a browser that does not (Firefox
+    // before 126) marks it on the pair itself.
+    let selected_id = stats
+        .iter()
+        .find(|s| string(s, "type") == "transport")
+        .map(|t| string(t, "selectedCandidatePairId"))
+        .filter(|id| !id.is_empty());
+    let pair = match selected_id {
+        Some(id) => by_id(&id),
+        None => stats.iter().find(|s| {
+            string(s, "type") == "candidate-pair"
+                && (get(s, "selected").is_truthy()
+                    || (get(s, "nominated").is_truthy() && string(s, "state") == "succeeded"))
+        }),
+    }?;
+    let kind = |key: &str| {
+        by_id(&string(pair, key))
+            .map(|c| string(c, "candidateType"))
+            .unwrap_or_default()
+    };
+    let (local, remote) = (kind("localCandidateId"), kind("remoteCandidateId"));
+    if local.is_empty() && remote.is_empty() {
+        return None;
+    }
+    Some(crate::signal::pair_is_relayed(&local, &remote))
 }
 
 /// The call connection's send-only audio and video transceivers.
