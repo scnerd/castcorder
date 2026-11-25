@@ -44,7 +44,7 @@ pub struct Syncer {
     /// The room whose link (or `?room=`) it came through.
     room: String,
     rpc: RpcServer<GuestChannel>,
-    puller: Puller<FsStorage, GuestChannel>,
+    pub(super) puller: Puller<FsStorage, GuestChannel>,
 }
 
 /// Move every sync-only connection's transfer along; `hold`: ask for nothing
