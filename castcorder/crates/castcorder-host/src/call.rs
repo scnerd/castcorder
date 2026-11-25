@@ -1062,12 +1062,19 @@ impl Call {
             } else {
                 &[]
             };
+            let length_s = library
+                .take_times(take)
+                .ok()
+                .and_then(|t| t.length_us())
+                .filter(|_| recording_take != Some(take))
+                .map(|us| u32::try_from((us + 500_000) / 1_000_000).unwrap_or(u32::MAX));
             out.push(crate::tracks::take_tracks(
                 take,
                 &entries,
                 &receiving,
                 aligned.get(&t),
                 recording,
+                length_s,
             ));
         }
         TracksState {
@@ -1279,6 +1286,7 @@ impl Call {
                 warn!(take = take.0, error = %e, "no take directory; safety tracks and host microphone not recorded")
             }
         }
+        self.mark_take(take, false, host_us);
         // Everyone is Starting until their device acks: said at once, so
         // producers see it however soon the acks come.
         self.recorders.take_started(take);
@@ -1294,6 +1302,7 @@ impl Call {
         self.status = TakeStatus::Idle;
         let host_us = self.timeline.now_us();
         info!(room = %self.room_name, call = ?self.call_id, take = take.0, host_us, "take stopped");
+        self.mark_take(take, true, host_us);
         self.touch_due_us = 0;
         self.safety.stop_take();
         if let Some(p) = &self.participant
@@ -1307,6 +1316,16 @@ impl Call {
         self.recorders_dirty = true;
         self.publish_recorders();
         Ok((take, host_us))
+    }
+
+    /// Record when a take started or stopped in its folder, for its length
+    /// on the Recordings panel; a failure costs only that.
+    fn mark_take(&mut self, take: TakeId, stopped: bool, host_us: i64) {
+        if let Some(l) = self.library.as_mut()
+            && let Err(e) = l.mark_take(take, stopped, host_us)
+        {
+            warn!(take = take.0, stopped, error = %e, "take time not recorded");
+        }
     }
 
     /// Rotate the call secret; the new link, if reachable through a rendezvous.
