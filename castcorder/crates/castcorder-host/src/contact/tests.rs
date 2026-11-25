@@ -544,3 +544,31 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
             .is_err()
     );
 }
+
+/// A code made for a person chosen in a call (cast-40e.10) pairs that
+/// person with nobody asked; anyone else using it waits for a decision.
+#[test]
+fn a_code_made_for_a_chosen_person_is_accepted_at_once_for_them_only() {
+    let (a, b, c) = (install("Ann", 54), install("Bob", 55), install("Cy", 56));
+    let code = a
+        .contacts
+        .new_code_for(&b.persons.id(), crate::wall_ms())
+        .unwrap();
+    // Cy got hold of it: Cy's request waits, and Ann declines it.
+    let r = pair(&a, &c, &code, || {
+        let v = a.contacts.view(crate::wall_ms());
+        assert_eq!(v.requests.len(), 1, "Cy's request waits for Ann");
+        a.contacts.decide(&v.requests[0].device, false).unwrap();
+    });
+    assert!(matches!(r, Err(w) if w.contains("declined")));
+    // A fresh one for Bob: accepted at once, nobody asked.
+    let code = a
+        .contacts
+        .new_code_for(&b.persons.id(), crate::wall_ms())
+        .unwrap();
+    let name = pair(&a, &b, &code, || panic!("Ann was asked")).unwrap();
+    assert_eq!(name, "Ann");
+    assert!(a.contacts.get(&b.persons.id()).is_some());
+    assert!(b.contacts.get(&a.persons.id()).is_some());
+    assert!(a.contacts.view(crate::wall_ms()).requests.is_empty());
+}

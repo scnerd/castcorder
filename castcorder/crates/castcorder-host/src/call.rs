@@ -23,6 +23,7 @@ use castcorder_protocol::{
 use std::path::PathBuf;
 
 mod link;
+mod offer;
 mod routing;
 mod status;
 mod sync;
@@ -549,6 +550,15 @@ impl Call {
         self.rooms.link(&self.room_name)
     }
 
+    /// The person of a joined participant: its certificate's, or this
+    /// host's own for the host machine (cast-40e.10).
+    fn person_in_call(&self, conn: crate::room::ConnId) -> Option<String> {
+        match self.room.joined_person(conn)? {
+            (_, true) => Some(self.rooms.persons.id()),
+            (p, false) => p.map(str::to_string),
+        }
+    }
+
     /// Tell every producer the room state, and everyone who is in the call
     /// when that changed (display names for their video tiles).
     fn broadcast_room(&mut self) {
@@ -566,6 +576,7 @@ impl Call {
             .map(|p| ParticipantName {
                 participant: p.participant,
                 name: p.name.clone(),
+                person: self.person_in_call(p.participant.0),
             })
             .collect();
         if names == self.names_sent {
@@ -1461,6 +1472,7 @@ impl Call {
                         self.offer_call_track(id, &call, &offer)
                     }
                     Request::ClockPing { .. } => unreachable!("answered above"),
+                    Request::OfferContact { to, code } => self.offer_contact(id.0, to, &code),
                     // Only a contact link asks these (`link`).
                     Request::SharedRooms | Request::Invite(_) => Response::Error {
                         kind: ErrorKind::NotAllowed,

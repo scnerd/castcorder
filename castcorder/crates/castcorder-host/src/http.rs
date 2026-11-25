@@ -215,7 +215,11 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
     };
     let person = || r.person.clone().ok_or_else(|| "no person".to_string());
     match path {
-        "/contacts/code" => match app.contacts.new_code(crate::wall_ms()) {
+        // With `person`: for that person, chosen in a call (cast-40e.10).
+        "/contacts/code" => match r.person.as_deref().map_or_else(
+            || app.contacts.new_code(crate::wall_ms()),
+            |p| app.contacts.new_code_for(p, crate::wall_ms()),
+        ) {
             Ok(code) => json(
                 200,
                 serde_json::json!({

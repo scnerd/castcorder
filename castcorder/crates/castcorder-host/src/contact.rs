@@ -109,6 +109,9 @@ struct Code {
     secret: [u8; 16],
     made_ms: u64,
     claim: Option<Claim>,
+    /// Made for this person (its id) from a call (cast-40e.10): their
+    /// request is accepted at once; anyone else's waits as usual.
+    for_person: Option<String>,
 }
 
 /// A contact request waiting for a decision, as the home shows it.
@@ -407,15 +410,28 @@ impl Contacts {
 
     /// Make a one-time contact code.
     pub fn new_code(&self, now_ms: u64) -> io::Result<ContactCode> {
+        self.make_code(None, now_ms)
+    }
+
+    /// Make a one-time contact code for the person `person` (an id), whom
+    /// this install's person chose in a call (cast-40e.10): a request with
+    /// it from an install of that person is accepted with nobody asked,
+    /// since choosing them was the decision.
+    pub fn new_code_for(&self, person: &str, now_ms: u64) -> io::Result<ContactCode> {
+        self.make_code(Some(person.to_string()), now_ms)
+    }
+
+    fn make_code(&self, for_person: Option<String>, now_ms: u64) -> io::Result<ContactCode> {
         let secret = crate::rendezvous::random()?;
         let mut g = self.lock();
         g.expire(now_ms);
+        info!(for_person = ?for_person, "made a contact code");
         g.codes.push(Code {
             secret,
             made_ms: now_ms,
             claim: None,
+            for_person,
         });
-        info!("made a contact code");
         Ok(ContactCode {
             host: self.host.id(),
             secret,
@@ -859,15 +875,25 @@ impl Inner {
         let code = &mut self.codes[i];
         let claim = match &mut code.claim {
             None => {
-                code.claim = Some(Claim {
+                let chosen = code.for_person.as_deref() == Some(person_id(&person).as_str());
+                let c = Claim {
                     key,
                     person,
                     cert: cert.clone(),
                     name: crate::http::clean_label(&ask.name),
-                    state: ClaimState::Waiting,
-                });
-                info!(device, name = %ask.name, "contact request waiting for a decision");
-                return ContactAnswer::Pending;
+                    state: if chosen {
+                        ClaimState::Accepted
+                    } else {
+                        ClaimState::Waiting
+                    },
+                };
+                code.claim = Some(c.clone());
+                if !chosen {
+                    info!(device, name = %ask.name, "contact request waiting for a decision");
+                    return ContactAnswer::Pending;
+                }
+                info!(device, name = %ask.name, "contact request from the person chosen in a call");
+                c
             }
             Some(c) if c.key != key => return refuse("contact code already used by someone else"),
             Some(c) => c.clone(),

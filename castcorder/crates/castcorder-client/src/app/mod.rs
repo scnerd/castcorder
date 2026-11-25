@@ -49,6 +49,7 @@
 
 mod background;
 mod capture;
+mod contact_offer;
 mod data;
 mod devices;
 mod home;
@@ -411,6 +412,12 @@ struct Ui {
     take_started_us: RwSignal<Option<i64>>,
     /// How long the take has run ("1:05"), empty until this device knows the host's clock.
     elapsed: RwSignal<String>,
+    /// Each participant's person, as the host verified it
+    /// (`Event::Participants`; cast-40e.10).
+    persons: RwSignal<Vec<(u64, Option<String>)>>,
+    /// An offer to become contacts from another participant, shown until
+    /// answered (`Event::ContactOffer`).
+    contact_offer: RwSignal<Option<contact_offer::Offer>>,
     /// The last producer request's result.
     producer_result: RwSignal<String>,
     /// The last debug request's result.

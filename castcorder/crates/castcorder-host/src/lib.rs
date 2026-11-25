@@ -467,6 +467,20 @@ impl Running {
         ))
     }
 
+    /// [`contact_code`](Self::contact_code) for the person `person` (an id)
+    /// chosen in a call (cast-40e.10): their request is accepted at once.
+    pub fn contact_code_for(&self, person: &str) -> Result<Vec<String>, String> {
+        let code = self
+            .contacts
+            .new_code_for(person, wall_ms())
+            .map_err(|e| e.to_string())?;
+        Ok(http::code_links(
+            &self.call_links,
+            &self.links,
+            &code.fragment(),
+        ))
+    }
+
     /// Accept or decline the contact request of an app install.
     pub fn decide_contact(&self, device: &str, accept: bool) -> Result<(), String> {
         self.contacts.decide(device, accept)

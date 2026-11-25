@@ -1,0 +1,127 @@
+//! Add as contact from a call (docs/design.md "Contacts", cast-40e.10).
+//!
+//! - In the People panel, "Add as contact" on a participant whose device is
+//!   linked to another person: this install makes a contact code for that
+//!   person (accepted at once when they use it) and the host passes it on
+//!   (`Request::OfferContact`).
+//! - The other side shows "NAME wants to add you as a contact" below the top
+//!   bar (`Event::ContactOffer`): Accept uses the code through its own
+//!   install; a page that cannot reach an install of its person says to get
+//!   the app.
+//! - Only the host machine's page reaches its install today (its own
+//!   `/contacts`).
+
+use castcorder_protocol::{ParticipantId, Request};
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+
+use super::Ui;
+use super::lifecycle::producer_request;
+use super::person::person_request;
+
+/// An offer to become contacts, as the call shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Offer {
+    /// Who offers, by display name.
+    pub name: String,
+    /// Their install's contact code (or a link to it).
+    pub code: String,
+}
+
+/// This page can act for its install's person: make and use contact codes.
+pub(super) fn can_pair(ui: Ui) -> bool {
+    ui.role.get().host_machine
+}
+
+/// The person of participant `id`, as the host verified it.
+pub(super) fn person_of(ui: Ui, id: u64) -> Option<String> {
+    ui.persons
+        .get()
+        .into_iter()
+        .find(|(p, _)| *p == id)
+        .and_then(|(_, person)| person)
+}
+
+/// Whether to offer "Add as contact" on participant `id`
+/// ([`crate::pairing::offerable`]), when this page can pair.
+pub(super) fn offerable(ui: Ui, id: u64) -> bool {
+    let me = ui.participant.get().parse::<u64>().ok();
+    can_pair(ui) && crate::pairing::offerable(me, &ui.persons.get(), id)
+}
+
+/// Offer participant `id` to become contacts.
+pub(super) fn offer(ui: Ui, id: u64) {
+    let Some(person) = person_of(ui, id) else {
+        return;
+    };
+    let name = ui
+        .room
+        .get_untracked()
+        .and_then(|r| r.participants.into_iter().find(|p| p.participant.0 == id))
+        .map(|p| p.name)
+        .unwrap_or_default();
+    spawn_local(async move {
+        let body = serde_json::json!({ "person": person }).to_string();
+        let code = person_request("/contacts/code", Some(body))
+            .await
+            .and_then(|text| {
+                let v: serde_json::Value =
+                    serde_json::from_str(&text).map_err(|e| e.to_string())?;
+                v["links"][0]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "no contact link".to_string())
+            });
+        match code {
+            Ok(code) => {
+                producer_request(
+                    ui,
+                    Request::OfferContact {
+                        to: ParticipantId(id),
+                        code,
+                    },
+                    false,
+                );
+                ui.notes
+                    .update(|v| v.push(format!("Asked {name} to become contacts.")));
+            }
+            Err(e) => ui
+                .notes
+                .update(|v| v.push(format!("Could not ask {name} to become contacts: {e}"))),
+        }
+    });
+}
+
+/// Accept the offer shown: use its code through this page's install.
+fn accept(ui: Ui, offer: Offer) {
+    ui.contact_offer.set(None);
+    spawn_local(async move {
+        let body = serde_json::json!({ "code": offer.code }).to_string();
+        let note = match person_request("/contacts/add", Some(body)).await {
+            Ok(_) => format!("Adding {} as a contact.", offer.name),
+            Err(e) => format!("Could not add {}: {e}", offer.name),
+        };
+        ui.notes.update(|v| v.push(note));
+    });
+}
+
+/// "NAME wants to add you as a contact", below the top bar.
+#[component]
+pub(super) fn ContactOfferBanner(ui: Ui) -> impl IntoView {
+    move || {
+        ui.contact_offer.get().map(|o| {
+            let pair = can_pair(ui);
+            let accepted = o.clone();
+            view! {
+                <div id="contact-offer" class="banner" role="status">
+                    <span><strong>{format!("{} wants to add you as a contact", o.name)}</strong>
+                        {(!pair).then_some(". Get the Castcorder app to keep in touch.")}</span>
+                    <button id="contact-offer-dismiss" class="btn" on:click=move |_| ui.contact_offer.set(None)>"Not now"</button>
+                    {pair.then(|| view! {
+                        <button id="contact-offer-accept" class="btn primary" on:click=move |_| accept(ui, accepted.clone())>"Accept"</button>
+                    })}
+                </div>
+            }
+        })
+    }
+}

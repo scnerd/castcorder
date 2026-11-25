@@ -280,6 +280,11 @@ pub(super) fn pump_rpc(ui: Ui) {
                     });
                 }
                 Event::Participants(list) => {
+                    ui.persons.set(
+                        list.iter()
+                            .map(|p| (p.participant.0, p.person.clone()))
+                            .collect(),
+                    );
                     let names: Vec<(u64, String)> = list
                         .into_iter()
                         .map(|p| (p.participant.0, p.name))
@@ -336,6 +341,11 @@ pub(super) fn pump_rpc(ui: Ui) {
                         None => e.cameras.push((participant.0, on)),
                     }
                     show_camera(participant.0, on);
+                }
+                Event::ContactOffer { from, name, code } => {
+                    info!(call = %ctx.call, from = from.0, "offered to become contacts");
+                    ui.contact_offer
+                        .set(Some(super::contact_offer::Offer { name, code }));
                 }
                 Event::JoinRefusedLocked { name } => {
                     info!(call = %ctx.call, device = %ctx.device, name = %name, "someone tried to join the locked call");

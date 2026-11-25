@@ -1100,6 +1100,15 @@ impl Room {
     }
 
     /// The room as producers see it.
+    /// A joined connection's person (verified from its certificate) and
+    /// whether it is the host machine; `None` if it has not joined.
+    pub fn joined_person(&self, conn: ConnId) -> Option<(Option<&str>, bool)> {
+        self.conns
+            .get(&conn)
+            .filter(|c| c.joined)
+            .map(|c| (c.person.as_deref(), c.at_host))
+    }
+
     pub fn state(&self, link: Option<String>) -> RoomState {
         RoomState {
             locked: self.saved.locked,
