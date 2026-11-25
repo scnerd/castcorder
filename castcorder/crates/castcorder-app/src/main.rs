@@ -24,12 +24,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use castcorder_app::AppArgs;
-use castcorder_app::host_control::{Badge, HostControl, tray_badge, tray_text};
+use castcorder_app::host_control::{Badge, HostControl, bridge_allows, tray_badge, tray_text};
 use castcorder_app::{deeplink, remembered};
+use tauri::ipc::CapabilityBuilder;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, Manager, RunEvent, State, Webview, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -89,6 +92,7 @@ fn main() {
             host: host.clone(),
             smoke: args.smoke,
         })
+        .invoke_handler(tauri::generate_handler![contact_code, contact_add])
         .setup(move |app| {
             setup(app.handle(), &args);
             Ok(())
@@ -217,6 +221,7 @@ fn setup(app: &AppHandle, args: &AppArgs) {
                 "HOST_READY http={}",
                 status.producer_url.trim_end_matches('/')
             );
+            bridge(app, &shell.host);
             WebviewUrl::External(status.producer_url.parse().expect("producer url"))
         }
         Err(e) => {
@@ -528,6 +533,52 @@ fn call_window(app: &AppHandle, url: &str, visible: bool) {
     {
         tracing::warn!(error = %e, "no call window");
     }
+}
+
+/// Let the call window reach this install's contacts from the project's own
+/// pages (cast-40e.10): "Add as contact" and accepting an offer in a call.
+/// Remote pages reach no command unless a capability names their origin.
+fn bridge(app: &AppHandle, host: &HostControl) {
+    let Some(origin) = host.project_origin() else {
+        return;
+    };
+    let capability = CapabilityBuilder::new("call-window-contacts")
+        .local(false)
+        .window(CALL)
+        .remote(format!("{origin}/*"))
+        .permission("allow-contact-code")
+        .permission("allow-contact-add");
+    match app.add_capability(capability) {
+        Ok(()) => tracing::info!(%origin, "the call window may reach the contacts"),
+        Err(e) => tracing::warn!(error = %e, "the call window cannot reach the contacts"),
+    }
+}
+
+/// The host, if `webview` may use the bridge ([`bridge_allows`]).
+fn bridged<'a>(webview: &Webview, shell: &'a State<'_, Shell>) -> Result<&'a HostControl, String> {
+    let url = webview.url().map_err(|e| e.to_string())?;
+    let origin = shell.host.project_origin();
+    if bridge_allows(webview.label(), url.as_str(), origin.as_deref()) {
+        Ok(&shell.host)
+    } else {
+        Err("only the call window on the project's pages may do that".into())
+    }
+}
+
+/// The call window's "Add as contact": a code for `person` alone.
+#[tauri::command]
+fn contact_code(
+    webview: Webview,
+    shell: State<'_, Shell>,
+    person: String,
+) -> Result<String, String> {
+    bridged(&webview, &shell)?.contact_code_for(&person)
+}
+
+/// The call window's Accept on an offer: use its contact code.
+#[tauri::command]
+fn contact_add(webview: Webview, shell: State<'_, Shell>, code: String) -> Result<(), String> {
+    bridged(&webview, &shell)?.add_contact(&code)
 }
 
 /// Percent-encode everything but unreserved characters.

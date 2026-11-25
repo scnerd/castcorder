@@ -352,6 +352,13 @@ impl Running {
         ))
     }
 
+    /// The origin (`scheme://host[:port]`) of the project's pages on the
+    /// rendezvous, if the host uses one: the only pages the app's call window
+    /// lets reach this install (cast-40e.10).
+    pub fn project_origin(&self) -> Option<String> {
+        self.call_links.base.as_ref().map(|b| origin_of(&b.base))
+    }
+
     /// The link the app hands its own call window so it links itself to
     /// this person (cast-40e.7): the origin of the project's pages on the
     /// rendezvous and the code's fragment (`link.<host-id>.<secret>`), whose
