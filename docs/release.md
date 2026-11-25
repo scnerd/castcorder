@@ -93,9 +93,12 @@ The private key must never enter the repository.
    linux-x86_64). Tauri's updater reads it from
    `https://github.com/scnerd/castcorder/releases/latest/download/latest.json`.
 
-4. Still to do in the app (cast-qci): add `tauri-plugin-updater`, put the public key and
-   that endpoint under `plugins.updater` in `tauri.conf.json`, and check for updates.
-   Installed apps only update once a release containing that has been installed.
+4. The app side is done (cast-qci): signed builds carry the public key and endpoint
+   (the release workflow's overlay config), and the tray menu then has "Check for
+   updates", which becomes "Install Castcorder X" when a newer signed release exists.
+   Unsigned builds and development builds have no update item. Installed apps only
+   update once a release containing the updater has been installed, so verify on the
+   first signed release that the tray item appears and finds the next one.
 
 ## Reference
 

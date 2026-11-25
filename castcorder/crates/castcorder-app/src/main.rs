@@ -25,6 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod updates;
+
 use castcorder_app::AppArgs;
 use castcorder_app::host_control::{
     Badge, HostControl, TrayRoom, bridge_allows, tray_badge, tray_room_label, tray_room_of,
@@ -103,6 +105,9 @@ fn main() {
             joined_rooms_save
         ])
         .setup(move |app| {
+            if !args.smoke {
+                updates::register(app.handle());
+            }
             setup(app.handle(), &args);
             Ok(())
         })
@@ -315,6 +320,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let update_item = updates::item(app, smoke);
     let menu = Menu::with_items(
         app,
         &[
@@ -324,10 +330,13 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             &folder,
             &rooms_menu,
             &login,
-            &PredefinedMenuItem::separator(app)?,
-            &quit_item,
         ],
     )?;
+    if let Some(u) = &update_item {
+        menu.append(u)?;
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&quit_item)?;
     let mut tray = TrayIconBuilder::with_id("castcorder")
         .tooltip("Castcorder: hosting")
         .menu(&menu)
@@ -352,6 +361,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
                     tracing::warn!(error = %e, "recordings folder not opened");
                 }
             }
+            updates::ID => updates::clicked(app),
             "quit" => quit(app),
             id => {
                 if let Some(room) = tray_room_of(id) {
