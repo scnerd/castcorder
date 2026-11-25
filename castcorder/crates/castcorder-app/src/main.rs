@@ -516,7 +516,11 @@ fn call_window(app: &AppHandle, url: &str, visible: bool) {
         }
         return;
     }
+    // Links the window to this install's person on the project's pages
+    // (cast-40e.7), so the app joins its person's rooms as a producer.
+    let script = app.state::<Shell>().host.call_window_script();
     if let Err(e) = WebviewWindowBuilder::new(app, CALL, WebviewUrl::External(parsed))
+        .initialization_script(&script)
         .title("Castcorder call")
         .inner_size(1100.0, 760.0)
         .visible(visible)

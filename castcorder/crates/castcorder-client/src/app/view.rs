@@ -920,6 +920,9 @@ pub(super) fn App() -> impl IntoView {
     // this browser to a person, not a call; a contact code
     // (`#contact.<host-id>.<secret>`) says to paste it into the app.
     let link_page = hash.starts_with("#link.") || hash.starts_with("#contact.");
+    if !link_page {
+        super::person::auto_link();
+    }
     let bad_link = hash.len() > 1 && link.is_none() && !link_page;
     // A LAN or host machine page joins the room its `?room=` names.
     let room_param = query_param("room").unwrap_or_default();
