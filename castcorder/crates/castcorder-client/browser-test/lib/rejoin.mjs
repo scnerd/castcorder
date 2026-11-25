@@ -69,7 +69,11 @@ export async function rejoinChecks({ rendezvous } = {}) {
   await leave(G);
   await waitFor(async () => (await card(G).count()) === 1, 'G lists the room', 15000);
   await waitFor(async () => (await chip(G)) === 'Live', 'G sees the room live', 20000);
-  const who = await text(G, '#my-rooms li[data-room="rejoin-show"] .in-call');
+  // A status asked at the moment of Leave can still count G (the host has
+  // not dropped its connection yet); the next ask (every 20 s) has it right.
+  let who = '';
+  await waitFor(async () => { who = await text(G, '#my-rooms li[data-room="rejoin-show"] .in-call'); return !who.includes('Gus'); },
+    'G\x27s list drops G from who is in the call', 30000).catch(() => {});
   check(who.includes('Pat') && who.includes('Kim') && !who.includes('Gus'), 'the list says who is in the call: ' + who);
   check((await card(G).locator('.call-row[data-call="' + first + '"]').count()) === 1, 'the list holds the call G was in');
   await G.reload();
