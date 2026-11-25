@@ -14,7 +14,8 @@
 //!   (cast-40e.11). A room it was kicked from says only that. Trusted devices
 //!   are told the room's call link; only the live room names who is in it;
 //!   the calls listed are only those the device was in (each call's
-//!   `devices.jsonl`, read without opening the call's library).
+//!   `devices.jsonl`, or for a call from before that list its take manifests,
+//!   read without opening the call's library).
 //! - A rejoin offer may name a call ([`Call::enter_named`]): it lands there if
 //!   that is the room's current call; otherwise only a producer of the room
 //!   who was in that call continues it, and only while the room is not live
@@ -24,7 +25,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use castcorder_core::library::{MEMBERS, members_in};
+use castcorder_core::library::{MANIFEST, MEMBERS, members_in, parse_manifest};
 use castcorder_link::DeviceProof;
 use castcorder_link::wire::{CallStatus, HostStatus, RoomStatus};
 
@@ -32,11 +33,30 @@ use super::Call;
 use crate::room::{Membership, NOT_CURRENT};
 use crate::rooms;
 
-/// The devices listed in a call folder's `devices.jsonl` (none if absent).
+/// The devices a call folder names: those in its `devices.jsonl`; for a call
+/// from before that list existed (no such file), those named in its take
+/// manifests (and logs), read as saved without opening the call's library
+/// (cast-oem; [`super::routing::call_library`] makes the same exception).
 fn members(call_dir: &Path) -> BTreeSet<String> {
-    std::fs::read(call_dir.join(MEMBERS))
-        .map(|b| members_in(&b))
-        .unwrap_or_default()
+    match std::fs::read(call_dir.join(MEMBERS)) {
+        Ok(b) => members_in(&b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => manifest_devices(call_dir),
+        Err(_) => BTreeSet::new(),
+    }
+}
+
+/// The devices named in a call folder's manifests, read-only (a torn tail is
+/// ignored, nothing is repaired).
+fn manifest_devices(call_dir: &Path) -> BTreeSet<String> {
+    let mut dirs: Vec<String> = rooms::take_numbers(call_dir)
+        .into_iter()
+        .map(|n| format!("take{n:02}"))
+        .collect();
+    dirs.push("logs".into());
+    dirs.iter()
+        .filter_map(|d| std::fs::read(call_dir.join(d).join(MANIFEST)).ok())
+        .flat_map(|b| parse_manifest(&b).0.into_keys().map(|(device, _)| device))
+        .collect()
 }
 
 impl Call {
@@ -212,5 +232,61 @@ impl Call {
             self.choose_call(&room, Some(target.to_string()))?;
         }
         self.enter_call()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use castcorder_core::library::Library;
+    use castcorder_core::sync::SyncConfig;
+    use castcorder_port_disk::FsStorage;
+    use castcorder_protocol::{SourceId, SourceKind, TakeId, TrackOffer};
+
+    /// A call folder with one take whose manifest names `device`, made through
+    /// the library; `list` keeps or drops the call's device list.
+    fn call_dir(name: &str, device: &str, list: bool) -> std::path::PathBuf {
+        let room =
+            std::env::temp_dir().join(format!("castcorder-status-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&room);
+        std::fs::create_dir_all(&room).unwrap();
+        let root = FsStorage::new(&room).unwrap();
+        let mut lib = Library::open(&root, "c1", SyncConfig::default()).unwrap();
+        lib.offer(
+            "Ann",
+            &TrackOffer {
+                device: device.into(),
+                take: TakeId(1),
+                source: SourceId("mic".into()),
+                kind: SourceKind::Audio,
+                name: "t".into(),
+                size: 1,
+                root: [7; 32],
+                format: "wav".into(),
+            },
+        )
+        .unwrap();
+        if list {
+            lib.admit("other").unwrap();
+        }
+        drop(lib);
+        let dir = room.join("c1");
+        if !list {
+            let _ = std::fs::remove_file(dir.join(MEMBERS));
+        }
+        dir
+    }
+
+    #[test]
+    fn a_call_from_before_the_device_list_names_its_manifest_devices() {
+        let dir = call_dir("nolist", "dev-a", false);
+        assert!(!dir.join(MEMBERS).exists());
+        assert_eq!(members(&dir), BTreeSet::from(["dev-a".to_string()]));
+    }
+
+    #[test]
+    fn a_call_with_a_device_list_uses_only_the_list() {
+        let dir = call_dir("list", "dev-a", true);
+        assert_eq!(members(&dir), BTreeSet::from(["other".to_string()]));
     }
 }
