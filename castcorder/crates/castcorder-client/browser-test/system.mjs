@@ -374,6 +374,11 @@ try {
   await A.click('#take-stop');
   await waitFor(async () => (await text(A, '#take-status')).startsWith('idle'), 'take 2 stopped', 10000);
   await waitFor(async () => /file\(s\) left/.test(await text(B, '#sync-state')), 'B shows its take waiting to sync', 30000);
+  // The You left page (cast-n56.4): what was left and the delivery progress.
+  const leftSummary = await text(B, '#left-summary');
+  const leftFiles = await text(B, '#left-files');
+  check(await B.isVisible('#left-call') && leftSummary.includes('2 takes recorded') && /^0 of [1-9]\d* files sent/.test(leftFiles),
+    'B lands on You left with its takes and the files still to send: ' + leftSummary + ' / ' + leftFiles);
   const TAKE2 = join(callDir(LIBRARY, 'system-test'), 'take02');
   const synced2 = () => existsSync(TAKE2) && readdirSync(TAKE2).filter((f) => f.endsWith('_mic.wav')).length >= 2
     && !readdirSync(TAKE2).some((f) => f.endsWith('.journal') || f.endsWith('.obao'));
@@ -386,6 +391,8 @@ try {
   check(sealed() > sealedBefore && logs.B.some((l) => l.includes('answer applied') && l.includes('sync_only = true')),
     'B\'s sync-only connection was signalled through the rendezvous mailbox');
   await waitFor(async () => !/file\(s\) left/.test(await text(B, '#sync-state')), 'B says its take was delivered', 30000);
+  check((await text(B, '#sync-state')).includes('reached the host') && !(await B.isVisible('#left-files')),
+    'You left says when every recording reached the host: ' + (await text(B, '#sync-state')));
   check(true, 'B\'s take 2 synced after it left, over a sync-only connection through the rendezvous');
 
   // Link requests through the mailbox (lib/personlink.mjs).

@@ -501,3 +501,15 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .person-row .contact-text { flex: 1; }
 .person-row .avatar { width: 34px; height: 34px; font-size: 12px; }
 .new-room-people { display: flex; flex-direction: column; gap: 6px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+
+/* After Leave (cast-n56.4) */
+.left-main { flex: 1; display: flex; justify-content: center; align-items: center; padding: 24px; }
+.left-card { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 12px; padding: 28px;
+  border-radius: 16px; background: var(--surface); border: 1px solid var(--border); }
+.left-card h1 { margin: 0; font-size: 28px; }
+.left-sync { display: flex; flex-direction: column; gap: 8px; padding: 14px; border-radius: 12px;
+  background: var(--surface2); }
+.left-sync-head { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.left-card .row { flex-wrap: wrap; }
+.left-sync .disk-bar { background: var(--surface); }
+.left-sync .disk-bar > span { background: var(--accent); }

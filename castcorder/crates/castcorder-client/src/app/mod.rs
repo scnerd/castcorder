@@ -53,6 +53,7 @@ mod data;
 mod devices;
 mod home;
 mod join;
+mod left;
 mod lifecycle;
 mod lobby;
 mod media;
