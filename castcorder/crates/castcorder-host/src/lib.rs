@@ -30,6 +30,7 @@ mod rooms;
 mod tls;
 pub use tls::unverified_client;
 mod tracks;
+mod turn_stream;
 pub mod transcript;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
