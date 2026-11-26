@@ -226,6 +226,14 @@ pub enum HostEvent {
         /// Which guest.
         guest: GuestId,
     },
+    /// The guest's connection started or stopped going through a TURN
+    /// relay (on the first selected candidate pair, and on every change).
+    GuestPath {
+        /// Which guest.
+        guest: GuestId,
+        /// Through a relay.
+        relayed: bool,
+    },
     /// A data channel opened.
     ChannelOpen {
         /// Which guest.
@@ -258,6 +266,9 @@ pub struct GuestStats {
     pub keyframe_requests_sent: u64,
     /// Keyframe requests this guest sent to the host.
     pub keyframe_requests_received: u64,
+    /// The connection goes through a TURN relay (the host's or the
+    /// guest's); `None` until a candidate pair is selected (cast-9ok).
+    pub relayed: Option<bool>,
     /// Offers the host sent this guest after the first exchange.
     pub renegotiations: u64,
     /// The latest send-side bandwidth estimate toward this guest.
@@ -846,6 +857,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.config.bandwidth_cap_kbps,
         );
         g.sync_only = sync_only;
+        g.remote_relays = relay_candidates(offer_sdp);
         // Renegotiate on join: the newcomer gets every existing track (a
         // sync-only connection none: see `Guest::handle_track_open`).
         for t in self.guests.iter().flat_map(|o| o.tracks_in.iter()) {
@@ -960,8 +972,33 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             }
             self.events.extend(g.events.drain(..));
         }
+        self.note_paths();
 
         if more_waiting { now_d } else { deadline }
+    }
+
+    /// Tell when a guest's connection starts or stops going through a TURN
+    /// relay (cast-9ok): the selected pair's local address is one of the
+    /// host's relayed addresses, or its remote one a relay candidate of the
+    /// guest's.
+    fn note_paths(&mut self) {
+        let ours = [self.relays[0].relayed(), self.relays[1].relayed()];
+        for g in &mut self.guests {
+            let Some((local, remote)) = g.pair else {
+                continue;
+            };
+            let relayed = ours.contains(&Some(local)) || g.remote_relays.contains(&remote);
+            if g.relayed != Some(relayed) {
+                g.relayed = Some(relayed);
+                g.stats.relayed = Some(relayed);
+                let _e = g.span.clone().entered();
+                info!(relayed, "connection path");
+                self.events.push_back(HostEvent::GuestPath {
+                    guest: g.id,
+                    relayed,
+                });
+            }
+        }
     }
 
     fn route(&mut self, payload: Vec<u8>, source: SocketAddr, now: Instant, via: usize) {
@@ -1196,5 +1233,44 @@ fn propagate(p: &Propagated, guests: &mut [Guest], now: Instant) {
                 g.request_keyframe(*mid_in, *layer, *kind, now);
             }
         }
+    }
+}
+
+/// The addresses of the relay candidates in an SDP (`a=candidate:... typ
+/// relay`).
+pub(crate) fn relay_candidates(sdp: &str) -> Vec<SocketAddr> {
+    sdp.lines()
+        .filter_map(|l| l.trim().strip_prefix("a=candidate:"))
+        .filter_map(|c| {
+            let f: Vec<&str> = c.split_whitespace().collect();
+            let typ = f.iter().position(|w| *w == "typ")?;
+            if f.get(typ + 1) != Some(&"relay") || typ < 6 {
+                return None;
+            }
+            let ip: IpAddr = f[4].parse().ok()?;
+            let port: u16 = f[5].parse().ok()?;
+            Some(SocketAddr::new(ip, port))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod relay_candidate_tests {
+    #[test]
+    fn only_relay_candidates_are_read_from_sdp() {
+        let sdp = "v=0\r\n\
+a=candidate:1 1 udp 2122260223 192.168.1.5 50000 typ host generation 0\r\n\
+a=candidate:2 1 udp 1686052607 203.0.113.9 40000 typ srflx raddr 192.168.1.5 rport 50000\r\n\
+a=candidate:3 1 udp 41885439 198.51.100.7 3478 typ relay raddr 203.0.113.9 rport 40000\r\n\
+a=candidate:4 1 udp 41885438 2001:db8::7 3479 typ relay raddr :: rport 0\r\n\
+a=candidate:5 1 udp 1 bad port typ relay\r\n";
+        assert_eq!(
+            super::relay_candidates(sdp),
+            vec![
+                "198.51.100.7:3478".parse().unwrap(),
+                "[2001:db8::7]:3479".parse().unwrap(),
+            ]
+        );
+        assert!(super::relay_candidates("v=0\r\n").is_empty());
     }
 }

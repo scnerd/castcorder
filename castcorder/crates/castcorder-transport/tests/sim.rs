@@ -177,6 +177,10 @@ fn media_from_a_reaches_b_byte_identical() {
     assert!(video.iter().all(|r| r.data.len() == 3000));
     // Nothing is ever echoed back to its sender.
     assert!(w.g(0).received_from("A-", MediaKind::Audio).is_empty());
+    // A direct connection is told as such (cast-9ok).
+    for (id, _) in &w.guests {
+        assert_eq!(w.host.stats(*id).unwrap().relayed, Some(false));
+    }
 }
 
 #[test]

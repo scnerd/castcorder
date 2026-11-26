@@ -389,6 +389,14 @@ fn guests_reach_a_relay_only_host_through_turn_and_the_allocation_is_refreshed()
     assert_eq!(stats.permissions, 2, "one permission per guest address");
     assert!(stats.sent > 0 && stats.received > 0, "{stats:?}");
     assert!(w.turn.relayed_datagrams > 0);
+    // Both connections are told to go through the relay (cast-9ok).
+    w.run_until(Duration::from_secs(3), |w| {
+        let (a, b) = (w.guests[0].0, w.guests[1].0);
+        w.host.stats(a).unwrap().relayed.is_some() && w.host.stats(b).unwrap().relayed.is_some()
+    });
+    for (id, _) in &w.guests {
+        assert_eq!(w.host.stats(*id).unwrap().relayed, Some(true));
+    }
 
     for round in 0..25 {
         w.exchange_audio(round);

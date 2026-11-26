@@ -217,8 +217,11 @@ pub(super) fn disconnect() {
         e.offer_requests.clear();
         e.mic_requests.clear();
         e.camera_requests.clear();
+        e.source_requests.clear();
         // The host sends every camera's state again after the next join.
         e.cameras.clear();
+        // And every connection's path.
+        e.relayed.clear();
         e.join_request = None;
         e.status_request = None;
         e.participant = None;
@@ -447,6 +450,7 @@ pub(super) fn leave(ui: Ui) {
     ui.joined.set(false);
     ui.connection.set("left".into());
     ui.participant.set(String::new());
+    ui.sources.set(Vec::new());
     ui.role.set(Role::default());
     ui.level.set(0.0);
     ui.levels.set(VecDeque::new());

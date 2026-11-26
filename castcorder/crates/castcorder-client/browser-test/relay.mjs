@@ -193,6 +193,10 @@ try {
     return y.packets > x.packets && y.bytes > x.bytes ? { x, y } : null;
   }, 'B receiving audio from A', 30000, 0);
   check(true, 'B hears A through the relay (' + Math.round((flowing.y.packets - flowing.x.packets) / 2) + ' pkt/s)');
+  // cast-9ok: the host tells everyone each connection goes through the relay.
+  await waitFor(async () => await B.isVisible('#remote .tile[data-origin^="A-"] .tile-relay'), 'B shows A\x27s tile as relayed', 15000);
+  await waitFor(async () => await A.isVisible('.stage > .tile .tile-relay'), 'A shows its own tile as relayed', 15000);
+  check(true, 'the Relay badge shows on A\x27s tile at B and on A\x27s own tile');
 
   await waitFor(async () => (await text(A, '#level-db')) !== '-inf dBFS', 'A level meter');
   const post = async (path) => {

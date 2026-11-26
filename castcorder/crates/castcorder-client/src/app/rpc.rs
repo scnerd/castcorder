@@ -89,6 +89,7 @@ pub(super) fn pump_rpc(ui: Ui) {
     let mut chips = false;
     let mut refusals = false;
     let mut left: Vec<u64> = Vec::new();
+    let mut changes = Vec::new();
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -135,6 +136,16 @@ pub(super) fn pump_rpc(ui: Ui) {
                         Ok(id) => e.camera_requests.push(id),
                         Err(err) => warn!(error = ?err, "camera report not sent"),
                     }
+                    // And producers learn this device's sources (cast-swn),
+                    // then whenever they change (`devices::bind`).
+                    let list = super::devices::sources(ui, false);
+                    match rpc.send(Request::DeviceSources(list.clone())) {
+                        Ok(id) => {
+                            e.source_requests.push(id);
+                            super::devices::reported(Some(list));
+                        }
+                        Err(err) => warn!(error = ?err, "sources not reported"),
+                    }
                 }
                 other => {
                     warn!(call = %ctx.call, device = %ctx.device, response = ?other, "join refused");
@@ -163,6 +174,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 Some(Response::Done) => {}
                 Some(other) => warn!(response = ?other, "camera report refused"),
                 None => e.camera_requests.push(id),
+            }
+        }
+        for id in std::mem::take(&mut e.source_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "source report refused"),
+                None => e.source_requests.push(id),
             }
         }
         for id in std::mem::take(&mut e.ack_requests) {
@@ -299,6 +317,8 @@ pub(super) fn pump_rpc(ui: Ui) {
                             .filter(|p| !names.iter().any(|(q, _)| q == p)),
                     );
                     e.cameras.retain(|(p, _)| !left.contains(p));
+                    e.relayed.retain(|p| !left.contains(p));
+                    ui.relayed.set(e.relayed.clone());
                     e.names = names;
                     relabel = true;
                 }
@@ -342,6 +362,21 @@ pub(super) fn pump_rpc(ui: Ui) {
                     }
                     show_camera(participant.0, on);
                 }
+                Event::Relayed {
+                    participant,
+                    relayed,
+                } => {
+                    info!(call = %ctx.call, device = %ctx.device, guest = participant.0, relayed,
+                        "connection path: {}", if relayed { "relay" } else { "direct" });
+                    e.relayed.retain(|p| *p != participant.0);
+                    if relayed {
+                        e.relayed.push(participant.0);
+                    }
+                    ui.relayed.set(e.relayed.clone());
+                    show_relay(participant.0, relayed);
+                }
+                Event::DeviceSources(list) => ui.sources.set(list),
+                Event::ChangeSource { by, change } => changes.push((by, change)),
                 Event::ContactOffer { from, name, code } => {
                     info!(call = %ctx.call, from = from.0, "offered to become contacts");
                     ui.contact_offer
@@ -362,6 +397,9 @@ pub(super) fn pump_rpc(ui: Ui) {
     });
     if refusals {
         background::recount(ui);
+    }
+    for (by, change) in changes {
+        super::devices::remote_change(ui, &by, change);
     }
     if !left.is_empty() {
         remove_tiles(&left);
@@ -770,6 +808,15 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     let words = doc.create_element("span").ok()?;
     let _ = chip.append_child(&words);
     let _ = tile.append_child(&chip);
+    // Through a TURN relay (cast-9ok): shown once the host says so.
+    let relay = doc.create_element("div").ok()?;
+    relay.set_class_name("tile-relay");
+    let _ = relay.set_attribute("title", super::view::RELAY_TITLE);
+    relay.set_text_content(Some("Relay"));
+    let relayed =
+        origin_participant(origin).is_some_and(|p| with_engine(|e| e.relayed.contains(&p)));
+    let _ = relay.toggle_attribute_with_force("hidden", !relayed);
+    let _ = tile.append_child(&relay);
     // Its camera may have been signalled off before its first track came.
     if signalled_camera(origin_participant(origin)) == Some(false) {
         let _ = tile.class_list().add_1("camera-off");
@@ -819,6 +866,29 @@ fn show_camera(participant: u64, on: bool) {
             } else {
                 t.class_list().add_1("camera-off")
             };
+        }
+    }
+}
+
+/// Show or hide the Relay badge on a participant's tile (if it exists yet;
+/// [`remote_tile`] applies it to one made later).
+fn show_relay(participant: u64, relayed: bool) {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i)
+            && t.get_attribute("data-origin")
+                .as_deref()
+                .and_then(origin_participant)
+                == Some(participant)
+            && let Ok(Some(badge)) = t.query_selector(".tile-relay")
+        {
+            let _ = badge.toggle_attribute_with_force("hidden", !relayed);
         }
     }
 }

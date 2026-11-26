@@ -41,6 +41,23 @@ pub fn track_of(item: &str) -> &str {
         .unwrap_or(item)
 }
 
+/// Whether an outbox item is webcam video (the track, its timing or sidecar):
+/// the camera source is named `takeNNNN-<n>-cam`.
+pub fn is_video_item(name: &str) -> bool {
+    track_of(name).ends_with("-cam")
+}
+
+/// The producer's warning that these guests' video will not upload while their
+/// connection is relayed: a relay's bytes are billed, video is large, so the
+/// host never pulls it that way (cast-btf).
+pub fn relay_video_warning(names: &[String]) -> String {
+    format!(
+        "Video from {} can't be received automatically while their connection goes through a relay server. \
+         It stays on their device and uploads once their connection is direct; audio is not affected.",
+        names.join(", ")
+    )
+}
+
 /// This device's tracks, each with where it stands: `listed` are the tracks
 /// on this device as (name, recording now); `progress` the outbox's
 /// transfers in flight by item name; `delivered` the items the host
@@ -92,6 +109,18 @@ mod tests {
 
     fn s(v: &[&str]) -> BTreeSet<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn video_items_and_the_producer_warning() {
+        assert!(is_video_item("take0001-9-cam"));
+        assert!(is_video_item("take0001-9-cam-timing"));
+        assert!(is_video_item("take0001-9-cam-sidecar"));
+        assert!(!is_video_item("take0001-9-mic"));
+        let w = relay_video_warning(&["Ann".into(), "Bo".into()]);
+        assert!(
+            w.contains("Ann, Bo") && w.contains("relay") && w.contains("audio is not affected")
+        );
     }
 
     #[test]

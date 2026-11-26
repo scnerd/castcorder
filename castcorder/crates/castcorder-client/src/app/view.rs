@@ -8,6 +8,9 @@
 
 use super::*;
 
+/// What the Relay badge (tiles, People) means (cast-9ok).
+pub(super) const RELAY_TITLE: &str = "Connected to the host through a relay server: it works, but may add delay. Video recordings wait to upload until the connection is direct; audio uploads as usual.";
+
 /// Up to two initials of a display name, for avatars.
 pub(super) fn initials(name: &str) -> String {
     let s: String = name
@@ -200,6 +203,20 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
     let me = move || ui.participant.get().parse::<u64>().ok();
     // A row's second line: is their machine recording, and its room left.
+    // Guests whose video cannot reach the host while their connection is
+    // relayed (cast-btf), for the warning beside the Record video control.
+    let relayed_names = move || -> Vec<String> {
+        let relayed = ui.relayed.get();
+        rows()
+            .into_iter()
+            .filter(|p| !p.host_machine && relayed.contains(&p.participant.0))
+            .map(|p| p.name)
+            .collect()
+    };
+    let video_warning = move || {
+        let names = relayed_names();
+        (record_video() && !names.is_empty()).then(|| crate::delivery::relay_video_warning(&names))
+    };
     let state_of = move |id: u64| {
         ui.recorders
             .get()
@@ -221,6 +238,9 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                     <span class="pname">{p.name.clone()}</span>
                                     {move || (me() == Some(p.participant.0)).then(|| view! { <span class="muted">" (you)"</span> })}
                                     <span class="chip role-chip">{if p.host_machine { "Host" } else if p.producer { "Producer" } else { "Guest" }}</span>
+                                    {move || ui.relayed.get().contains(&p.participant.0).then(|| view! {
+                                        <span class="chip relay-chip" title={RELAY_TITLE}>"Relay"</span>
+                                    })}
                                 </span>
                                 <span class="person-state small muted">
                                     {move || state_of(p.participant.0).map(|(words, state)| view! {
@@ -230,6 +250,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                         <span class="pdisk" class:low=d.low>{format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))}</span>
                                     })}
                                 </span>
+                                {move || (me() != Some(p.participant.0)).then(|| super::devices::remote_sources(ui, p.participant.0))}
                             </span>
                             <Show when=move || !p.host_machine>
                                 <div class="menu-wrap">
@@ -252,6 +273,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     </For>
                 </ul>
             </div>
+            <p id="video-relay-warning" class="warn-text small" role="status"
+                hidden=move || video_warning().is_none()>{move || video_warning().unwrap_or_default()}</p>
             <details class="fold" id="room-settings">
                 <summary><span>"Room settings"</span>
                     <span class="small muted">{move || format!("{}{}{}",
@@ -283,6 +306,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     </div>
                     <span class="small">"Recording: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
                         <span class="muted">" (changes apply from the next take)"</span></span>
+                    <span class="small warn-text" id="record-video-relay-note"
+                        hidden=move || video_warning().is_none()>{move || video_warning().unwrap_or_default()}</span>
                     <div class="row">
                         <button id="record-video" class="btn" on:click=move |_| act(RoomAction::SetRecordVideo(!record_video()))>
                             {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
@@ -688,6 +713,13 @@ fn Call(ui: Ui) -> impl IntoView {
         (true, false) => "Your track: recording",
         (false, _) => "Your microphone: not recording",
     };
+    // This device's own connection goes through a relay (cast-9ok).
+    let self_relayed = move || {
+        ui.participant
+            .get()
+            .parse::<u64>()
+            .is_ok_and(|me| ui.relayed.get().contains(&me))
+    };
     view! {
         <div class="call" hidden=move || !ui.joined.get()>
             <header class="topbar" class:recording=take_rec>
@@ -772,6 +804,8 @@ fn Call(ui: Ui) -> impl IntoView {
                             // Hidden from you only: not the camera-off avatar (cast-n56.5).
                             <div class="self-hidden-note" id="self-hidden-note">"Self view hidden. Others still see you."</div>
                             <div class="tile-name">{move || format!("{} (you)", ui.name.get())}</div>
+                            <div class="tile-relay" title={RELAY_TITLE}
+                                hidden=move || !self_relayed()>"Relay"</div>
                             // Your own level, from the same readings as the dock's waveform.
                             <div class="tile-level" id="self-level">
                                 <div class="tile-wave">{(WAVE_LEN - SELF_WAVE..WAVE_LEN).map(|i| view! { <span style=move || bar(i)></span> }).collect_view()}</div>
@@ -1013,6 +1047,8 @@ pub(super) fn App() -> impl IntoView {
         video_rec: RwSignal::new(String::new()),
         profile_warnings: RwSignal::new(Vec::new()),
         recorders: RwSignal::new(Vec::new()),
+        relayed: RwSignal::new(Vec::new()),
+        sources: RwSignal::new(Vec::new()),
         takes: RwSignal::new(None),
         progress: RwSignal::new(Default::default()),
         delivered: RwSignal::new(Default::default()),
