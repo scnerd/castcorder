@@ -142,12 +142,7 @@ impl HostMailbox {
         let turn = relay::turn(&self.env)?;
         // A woken object has lost the host's gates: read them back.
         if ask != RelayAsk::Registered && self.mb.borrow().gates_of(host).is_none() {
-            if let Ok(Some(g)) = self
-                .state
-                .storage()
-                .get::<Vec<String>>(RELAY_GATES)
-                .await
-            {
+            if let Ok(Some(g)) = self.state.storage().get::<Vec<String>>(RELAY_GATES).await {
                 self.mb.borrow_mut().restore_gates(host, g);
             }
         }
@@ -298,10 +293,7 @@ impl DurableObject for HostMailbox {
         if let Some(host) = registered {
             // A new registration starts with no gates (the host sends them next).
             let _ = self.state.storage().delete(RELAY_GATES).await;
-            if let Some(grant) = self
-                .grant(id, host, RelayAsk::Registered, None, now)
-                .await
-            {
+            if let Some(grant) = self.grant(id, host, RelayAsk::Registered, None, now).await {
                 fill_registered(&mut outs, id, grant);
             }
         }
