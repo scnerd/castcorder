@@ -515,6 +515,14 @@ fn spawn_aligner(
     tx
 }
 
+/// Whether a guest's video may be pulled: only over a connection known to be
+/// direct. Video is large, and over a relay its bytes are billed to the
+/// project (cast-btf), so a connection whose path is not known yet, or is
+/// relayed, gets audio and logs only.
+pub(crate) fn video_allowed(paths: &BTreeMap<GuestId, bool>, guest: GuestId) -> bool {
+    paths.get(&guest) == Some(&false)
+}
+
 impl Call {
     /// The host's rooms, with `room` (the security of the room named
     /// `room_name`) loaded and no call open yet: the first person to enter a
@@ -1203,6 +1211,7 @@ impl Call {
             &mut self.syncers,
             &mut libs,
             recording || busy,
+            &self.paths,
         ));
         // Tracks filed into a call by key (a sync-only connection's, or a
         // guest's OfferCallTrack): those of the open call and of other calls.
@@ -1218,6 +1227,7 @@ impl Call {
             return;
         }
         for (id, p) in &mut self.pullers {
+            p.set_video_allowed(video_allowed(&self.paths, *id));
             if let Err(e) = p.poll(&mut libs, recording) {
                 warn!(guest = id.0, error = %e, "outbox sync failed on disk");
                 gone.push(*id);
@@ -1674,7 +1684,14 @@ impl Call {
                     .map(|p| format!("{} (host microphone)", p.name)),
             )
             .collect();
-        serde_json::json!({ "take": take, "guests": guests, "sync_only": self.syncers_json() })
+        // Guests whose video waits for a direct connection (cast-btf).
+        let video_waiting: serde_json::Map<String, serde_json::Value> = self
+            .pullers
+            .iter()
+            .filter(|(_, p)| p.video_held() > 0)
+            .map(|(id, p)| (id.0.to_string(), p.video_held().into()))
+            .collect();
+        serde_json::json!({ "take": take, "guests": guests, "video_waiting_for_direct": video_waiting, "sync_only": self.syncers_json() })
             .to_string()
     }
 
@@ -2312,5 +2329,22 @@ mod start_order_tests {
             |_| Err(std::io::Error::other("disk full")),
         );
         assert!(announced && r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod video_path_tests {
+    use super::video_allowed;
+    use castcorder_transport::GuestId;
+    use std::collections::BTreeMap;
+
+    /// Video (billed bytes over a relay) is pulled only over a connection
+    /// known to be direct: relayed, and not yet known, both hold it back.
+    #[test]
+    fn video_needs_a_known_direct_path() {
+        let paths = BTreeMap::from([(GuestId(1), false), (GuestId(2), true)]);
+        assert!(video_allowed(&paths, GuestId(1)), "direct");
+        assert!(!video_allowed(&paths, GuestId(2)), "relayed");
+        assert!(!video_allowed(&paths, GuestId(3)), "path not known yet");
     }
 }

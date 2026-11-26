@@ -227,15 +227,41 @@ pub(super) fn YourRecordings(ui: Ui) -> impl IntoView {
         let progress: BTreeMap<String, u8> = ui.progress.get();
         rows(&listed, &progress, &ui.delivered.get())
     };
+    let relayed = move || {
+        ui.participant
+            .get()
+            .parse::<u64>()
+            .is_ok_and(|me| ui.relayed.get().contains(&me))
+    };
+    // A video track (or its timing) that has not reached the host while this
+    // device's connection is relayed: the host will not pull it that way.
+    let held = move |name: &str, d: Delivery| {
+        relayed()
+            && crate::delivery::is_video_item(name)
+            && matches!(d, Delivery::Waiting | Delivery::Uploading(_))
+    };
+    let any_held = move || list().iter().any(|(n, d)| held(n, *d));
     view! {
         <h3>"Your recordings"</h3>
+        <p id="video-relay-note" class="small warn-text" role="status" hidden=move || !any_held()>
+            "Your video is waiting: this connection goes through a relay server, and video is too large to send that way. "
+            "It stays safe on this device and uploads by itself once your connection is direct. "
+            "Your audio uploads as usual. Keep this page open, or come back to it in this same browser."
+        </p>
         <p class="small muted">"Your recordings are saved in this browser first and sent to the host after each take; "
            "each is removed here once the host has it. Keep this page open (or come back to it "
            "in this same browser) until every recording says delivered."</p>
         <ul id="your-recordings" class="list small">
             <For each=list key=|(n, d)| format!("{n}{d:?}") let:row>
                 <li data-name=row.0.clone() data-state=delivery_key(row.1)>
-                    {format!("{}: {}", row.0, row.1.label())}
+                    {
+                        let (name, d) = row.clone();
+                        move || if held(&name, d) {
+                            format!("{name}: waiting for a direct connection")
+                        } else {
+                            format!("{name}: {}", d.label())
+                        }
+                    }
                 </li>
             </For>
         </ul>

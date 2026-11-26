@@ -882,6 +882,8 @@ pub struct Puller<S: Storage, C: MessageChannel> {
     completed_elsewhere: Vec<(String, ManifestEntry)>,
     closed: bool,
     broken: bool,
+    /// Whether video may be requested (see [`Puller::set_video_allowed`]).
+    video_allowed: bool,
 }
 
 impl<S: Storage, C: MessageChannel> Puller<S, C> {
@@ -899,7 +901,32 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             completed_elsewhere: Vec::new(),
             closed: false,
             broken: false,
+            video_allowed: true,
         }
+    }
+
+    /// Whether this guest's video tracks may be requested now. Video is large
+    /// (about 8 GB an hour), so the host holds it back while the connection is
+    /// relayed (a relay's bytes are billed): queued video stays queued, a video
+    /// transfer under way asks for nothing more (units already requested still
+    /// land), and everything else (audio, logs) carries on. Allowed by default.
+    pub fn set_video_allowed(&mut self, allowed: bool) {
+        self.video_allowed = allowed;
+    }
+
+    fn held(&self, offer: &TrackOffer) -> bool {
+        !self.video_allowed && offer.kind == SourceKind::Video
+    }
+
+    /// Video tracks waiting only for [`set_video_allowed`](Self::set_video_allowed):
+    /// the ones queued, and the one under way.
+    pub fn video_held(&self) -> usize {
+        self.queue.values().filter(|o| self.held(o)).count()
+            + self
+                .current
+                .as_ref()
+                .filter(|c| self.held(&c.entry.offer))
+                .map_or(0, |_| 1)
     }
 
     /// Record the guest's offer and queue the track (or, if already verified,
@@ -984,8 +1011,15 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
     }
 
     /// Whether nothing is queued or in progress.
+    /// Video held back by [`set_video_allowed`](Self::set_video_allowed) is not
+    /// something to do: a puller with only that left is idle.
     pub fn is_idle(&self) -> bool {
-        self.queue.is_empty() && self.current.is_none() && self.done.is_empty()
+        self.queue.values().all(|o| self.held(o))
+            && self
+                .current
+                .as_ref()
+                .is_none_or(|c| self.held(&c.entry.offer))
+            && self.done.is_empty()
     }
 
     /// The channel went away: commit what was received. (A host crash skips
@@ -1004,9 +1038,38 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
         !self.closed
     }
 
+    /// Set the transfer under way aside, keeping what it received: it goes back
+    /// in the queue and resumes from there when it may run again.
+    fn park_current<L: Libraries<S>>(&mut self, libs: &mut L) -> io::Result<()> {
+        let Some(mut c) = self.current.take() else {
+            return Ok(());
+        };
+        let offer = c.entry.offer.clone();
+        let call = library_of(libs, c.call.as_deref())
+            .map(|l| l.call().to_string())
+            .unwrap_or_default();
+        info!(call = %call, device = %offer.device, take = offer.take.0, track = %c.entry.file,
+            "video sync paused: the connection is not direct");
+        c.receiver.on_disconnect()?;
+        // Its call closed meanwhile: the guest offers the track again.
+        if !call.is_empty() {
+            self.queue
+                .insert(queue_key(&call, c.call.as_deref(), &offer), offer);
+        }
+        Ok(())
+    }
+
     fn start_next<L: Libraries<S>>(&mut self, libs: &mut L) -> io::Result<()> {
-        while let Some((key, offer)) = self.queue.pop_first() {
-            let call = key.4;
+        while let Some(next) = self
+            .queue
+            .iter()
+            .find(|(_, o)| !self.held(o))
+            .map(|(k, _)| k.clone())
+        {
+            let Some(offer) = self.queue.remove(&next) else {
+                break;
+            };
+            let call = next.4;
             let take = offer.take;
             let Ok(lib) = library_of(libs, call.as_deref()) else {
                 warn!(call = ?call, device = %offer.device, track = %offer.name,
@@ -1062,6 +1125,13 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             }
             self.done.pop_front();
             progress = true;
+        }
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.held(&c.entry.offer))
+        {
+            self.park_current(libs)?;
         }
         if self.current.is_none() && !recording {
             self.start_next(libs)?;
