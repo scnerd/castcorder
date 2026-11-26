@@ -40,7 +40,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { VERSION } from './lib/version.mjs';
-import { callDir, relayProof } from './lib/helpers.mjs';
+import { callDir, relayProof, unfold } from './lib/helpers.mjs';
 import { COTURN_IMAGE, docker, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -104,9 +104,9 @@ function check(ok, what) {
   console.log((ok ? 'ok   ' : 'BAD  ') + what);
 }
 
-const logs = { A: [], B: [], C: [] };
+const logs = { A: [], B: [], C: [], P: [] };
 const browsers = [];
-async function openGuest(name, url, extraArgs = []) {
+async function openGuest(name, url, extraArgs = [], display = null) {
   const browser = await chromium.launch({
     headless: true,
     args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
@@ -118,7 +118,7 @@ async function openGuest(name, url, extraArgs = []) {
   const page = await ctx.newPage();
   page.on('console', (m) => logs[name].push(m.text()));
   page.on('pageerror', (e) => logs[name].push('[pageerror] ' + e.message));
-  await page.goto(url);
+  await page.goto(display ? url + '/?name=' + encodeURIComponent(display) : url);
   await page.waitForSelector('#join');
   return page;
 }
@@ -293,6 +293,43 @@ try {
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
 
+  // cast-btf: video does not sync over a relayed connection. The producer at
+  // the host machine is warned beside the Record video control, naming the
+  // relayed guests; a relayed guest is told its video is waiting while its
+  // audio still reaches the host.
+  const P = await openGuest('P', HTTP, [], 'Prod');
+  await P.click('#join');
+  await waitFor(async () => (await text(P, '#participant')).length > 0, 'the producer joined at the host machine', 45000);
+  await waitFor(async () => (await P.locator('#guests li[data-name="A"] .relay-chip').count()) === 1
+    && (await P.locator('#guests li[data-name="B"] .relay-chip').count()) === 1, 'the People list marks A and B as relayed', 20000);
+  await unfold(P);
+  check(!(await P.isVisible('#video-relay-warning')) && !(await P.isVisible('#record-video-relay-note')),
+    'no video warning while video recording is off');
+  await P.click('#record-video');
+  await waitFor(async () => (await text(P, '#room-record-video')) === 'audio and video', 'the producer turned video recording on', 10000);
+  await waitFor(async () => await P.isVisible('#video-relay-warning'), 'the producer is warned about relayed video', 10000);
+  const warn = await text(P, '#video-relay-warning');
+  check(warn.includes('A') && warn.includes('B') && warn.includes('relay server') && await P.isVisible('#record-video-relay-note'),
+    'the producer is warned beside Record video, naming the relayed guests: ' + warn);
+  const started3 = await post('/take/start');
+  check(started3[0] === 200, 'take 3, with video, started: ' + started3.join(' '));
+  await sleep(4000);
+  const stopped3 = await post('/take/stop');
+  check(stopped3[0] === 200, 'take 3 stopped: ' + stopped3.join(' '));
+  const held = (n) => n.includes('-cam');
+  await waitFor(async () => await A.isVisible('#video-relay-note'), 'A is told its video is waiting', 30000);
+  const rowsA = await A.evaluate(() => [...document.querySelectorAll('#your-recordings li')].map((e) => e.dataset.name + ' ' + e.dataset.state + ' | ' + e.textContent));
+  check(rowsA.some((r) => held(r) && r.includes('waiting for a direct connection')),
+    'A lists its video as waiting for a direct connection: ' + rowsA.join('; '));
+  const TAKE3 = join(callDir(LIBRARY, 'relay-test'), 'take03');
+  const audioVerified = await waitFor(() => existsSync(TAKE3) && readdirSync(TAKE3).some((f) => /^take03_A.*\.wav$/.test(f))
+    && readdirSync(TAKE3).some((f) => /^take03_B.*\.wav$/.test(f)), 'take 3 audio synced', 60000).then(() => true, () => false);
+  await sleep(5000);
+  const videoFiles = existsSync(TAKE3) ? readdirSync(TAKE3).filter((f) => /cam/.test(f)) : [];
+  check(audioVerified && videoFiles.length === 0,
+    'over the relay take 3 audio synced to the host and no video did (video files: ' + (videoFiles.join(', ') || 'none') + ')');
+  await P.click('#record-video');
+
   // A guest that starts without relay credentials (forced relay policy, so no
   // candidates at all) asks for them once its connection stalls, and then
   // connects through the relay (cast-lxt.12). It asked for none up front.
@@ -309,7 +346,7 @@ try {
   // Relay metering. The guests leave, so their coturn sessions end and coturn
   // reports their bytes (it counts a session when it ends).
   const HOST_ID = link.split('#')[1].split('.')[0];
-  for (const p of [A, B, C]) await p.close().catch(() => {});
+  for (const p of [A, B, C, P]) await p.close().catch(() => {});
   const usageOf = async () => {
     const r = await fetch('http://' + RV_ADMIN + '/usage').then((x) => x.json()).catch(() => null);
     return ((r && r.hosts) || []).find((h) => h.host === HOST_ID);
