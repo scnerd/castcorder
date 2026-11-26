@@ -331,7 +331,12 @@ try {
   await sleep(4000);
   const stopped3 = await post2('/take/stop');
   check(stopped3[0] === 200, 'the take stopped: ' + stopped3.join(' '));
-  await waitFor(async () => await G.isVisible('#video-relay-note'), 'G is told its video is waiting', 30000);
+  await waitFor(async () => await G.isVisible('#video-relay-note'), 'G is told its video is waiting', 30000).catch(async (e) => {
+    const rows = await G.evaluate(() => [...document.querySelectorAll('#your-recordings li')].map((x) => x.dataset.name + ' ' + x.dataset.state));
+    console.log('G recordings: ' + JSON.stringify(rows) + '; relayed chip on own tile: ' + (await G.isVisible('.stage > .tile .tile-relay')));
+    console.log('G cam/video log: ' + logs.G.filter((l) => /cam|video/i.test(l)).slice(-12).join(' | ').slice(0, 2500));
+    throw e;
+  });
   const rowsG = await G.evaluate(() => [...document.querySelectorAll('#your-recordings li')].map((e) => e.dataset.name + ' ' + e.dataset.state + ' | ' + e.textContent));
   check(rowsG.some((r) => r.includes('-cam') && r.includes('waiting for a direct connection')),
     'G lists its video as waiting for a direct connection: ' + rowsG.join('; '));
