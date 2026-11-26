@@ -24,9 +24,56 @@ pub fn locked_join_refused(notes: &mut Vec<String>, name: &str) {
     }
 }
 
+/// Add what a producer changed on this device (cast-swn): "`by` `what`."
+/// A later change of the same kind by anyone replaces the earlier note, so
+/// only where each source stands now is said (`kind` names it, as
+/// "microphone").
+pub fn source_changed(notes: &mut Vec<String>, by: &str, kind: &str, what: &str) {
+    let line = format!("{by} {what}.");
+    let tag = format!(" your {kind} ");
+    match notes
+        .iter()
+        .position(|n| n.ends_with('.') && n.contains(" (producer) ") && n.contains(&tag))
+    {
+        Some(i) => notes[i] = line,
+        None => notes.push(line),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_later_source_change_replaces_the_earlier_one() {
+        let mut n = vec!["Camera blocked.".to_string()];
+        source_changed(
+            &mut n,
+            "Ann (producer)",
+            "microphone",
+            "switched your microphone to USB",
+        );
+        source_changed(
+            &mut n,
+            "Ann (producer)",
+            "backup",
+            "added Built-in as your backup microphone",
+        );
+        source_changed(
+            &mut n,
+            "Bo (producer)",
+            "microphone",
+            "switched your microphone to Built-in",
+        );
+        assert_eq!(
+            n,
+            vec![
+                "Camera blocked.".to_string(),
+                "Bo (producer) switched your microphone to Built-in.".into(),
+                "Ann (producer) added Built-in as your backup microphone.".into(),
+            ]
+        );
+    }
 
     #[test]
     fn a_repeat_is_counted_not_stacked() {

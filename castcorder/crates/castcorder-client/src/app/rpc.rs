@@ -89,6 +89,7 @@ pub(super) fn pump_rpc(ui: Ui) {
     let mut chips = false;
     let mut refusals = false;
     let mut left: Vec<u64> = Vec::new();
+    let mut changes = Vec::new();
     let (statuses, ctx) = with_engine(|e| {
         let mut statuses = Vec::new();
         let ctx = e.ctx.clone();
@@ -135,6 +136,16 @@ pub(super) fn pump_rpc(ui: Ui) {
                         Ok(id) => e.camera_requests.push(id),
                         Err(err) => warn!(error = ?err, "camera report not sent"),
                     }
+                    // And producers learn this device's sources (cast-swn),
+                    // then whenever they change (`devices::bind`).
+                    let list = super::devices::sources(ui, false);
+                    match rpc.send(Request::DeviceSources(list.clone())) {
+                        Ok(id) => {
+                            e.source_requests.push(id);
+                            super::devices::reported(Some(list));
+                        }
+                        Err(err) => warn!(error = ?err, "sources not reported"),
+                    }
                 }
                 other => {
                     warn!(call = %ctx.call, device = %ctx.device, response = ?other, "join refused");
@@ -163,6 +174,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 Some(Response::Done) => {}
                 Some(other) => warn!(response = ?other, "camera report refused"),
                 None => e.camera_requests.push(id),
+            }
+        }
+        for id in std::mem::take(&mut e.source_requests) {
+            match rpc.take_response(id) {
+                Some(Response::Done) => {}
+                Some(other) => warn!(response = ?other, "source report refused"),
+                None => e.source_requests.push(id),
             }
         }
         for id in std::mem::take(&mut e.ack_requests) {
@@ -357,6 +375,8 @@ pub(super) fn pump_rpc(ui: Ui) {
                     ui.relayed.set(e.relayed.clone());
                     show_relay(participant.0, relayed);
                 }
+                Event::DeviceSources(list) => ui.sources.set(list),
+                Event::ChangeSource { by, change } => changes.push((by, change)),
                 Event::ContactOffer { from, name, code } => {
                     info!(call = %ctx.call, from = from.0, "offered to become contacts");
                     ui.contact_offer
@@ -377,6 +397,9 @@ pub(super) fn pump_rpc(ui: Ui) {
     });
     if refusals {
         background::recount(ui);
+    }
+    for (by, change) in changes {
+        super::devices::remote_change(ui, &by, change);
     }
     if !left.is_empty() {
         remove_tiles(&left);

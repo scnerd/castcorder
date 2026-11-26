@@ -16,9 +16,9 @@ use castcorder_port_disk::FsStorage;
 use castcorder_port_net::UdpDatagramSocket;
 use castcorder_protocol::rpc::RpcServer;
 use castcorder_protocol::{
-    DeviceDisk, ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName, ProfileIssue,
-    Recorder, Request, Response, RoomAction, SourceAck, SourceKind, SourceState, TakeId,
-    TakeStatus, TrackOffer, TracksState,
+    DeviceDisk, ErrorKind, Event, PROTOCOL_VERSION, ParticipantId, ParticipantName,
+    ParticipantSources, ProfileIssue, Recorder, Request, Response, RoomAction, SourceAck,
+    SourceChange, SourceKind, SourceList, SourceState, TakeId, TakeStatus, TrackOffer, TracksState,
 };
 use std::path::PathBuf;
 
@@ -427,6 +427,15 @@ pub struct Call {
     recorders_dirty: bool,
     /// When the recorders are next checked anyway (roles change too).
     recorders_due_us: i64,
+    /// Each joined guest's sources as its device last reported them
+    /// ([`Request::DeviceSources`], cast-swn).
+    sources: BTreeMap<GuestId, SourceList>,
+    /// The [`Event::DeviceSources`] each joined connection was last sent,
+    /// whether the sources changed since, and when they are next checked
+    /// anyway (a connection may have become a producer).
+    sources_sent: BTreeMap<u64, Vec<ParticipantSources>>,
+    sources_dirty: bool,
+    sources_due_us: i64,
     /// Sync-only connections ([`sync`]): not participants, never counted
     /// as anyone in the call.
     syncers: BTreeMap<GuestId, sync::Syncer>,
@@ -564,6 +573,10 @@ impl Call {
             recorders_sent: BTreeMap::new(),
             recorders_dirty: false,
             recorders_due_us: 0,
+            sources: BTreeMap::new(),
+            sources_sent: BTreeMap::new(),
+            sources_dirty: false,
+            sources_due_us: 0,
             syncers: BTreeMap::new(),
             links: BTreeMap::new(),
             transcripts: None,
@@ -856,6 +869,79 @@ impl Call {
                     continue;
                 }
                 self.recorders_sent.insert(id, view);
+            }
+        }
+    }
+
+    /// A device reported its sources (cast-swn): keep them for producers.
+    fn device_sources(&mut self, from: GuestId, list: SourceList) -> Response {
+        if !self.names.contains_key(&from) {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "join first".into(),
+            };
+        }
+        if self.sources.get(&from) != Some(&list) {
+            self.sources.insert(from, list);
+            self.sources_dirty = true;
+        }
+        Response::Done
+    }
+
+    /// A producer changes a participant's sources (cast-swn): pass it on to
+    /// that participant's device, which applies it as its own pick.
+    fn change_source(&mut self, by: GuestId, to: GuestId, change: SourceChange) -> Response {
+        if !self.names.contains_key(&to) {
+            return Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "no such participant in the call".into(),
+            };
+        }
+        let name = self.names.get(&by).cloned().unwrap_or_default();
+        info!(producer = by.0, guest = to.0, change = ?change, "producer changes a participant's sources");
+        let event = Event::ChangeSource { by: name, change };
+        match self.rpc.get_mut(&to).map(|rpc| rpc.emit(event)) {
+            Some(Ok(())) => Response::Done,
+            _ => Response::Error {
+                kind: ErrorKind::InvalidState,
+                message: "that participant's device is not connected".into(),
+            },
+        }
+    }
+
+    /// Send each joined producer every participant's sources if they changed
+    /// (cast-swn). Checked when they change and every half second (a role
+    /// may have changed); a connection that is not a producer gets nothing.
+    fn publish_sources(&mut self) {
+        let now = self.timeline.now_us();
+        if !self.sources_dirty && now < self.sources_due_us {
+            return;
+        }
+        self.sources_dirty = false;
+        self.sources_due_us = now + TRACKS_EVERY_US;
+        let all: Vec<ParticipantSources> = self
+            .sources
+            .iter()
+            .filter(|(g, _)| self.names.contains_key(g))
+            .map(|(g, s)| ParticipantSources {
+                participant: ParticipantId(g.0),
+                sources: s.clone(),
+            })
+            .collect();
+        let producers = self.room.producers();
+        let joined: Vec<u64> = self.names.keys().map(|g| g.0).collect();
+        self.sources_sent
+            .retain(|c, _| joined.contains(c) && producers.contains(c));
+        for id in joined {
+            if !producers.contains(&id) || self.sources_sent.get(&id) == Some(&all) {
+                continue;
+            }
+            if let Some(rpc) = self.rpc.get_mut(&GuestId(id)) {
+                if rpc.emit(Event::DeviceSources(all.clone())).is_err() {
+                    warn!(guest = id, "sources not sent: channel closed");
+                    continue;
+                }
+                self.sources_sent.insert(id, all.clone());
             }
         }
     }
@@ -1720,6 +1806,14 @@ impl Call {
                     Request::MicState { muted, level } => self.relay_mic(id, muted, level),
                     Request::CameraState { on } => self.relay_camera(id, on),
                     Request::SourceAck(ack) => self.source_ack(id, ack),
+                    Request::DeviceSources(list) => self.device_sources(id, list),
+                    Request::ChangeSource {
+                        participant,
+                        change,
+                    } => match self.room.authorize(id.0, Need::Producer, "change sources") {
+                        Err(message) => not_allowed(message),
+                        Ok(()) => self.change_source(id, GuestId(participant.0), change),
+                    },
                     Request::DiskFree { free_bytes } => {
                         self.disk.insert(id, free_bytes);
                         Response::Done
@@ -1791,6 +1885,9 @@ impl Call {
                                 self.disk.remove(&guest);
                                 self.cameras.remove(&guest);
                                 self.paths.remove(&guest);
+                                if self.sources.remove(&guest).is_some() {
+                                    self.sources_dirty = true;
+                                }
                                 self.unmet.remove(&guest);
                                 self.recorders.left(guest.0);
                                 self.recorders_dirty = true;
@@ -1839,6 +1936,7 @@ impl Call {
                     self.publish_tracks();
                     self.publish_disk();
                     self.publish_recorders();
+                    self.publish_sources();
                     self.publish_calls();
                     self.publish_transcript();
                     self.keep_active();
