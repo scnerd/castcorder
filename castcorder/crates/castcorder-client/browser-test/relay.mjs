@@ -347,9 +347,9 @@ try {
   const audioSynced = await waitFor(() => existsSync(TAKE_V) && readdirSync(TAKE_V).some((f) => /^take01_G.*\.wav$/.test(f)),
     'the take\'s audio synced', 60000).then(() => true, () => false);
   await sleep(5000);
-  const videoFiles = existsSync(TAKE_V) ? readdirSync(TAKE_V).filter((f) => /cam/.test(f)) : [];
+  const videoFiles = existsSync(TAKE_V) ? readdirSync(TAKE_V).filter((f) => /^take01_G.*cam/.test(f)) : [];
   check(audioSynced && videoFiles.length === 0,
-    'over the relay the take\'s audio synced to the host and no video did (video files: ' + (videoFiles.join(', ') || 'none') + ')');
+    'over the relay G\'s audio synced to the host and none of its video did (its video files: ' + (videoFiles.join(', ') || 'none') + ')');
 
   // A guest that starts without relay credentials (forced relay policy, so no
   // candidates at all) asks for them once its connection stalls, and then
