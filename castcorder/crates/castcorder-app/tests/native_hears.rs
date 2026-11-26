@@ -66,13 +66,16 @@ fn a_guest_hears_the_host_machines_native_participant() {
     let dist = root.join("dist");
     std::fs::create_dir_all(&dist).unwrap();
     std::fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
-    // Ten seconds of the generator's tone (stereo, 24-bit).
+    // A minute of the generator's tone (stereo, 24-bit): the file plays as
+    // fast as it is read, and ten seconds were over before the guest's track
+    // was negotiated, so only the encoder's last, partly padded frame
+    // arrived and its level depended on timing (quiet on Windows).
     let format = AudioFormat {
         sample_rate: 48_000,
         channels: 2,
         sample_format: SampleFormat::I24,
     };
-    let (_, pcm) = contract::drain(Generator::new(format, 480, Some(48_000 * 10)));
+    let (_, pcm) = contract::drain(Generator::new(format, 480, Some(48_000 * 60)));
     let source = root.join("source.wav");
     std::fs::write(&source, encode_wav(format, &pcm)).unwrap();
 
@@ -152,11 +155,13 @@ fn a_guest_hears_the_host_machines_native_participant() {
     // The host machine joins with the file as its microphone; the guest
     // collects what arrives and decodes it.
     host.join_native(NativeInput::File(source)).unwrap();
+    // Several 20 ms frames, the first of which is the decoder's warm-up.
+    const FRAMES: usize = 5;
     let mut dec = opus::Decoder::new(48_000, opus::Channels::Mono).unwrap();
     let mut decoded: Vec<f32> = Vec::new();
     let mut taken = 0usize;
     let end = Instant::now() + Duration::from_secs(20);
-    while decoded.len() < 960 && Instant::now() < end {
+    while decoded.len() < 960 * FRAMES && Instant::now() < end {
         guest.borrow_mut().step();
         rpc.poll().unwrap();
         let g = guest.borrow();
@@ -176,7 +181,7 @@ fn a_guest_hears_the_host_machines_native_participant() {
         sleep(Duration::from_millis(1));
     }
     assert!(
-        decoded.len() >= 960,
+        decoded.len() >= 960 * FRAMES,
         "the guest heard only {} samples of the host participant",
         decoded.len()
     );
@@ -187,7 +192,7 @@ fn a_guest_hears_the_host_machines_native_participant() {
     println!("the guest heard {} samples", decoded.len());
     // The generator's tone is 16384 of 32768 at peak: far above silence even
     // after the downmix and Opus.
-    let level = rms(&decoded);
+    let level = rms(&decoded[960..]);
     assert!(
         level > 0.05,
         "the host participant sounds silent: rms {level}"
