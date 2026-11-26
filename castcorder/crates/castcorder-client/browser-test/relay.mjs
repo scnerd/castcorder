@@ -337,9 +337,8 @@ try {
     console.log('G cam/video log: ' + logs.G.filter((l) => /cam|video/i.test(l)).slice(-12).join(' | ').slice(0, 2500));
     throw e;
   });
-  const rowsG = await G.evaluate(() => [...document.querySelectorAll('#your-recordings li')].map((e) => e.dataset.name + ' ' + e.dataset.state + ' | ' + e.textContent));
-  check(rowsG.some((r) => r.includes('-cam') && r.includes('waiting for a direct connection')),
-    'G lists its video as waiting for a direct connection: ' + rowsG.join('; '));
+  const noteG = await text(G, '#video-relay-note');
+  check(noteG.includes('relay server') && noteG.includes('audio uploads as usual'), 'G is told its video waits for a direct connection while its audio uploads as usual');
   const TAKE_V = join(callDir(LIB2, 'relay-video'), 'take01');
   const audioSynced = await waitFor(() => existsSync(TAKE_V) && readdirSync(TAKE_V).some((f) => /^take01_G.*\.wav$/.test(f)),
     'the take\'s audio synced', 60000).then(() => true, () => false);

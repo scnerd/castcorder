@@ -240,7 +240,8 @@ pub(super) fn YourRecordings(ui: Ui) -> impl IntoView {
             && crate::delivery::is_video_item(name)
             && matches!(d, Delivery::Waiting | Delivery::Uploading(_))
     };
-    let any_held = move || list().iter().any(|(n, d)| held(n, *d));
+    let any_held =
+        move || relayed() && ui.video_pending.get() > 0 || list().iter().any(|(n, d)| held(n, *d));
     view! {
         <h3>"Your recordings"</h3>
         <p id="video-relay-note" class="small warn-text" role="status" hidden=move || !any_held()>

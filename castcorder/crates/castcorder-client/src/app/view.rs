@@ -1052,6 +1052,7 @@ pub(super) fn App() -> impl IntoView {
         takes: RwSignal::new(None),
         progress: RwSignal::new(Default::default()),
         delivered: RwSignal::new(Default::default()),
+        video_pending: RwSignal::new(0),
         sync: RwSignal::new(String::new()),
         sync_left: RwSignal::new(0),
         sync_done: RwSignal::new(String::new()),
