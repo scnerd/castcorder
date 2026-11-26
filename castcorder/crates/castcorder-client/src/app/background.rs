@@ -118,7 +118,7 @@ pub(super) fn stop(ui: Ui) {
 }
 
 /// Ask the worker for every pending item of this host.
-pub(super) fn ask_outbox() {
+fn ask_outbox() {
     let scope = with_engine(|e| e.ctx.host_scope.clone());
     let msg = worker_cmd("outbox");
     set(&msg, "call", scope.as_str());

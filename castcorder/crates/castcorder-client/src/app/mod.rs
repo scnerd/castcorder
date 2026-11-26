@@ -693,8 +693,12 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 info!(call = %ctx.call, device = %ctx.device, track = %string(&d, "name"), "track synced to the host; local copy deleted");
                 background::synced(ui);
                 if !with_engine(|e| e.sync_only) {
-                    // The pending video count follows what the outbox still holds.
-                    background::ask_outbox();
+                    // The pending video count follows what the outbox still
+                    // holds: list it again, for this call as after a take.
+                    let msg = worker_cmd("outbox");
+                    set(&msg, "call", ctx.call.as_str());
+                    set(&msg, "legacy", ctx.host_scope.as_str());
+                    post_worker(&msg, None);
                 }
             }
             _ => {}
