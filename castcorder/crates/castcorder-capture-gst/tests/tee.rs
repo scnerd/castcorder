@@ -3,7 +3,7 @@
 //! pulls (stalled) does not touch the recording.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use castcorder_capture_gst::{GstCapture, LiveOptions};
@@ -76,8 +76,35 @@ fn a_stalled_live_branch_does_not_affect_the_recording() {
     let wav = Wav::new(SampleFormat::I16);
     // Never pulled: the live appsink fills, its thread blocks, and the leaky
     // queue drops the live audio instead of holding up the tee.
-    let (cap, live) = GstCapture::open_file_with_live(&wav.path, &LiveOptions::default()).unwrap();
-    let (_, data) = contract::drain(cap);
+    let (mut cap, live) =
+        GstCapture::open_file_with_live(&wav.path, &LiveOptions::default()).unwrap();
+    // The recording is drained on its own thread under a deadline: when this
+    // test once hung in CI (cast-c6s: 43 minutes until the job timeout) there
+    // was nothing to say where it stood. Now a stall fails in a minute and
+    // says how far the recording got and what the live branch had done.
+    let pulled = std::sync::Arc::new(AtomicU64::new(0));
+    let progress = pulled.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut data = vec![];
+        while let Some(b) = cap.next_buffer().unwrap() {
+            data.extend_from_slice(&b.data);
+            progress.store(data.len() as u64, Ordering::SeqCst);
+        }
+        let _ = tx.send(data);
+    });
+    let data = rx
+        .recv_timeout(Duration::from_secs(60))
+        .unwrap_or_else(|e| {
+            panic!(
+                "the recording did not reach its end in 60 s ({e}): {} of {} bytes pulled, \
+             live queue overruns {}, live branch at its end: {}",
+                pulled.load(Ordering::SeqCst),
+                wav.pcm.len(),
+                live.overruns(),
+                live.is_eos()
+            )
+        });
     assert!(data == wav.pcm, "recording differs from input");
     println!("live queue overruns: {}", live.overruns());
     assert!(live.overruns() > 0, "the live branch never stalled");
