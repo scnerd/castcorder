@@ -523,6 +523,31 @@ pub(crate) fn video_allowed(paths: &BTreeMap<GuestId, bool>, guest: GuestId) -> 
     paths.get(&guest) == Some(&false)
 }
 
+/// The most a transcript message should carry (bytes, estimated): well under
+/// a data channel's largest message.
+const TRANSCRIPT_CHUNK_BYTES: usize = 96 * 1024;
+
+/// A transcript split into pieces that each fit one channel message.
+fn transcript_chunks(
+    lines: &[castcorder_protocol::TranscriptLine],
+) -> Vec<Vec<castcorder_protocol::TranscriptLine>> {
+    let mut out: Vec<Vec<castcorder_protocol::TranscriptLine>> = Vec::new();
+    let mut size = 0;
+    for l in lines {
+        // The text and name, and room for the numbers and length prefixes.
+        let n = l.name.len() + l.text.len() + 40;
+        if out.is_empty() || size + n > TRANSCRIPT_CHUNK_BYTES {
+            out.push(Vec::new());
+            size = 0;
+        }
+        size += n;
+        if let Some(last) = out.last_mut() {
+            last.push(l.clone());
+        }
+    }
+    out
+}
+
 impl Call {
     /// The host's rooms, with `room` (the security of the room named
     /// `room_name`) loaded and no call open yet: the first person to enter a
@@ -1056,12 +1081,16 @@ impl Call {
         if self.transcript.is_empty() {
             return;
         }
-        if let Some(rpc) = self.rpc.get_mut(&to)
-            && rpc
-                .emit(Event::Transcript(self.transcript.clone()))
-                .is_err()
-        {
-            warn!(guest = to.0, "transcript not sent: channel closed");
+        let Some(rpc) = self.rpc.get_mut(&to) else {
+            return;
+        };
+        // In pieces: a long call's whole transcript is larger than a channel
+        // message can be, and a joiner would get none of it.
+        for chunk in transcript_chunks(&self.transcript) {
+            if rpc.emit(Event::Transcript(chunk)).is_err() {
+                warn!(guest = to.0, "transcript not sent: channel closed");
+                return;
+            }
         }
     }
 
@@ -2346,5 +2375,45 @@ mod video_path_tests {
         assert!(video_allowed(&paths, GuestId(1)), "direct");
         assert!(!video_allowed(&paths, GuestId(2)), "relayed");
         assert!(!video_allowed(&paths, GuestId(3)), "path not known yet");
+    }
+}
+
+#[cfg(test)]
+mod transcript_chunk_tests {
+    use super::*;
+    use castcorder_protocol::{CoreMessage, TranscriptLine, encode};
+
+    fn line(i: i64) -> TranscriptLine {
+        TranscriptLine {
+            participant: ParticipantId(i as u64 % 3),
+            name: format!("Speaker {i}"),
+            take: TakeId(1 + (i / 500) as u32),
+            host_us: i * 7_000_000,
+            text: "and then we talked about the thing for a while ".repeat(1 + (i % 4) as usize),
+        }
+    }
+
+    #[test]
+    fn a_long_transcript_goes_in_pieces_that_each_fit_a_message() {
+        let all: Vec<TranscriptLine> = (0..6000).map(line).collect();
+        let whole = encode(&CoreMessage::Event(Event::Transcript(all.clone())));
+        assert!(
+            whole.len() > castcorder_transport::MAX_MESSAGE,
+            "the fixture must be too big for one message ({} bytes)",
+            whole.len()
+        );
+        let chunks = transcript_chunks(&all);
+        assert!(chunks.len() > 1);
+        for c in &chunks {
+            let bytes = encode(&CoreMessage::Event(Event::Transcript(c.clone())));
+            assert!(
+                bytes.len() <= castcorder_transport::MAX_MESSAGE,
+                "{} bytes",
+                bytes.len()
+            );
+        }
+        let joined: Vec<TranscriptLine> = chunks.into_iter().flatten().collect();
+        assert_eq!(joined, all, "every line, in order");
+        assert!(transcript_chunks(&[]).is_empty());
     }
 }
