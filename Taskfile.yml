@@ -185,6 +185,27 @@ tasks:
       - node setup.mjs
       - node relay.mjs
 
+  test:relay:tcp:
+    desc: Forced-relay system test over TCP only - the host (through its TURN stream bridge) and two Chromium guests reach coturn over TCP, none over UDP (needs Docker)
+    summary: |
+      The same run as test:relay (relay.mjs) with RELAY_TRANSPORT=tcp: the
+      rendezvous hands out only coturn's `turn:HOST:PORT?transport=tcp` URL, so
+      every TURN client, the host's through the loopback bridge in
+      castcorder-host (turn_stream), speaks TCP to coturn and the allocations
+      are still UDP relayed addresses. Not part of `task test` or `task check`.
+    dir: castcorder/crates/castcorder-client/browser-test
+    vars:
+      CLIENT_DIST: '{{.CLIENT_DIST | default "dist"}}'
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/{{.CLIENT_DIST}}"
+      RELAY_TRANSPORT: tcp
+    cmds:
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
+      - cd .. && trunk build --release --dist {{.CLIENT_DIST}}
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - node relay.mjs
+
   test:browser:
     desc: Tier 4 browser tests (Playwright with headless Chromium and Firefox, installed locally on first run; no Docker)
     cmds:

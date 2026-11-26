@@ -324,13 +324,14 @@ mod tests {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let h = thread::spawn(move || {
-            // Two connections: the second proves the bridge reconnects.
-            for _ in 0..2 {
+            // Two connections: the second proves the bridge reconnects. The
+            // first serves two frames, the second one.
+            for quota in [2, 1] {
                 let (mut s, _) = l.accept().unwrap();
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 256];
                 let mut served = 0;
-                while served < 2 {
+                while served < quota {
                     let n = s.read(&mut chunk).unwrap();
                     if n == 0 {
                         break;
