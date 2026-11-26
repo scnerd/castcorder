@@ -13,8 +13,10 @@
 //! datagram that finds no connection is dropped, and the client's own
 //! retransmissions are the retry.
 //!
-//! One peer at a time: replies go to whichever socket last sent a datagram, so
-//! the transport's spare-socket retry simply takes over the bridge.
+//! One connection per client socket: TURN names an allocation by the client's
+//! five-tuple, and the transport allocates from a second socket when its
+//! credentials renew, beside the live allocation (a shared connection would
+//! answer 437, wrong transaction or allocation mismatch).
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -156,36 +158,57 @@ fn finish(
     Ok(stream)
 }
 
+/// One client socket's connection: TURN identifies an allocation by the
+/// client's five-tuple, so each socket the transport sends from (it takes a
+/// second one when credentials renew, to allocate beside the live allocation)
+/// needs a TCP connection of its own, or the server answers 437.
+struct Conn {
+    stream: Box<dyn Stream>,
+    inbuf: Vec<u8>,
+    last_sent: Instant,
+}
+
+/// Drop a connection whose client socket has sent nothing for this long (an
+/// allocation is refreshed every few minutes while it lives).
+const IDLE: Duration = Duration::from_secs(15 * 60);
+
 fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::RootCertStore>) {
-    let mut stream: Option<Box<dyn Stream>> = None;
-    let mut inbuf: Vec<u8> = Vec::new();
-    let mut peer: Option<SocketAddr> = None;
-    let mut last_try = Instant::now() - RECONNECT;
+    let mut conns: HashMap<SocketAddr, Conn> = HashMap::new();
+    let mut last_try: HashMap<SocketAddr, Instant> = HashMap::new();
     let mut buf = vec![0u8; 65_536];
     loop {
-        // Datagram -> stream.
+        // Datagram -> its client's stream.
         match udp.recv_from(&mut buf) {
             Ok((n, from)) => {
-                peer = Some(from);
-                if stream.is_none() && last_try.elapsed() >= RECONNECT {
-                    last_try = Instant::now();
+                if !conns.contains_key(&from)
+                    && last_try.get(&from).is_none_or(|t| t.elapsed() >= RECONNECT)
+                {
+                    last_try.insert(from, Instant::now());
                     match connect(host, port, kind, roots) {
-                        Ok(s) => {
-                            debug!(%host, port, ?kind, "TURN stream connected");
-                            inbuf.clear();
-                            stream = Some(s);
+                        Ok(stream) => {
+                            debug!(%host, port, ?kind, client = %from, "TURN stream connected");
+                            conns.insert(
+                                from,
+                                Conn {
+                                    stream,
+                                    inbuf: Vec::new(),
+                                    last_sent: Instant::now(),
+                                },
+                            );
                         }
                         Err(e) => {
                             warn!(%host, port, ?kind, error = %e, "TURN stream connect failed")
                         }
                     }
                 }
-                if let Some(s) = stream.as_mut()
-                    && let Some(frame) = frame_for_stream(&buf[..n])
-                    && let Err(e) = s.write_all(&frame).and_then(|()| s.flush())
-                {
-                    warn!(error = %e, "TURN stream write failed; reconnecting");
-                    stream = None;
+                if let Some(c) = conns.get_mut(&from) {
+                    c.last_sent = Instant::now();
+                    if let Some(frame) = frame_for_stream(&buf[..n])
+                        && let Err(e) = c.stream.write_all(&frame).and_then(|()| c.stream.flush())
+                    {
+                        warn!(error = %e, "TURN stream write failed; reconnecting");
+                        conns.remove(&from);
+                    }
                 }
             }
             Err(e) if is_timeout(&e) => {}
@@ -196,35 +219,42 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
                 return;
             }
         }
-        // Stream -> datagrams.
-        let Some(s) = stream.as_mut() else { continue };
-        let mut chunk = [0u8; 8192];
-        match s.read(&mut chunk) {
-            Ok(0) => {
-                warn!("TURN stream closed by the server");
-                stream = None;
+        // Each stream -> datagrams to its client.
+        let mut gone: Vec<SocketAddr> = vec![];
+        for (peer, c) in conns.iter_mut() {
+            if c.last_sent.elapsed() > IDLE {
+                gone.push(*peer);
+                continue;
             }
-            Ok(n) => {
-                inbuf.extend_from_slice(&chunk[..n]);
-                match drain(&mut inbuf) {
-                    Ok(frames) => {
-                        if let Some(p) = peer {
+            let mut chunk = [0u8; 8192];
+            match c.stream.read(&mut chunk) {
+                Ok(0) => {
+                    warn!(client = %peer, "TURN stream closed by the server");
+                    gone.push(*peer);
+                }
+                Ok(n) => {
+                    c.inbuf.extend_from_slice(&chunk[..n]);
+                    match drain(&mut c.inbuf) {
+                        Ok(frames) => {
                             for f in frames {
-                                let _ = udp.send_to(&f, p);
+                                let _ = udp.send_to(&f, peer);
                             }
                         }
-                    }
-                    Err(()) => {
-                        warn!("TURN stream carried something that is not STUN; closing it");
-                        stream = None;
+                        Err(()) => {
+                            warn!("TURN stream carried something that is not STUN; closing it");
+                            gone.push(*peer);
+                        }
                     }
                 }
+                Err(e) if is_timeout(&e) => {}
+                Err(e) => {
+                    warn!(error = %e, "TURN stream read failed");
+                    gone.push(*peer);
+                }
             }
-            Err(e) if is_timeout(&e) => {}
-            Err(e) => {
-                warn!(error = %e, "TURN stream read failed");
-                stream = None;
-            }
+        }
+        for p in gone {
+            conns.remove(&p);
         }
     }
 }
@@ -400,6 +430,62 @@ mod tests {
             }
         }
         assert_eq!(got, Some(stun(8, 4)));
+        h.join().unwrap();
+    }
+
+    /// TURN allocations are per five-tuple: each client socket needs its own
+    /// connection (the second socket the transport takes when credentials
+    /// renew must not share the first one's), and replies go to the right one.
+    #[test]
+    fn each_client_socket_gets_its_own_connection() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = l.local_addr().unwrap();
+        let h = thread::spawn(move || {
+            let mut handles = vec![];
+            for i in 0..2u8 {
+                let (mut s, _) = l.accept().unwrap();
+                handles.push(thread::spawn(move || {
+                    let mut head = [0u8; 28];
+                    s.read_exact(&mut head).unwrap();
+                    // Answer with the connection's number so a mixup shows.
+                    let mut reply = head;
+                    reply[20..].fill(i + 1);
+                    s.write_all(&reply).unwrap();
+                    s.flush().unwrap();
+                    thread::sleep(Duration::from_millis(300));
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+        let b = start(
+            &server.ip().to_string(),
+            server.port(),
+            Kind::Tcp,
+            Arc::new(rustls::RootCertStore::empty()),
+        )
+        .unwrap();
+        let (x, y) = (
+            UdpSocket::bind("127.0.0.1:0").unwrap(),
+            UdpSocket::bind("127.0.0.1:0").unwrap(),
+        );
+        for s in [&x, &y] {
+            s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        }
+        x.send_to(&stun(8, 1), b.addr()).unwrap();
+        y.send_to(&stun(8, 1), b.addr()).unwrap();
+        let (mut rx, mut ry) = ([0u8; 64], [0u8; 64]);
+        let (nx, _) = x
+            .recv_from(&mut rx)
+            .expect("the first socket gets its reply");
+        let (ny, _) = y
+            .recv_from(&mut ry)
+            .expect("the second socket gets its reply");
+        assert_eq!((nx, ny), (28, 28));
+        let mut seen = [rx[27], ry[27]];
+        seen.sort();
+        assert_eq!(seen, [1, 2], "two connections, one answer each");
         h.join().unwrap();
     }
 
