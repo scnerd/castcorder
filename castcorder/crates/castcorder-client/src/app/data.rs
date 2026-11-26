@@ -33,6 +33,18 @@ pub(super) fn pull_frames() {
 /// byte-identical items are offered one by one): `OfferTrack` for this
 /// call's tracks and those from before rooms, `OfferCallTrack` for another
 /// call's.
+/// How many of the outbox's listed offers are video (`outbox {offers}`): what
+/// waits on the host to pull it, which the track list (audio only) lacks.
+pub(super) fn video_offers(msg: &JsValue) -> usize {
+    Array::from(&get(msg, "offers"))
+        .iter()
+        .filter_map(|bytes| {
+            castcorder_protocol::decode::<TrackOffer>(&Uint8Array::new(&bytes).to_vec()).ok()
+        })
+        .filter(|o| o.kind == SourceKind::Video)
+        .count()
+}
+
 pub(super) fn offer_tracks(msg: &JsValue) {
     let ctx = with_engine(|e| e.ctx.clone());
     let (rooms, calls) = (

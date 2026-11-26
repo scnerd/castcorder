@@ -453,6 +453,9 @@ struct Ui {
     progress: RwSignal<std::collections::BTreeMap<String, u8>>,
     /// Items the host confirmed (their local copies are deleted).
     delivered: RwSignal<BTreeSet<String>>,
+    /// Video items of this device still waiting for the host to pull them, as
+    /// the outbox last listed them (the track list holds audio only).
+    video_pending: RwSignal<usize>,
     /// The background sync, in words (empty: none): what a sync-only
     /// connection is doing after Leave, until everything is delivered.
     sync: RwSignal<String>,
@@ -663,6 +666,13 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
             }
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
             "outbox" => {
+                let video = data::video_offers(&d);
+                info!(
+                    video,
+                    offers = Array::from(&get(&d, "offers")).length(),
+                    "outbox listed"
+                );
+                ui.video_pending.set(video);
                 offer_tracks(&d);
                 background::on_outbox(ui, &d);
             }
@@ -688,6 +698,14 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
                 let ctx = with_engine(|e| e.ctx.clone());
                 info!(call = %ctx.call, device = %ctx.device, track = %string(&d, "name"), "track synced to the host; local copy deleted");
                 background::synced(ui);
+                if !with_engine(|e| e.sync_only) {
+                    // The pending video count follows what the outbox still
+                    // holds: list it again, for this call as after a take.
+                    let msg = worker_cmd("outbox");
+                    set(&msg, "call", ctx.call.as_str());
+                    set(&msg, "legacy", ctx.host_scope.as_str());
+                    post_worker(&msg, None);
+                }
             }
             _ => {}
         }

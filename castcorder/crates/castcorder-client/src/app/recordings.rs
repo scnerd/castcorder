@@ -240,10 +240,12 @@ pub(super) fn YourRecordings(ui: Ui) -> impl IntoView {
             && crate::delivery::is_video_item(name)
             && matches!(d, Delivery::Waiting | Delivery::Uploading(_))
     };
-    let any_held = move || list().iter().any(|(n, d)| held(n, *d));
+    let any_held =
+        move || relayed() && ui.video_pending.get() > 0 || list().iter().any(|(n, d)| held(n, *d));
     view! {
         <h3>"Your recordings"</h3>
-        <p id="video-relay-note" class="small warn-text" role="status" hidden=move || !any_held()>
+        <p id="video-relay-note" class="small warn-text" role="status" hidden=move || !any_held()
+            data-video-pending=move || ui.video_pending.get().to_string() data-relayed=move || relayed().to_string()>
             "Your video is waiting: this connection goes through a relay server, and video is too large to send that way. "
             "It stays safe on this device and uploads by itself once your connection is direct. "
             "Your audio uploads as usual. Keep this page open, or come back to it in this same browser."
