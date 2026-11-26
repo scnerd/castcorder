@@ -942,7 +942,10 @@ mod tests {
         assert_eq!(s("turns:h:443?transport=tcp"), Some(("h".into(), 443, Tls)));
         assert_eq!(s("turn:h:80?transport=tcp"), Some(("h".into(), 80, Tcp)));
         assert_eq!(s("turn:h?transport=tcp"), Some(("h".into(), 3478, Tcp)));
-        assert_eq!(s("turn:[::1]:3478?transport=tcp"), Some(("::1".into(), 3478, Tcp)));
+        assert_eq!(
+            s("turn:[::1]:3478?transport=tcp"),
+            Some(("::1".into(), 3478, Tcp))
+        );
         assert_eq!(s("turn:h:3478?transport=udp"), None);
         assert_eq!(s("turn:h:3478"), None);
         assert_eq!(s("stun:h"), None);

@@ -140,8 +140,8 @@ fn finish(
                 .map_err(io::Error::other)?
                 .with_root_certificates(roots.clone())
                 .with_no_client_auth();
-            let name =
-                rustls::pki_types::ServerName::try_from(host.to_string()).map_err(io::Error::other)?;
+            let name = rustls::pki_types::ServerName::try_from(host.to_string())
+                .map_err(io::Error::other)?;
             let mut conn =
                 rustls::ClientConnection::new(Arc::new(cfg), name).map_err(io::Error::other)?;
             let mut raw = tcp.try_clone()?;
@@ -175,7 +175,9 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
                             inbuf.clear();
                             stream = Some(s);
                         }
-                        Err(e) => warn!(%host, port, ?kind, error = %e, "TURN stream connect failed"),
+                        Err(e) => {
+                            warn!(%host, port, ?kind, error = %e, "TURN stream connect failed")
+                        }
                     }
                 }
                 if let Some(s) = stream.as_mut()
@@ -380,14 +382,18 @@ mod tests {
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         assert_eq!(roundtrip(b.addr(), &sock, &stun(24, 9)), stun(24, 9));
-        assert_eq!(roundtrip(b.addr(), &sock, &channel_data(5)), channel_data(5));
+        assert_eq!(
+            roundtrip(b.addr(), &sock, &channel_data(5)),
+            channel_data(5)
+        );
         // The server closed the first connection after two frames; the next
         // datagram may be lost while the bridge notices, so keep asking.
         let mut got = None;
         for _ in 0..20 {
             sock.send_to(&stun(8, 4), b.addr()).unwrap();
             let mut r = vec![0u8; 2048];
-            sock.set_read_timeout(Some(Duration::from_millis(400))).unwrap();
+            sock.set_read_timeout(Some(Duration::from_millis(400)))
+                .unwrap();
             if let Ok((n, _)) = sock.recv_from(&mut r) {
                 got = Some(r[..n].to_vec());
                 break;
@@ -468,7 +474,8 @@ mod tests {
         )
         .unwrap();
         let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
-        sock.set_read_timeout(Some(Duration::from_millis(800))).unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(800)))
+            .unwrap();
         sock.send_to(&stun(8, 5), b.addr()).unwrap();
         let mut r = [0u8; 64];
         assert!(sock.recv_from(&mut r).is_err(), "nothing may come back");
