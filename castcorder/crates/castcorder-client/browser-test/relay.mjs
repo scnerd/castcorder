@@ -334,6 +334,8 @@ try {
   await waitFor(async () => await G.isVisible('#video-relay-note'), 'G is told its video is waiting', 30000).catch(async (e) => {
     const rows = await G.evaluate(() => [...document.querySelectorAll('#your-recordings li')].map((x) => x.dataset.name + ' ' + x.dataset.state));
     console.log('G recordings: ' + JSON.stringify(rows) + '; relayed chip on own tile: ' + (await G.isVisible('.stage > .tile .tile-relay')));
+    console.log('G note: ' + (await G.evaluate(() => { const n = document.querySelector('#video-relay-note'); return n ? n.dataset.videoPending + ' pending, relayed=' + n.dataset.relayed : 'absent'; })));
+    console.log('G outbox log: ' + logs.G.filter((l) => /outbox listed|outbox/.test(l)).slice(-8).join(' | ').slice(0, 1500));
     console.log('G cam/video log: ' + logs.G.filter((l) => /cam|video/i.test(l)).slice(-12).join(' | ').slice(0, 2500));
     throw e;
   });

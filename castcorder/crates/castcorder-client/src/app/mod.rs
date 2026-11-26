@@ -666,7 +666,13 @@ fn start_worker(ui: Ui) -> Result<(), JsValue> {
             }
             "error" => ui.errors.update(|v| v.push(string(&d, "message"))),
             "outbox" => {
-                ui.video_pending.set(data::video_offers(&d));
+                let video = data::video_offers(&d);
+                info!(
+                    video,
+                    offers = Array::from(&get(&d, "offers")).length(),
+                    "outbox listed"
+                );
+                ui.video_pending.set(video);
                 offer_tracks(&d);
                 background::on_outbox(ui, &d);
             }
