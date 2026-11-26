@@ -234,6 +234,8 @@ struct Engine {
     mic_sent_at: f64,
     /// Camera reports (`CameraState`) awaiting their answer.
     camera_requests: Vec<RequestId>,
+    /// Source reports (`DeviceSources`) awaiting their answer.
+    source_requests: Vec<RequestId>,
     /// The others' cameras as signalled (`Event::CameraState`), by
     /// participant id: their tile shows camera-off while it says off,
     /// whatever its video track reports.
@@ -415,6 +417,9 @@ struct Ui {
     /// Participants whose connection to the host goes through a TURN relay
     /// (`Event::Relayed`, cast-9ok), this one included.
     relayed: RwSignal<Vec<u64>>,
+    /// Every participant's sources (producers only; `Event::DeviceSources`,
+    /// cast-swn).
+    sources: RwSignal<Vec<castcorder_protocol::ParticipantSources>>,
     /// When the recording take started on the host timeline (us), from its status.
     take_started_us: RwSignal<Option<i64>>,
     /// How long the take has run ("1:05"), empty until this device knows the host's clock.

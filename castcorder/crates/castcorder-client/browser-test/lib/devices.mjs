@@ -15,9 +15,11 @@ import { openGuest } from './guest.mjs';
 // listens; its main microphone still records through the first capture path
 // (cast-n1s). In the call Y's Devices
 // dialog shows them, every participant's <audio> plays through the picked
-// output (sinkId), and Y adds Fake Audio Input 2 as a backup microphone. The
-// producer X starts a take; Y's backup records beside its main microphone.
-// Mid-take Y switches its live microphone to the system default: no new
+// output (sinkId). The producer X sees Y's devices by name in its People
+// panel and there adds Fake Audio Input 2 as a backup microphone on Y's
+// device (cast-swn); Y is told. X starts a take; Y's backup records beside
+// its main microphone. Mid-take X switches Y's live microphone to the system
+// default from the People panel (Firefox: Y in its Devices dialog): no new
 // RTCPeerConnection, still connected, X still hears Y, and Y's main track
 // continues in a new segment. X then adds a backup whose device cannot be
 // opened (getUserMedia replaced to refuse that one device, as a busy device
@@ -116,12 +118,25 @@ export async function devicesChecks() {
     check(true, 'every participant\x27s audio plays through the picked speakers (setSinkId)');
   }
 
+  // The producer X sees Y's devices by name in the People panel (cast-swn).
+  const yId = await text(Y, '#participant');
+  const yRow = '.psources[data-participant="' + yId + '"]';
+  await waitFor(async () => (await X.locator(yRow).count()) === 1, 'X sees Y\x27s devices in the People panel', 15000);
+  await X.click(yRow + ' summary');
+  await waitFor(async () => (await chosen(X, yRow + ' .remote-mic')) === MIC1, 'X sees Y\x27s picked microphone by name', 15000);
+  check(true, 'a producer sees a guest\x27s microphones by name and which one is picked');
   if (!firefox) {
-    // A backup microphone before the take: it records from the take start.
-    await Y.selectOption('#dev-backup', { label: MIC2 });
-    await Y.click('#dev-backup-add');
+    // A backup microphone before the take, added by the producer X on Y's
+    // device: it records from the take start.
+    check((await options(X, yRow + ' .add-remote-backup')).includes(MIC2), 'X is offered Y\x27s other microphones as a backup');
+    await X.selectOption(yRow + ' .add-remote-backup', { label: MIC2 });
     await waitFor(async () => (await Y.locator('#dev-recorded li[data-source="mic-2"][data-state="ready"]').count()) === 1,
       'Y backup microphone ready', 15000);
+    await waitFor(async () => (await X.locator(yRow + ' .remote-backup[data-source="mic-2"][data-state="ready"]').count()) === 1,
+      'X sees the backup it added on Y ready', 15000);
+    check((await text(Y, '#call-notes')).includes('X (producer) added ' + MIC2 + ' as your backup microphone'),
+      'Y is told the producer added a backup microphone');
+    check(true, 'a producer adds a backup microphone on a guest\x27s device');
   } else {
     check(await Y.isDisabled('#dev-backup-add'), 'firefox: no other microphone to add as a backup');
   }
@@ -160,13 +175,24 @@ export async function devicesChecks() {
   // Switch the live microphone mid-take.
   const pcs = await Y.evaluate(() => window.__pcs.length);
   const switchAt = Date.now();
-  await Y.selectOption('#dev-mic', { value: '' });
+  if (firefox) {
+    await Y.selectOption('#dev-mic', { value: '' });
+  } else {
+    // The producer X switches it, on Y's device (cast-swn).
+    await X.selectOption(yRow + ' .remote-mic', { value: '' });
+  }
   const seg2 = await waitFor(async () => { const r = await text(Y, '#recording'); return r.includes('recording take0001') && r !== seg1 ? r : null; },
     'Y main track continues in a new segment after the switch', 20000);
   check(seg2 !== seg1, 'a microphone switch mid-take starts a new segment (' + seg1 + ' then ' + seg2 + ')');
   check((await Y.evaluate(() => window.__pcs.length)) === pcs, 'the switch swaps the sent track without a new connection');
   const yState = await waitFor(async () => { const s = await text(Y, '#state'); return s === 'connected' ? s : null; }, 'Y connected after the switch', 5000);
   check(yState === 'connected', 'Y stays connected through the switch');
+  if (!firefox) {
+    await waitFor(async () => (await chosen(Y, '#dev-mic')) === 'System default', 'Y\x27s Devices dialog shows the switch X made', 10000);
+    await waitFor(async () => (await chosen(X, yRow + ' .remote-mic')) === 'System default', 'X sees the switch it made on Y', 10000);
+    check((await text(Y, '#call-notes')).includes('X (producer) switched your microphone to the system default'),
+      'Y is told the producer switched its microphone');
+  }
   check((await audioRising(X, 'Y')) > 0, 'X still receives Y\x27s audio after the switch');
 
   if (!firefox) {

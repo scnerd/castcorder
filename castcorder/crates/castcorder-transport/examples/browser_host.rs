@@ -237,14 +237,16 @@ impl Call {
                     Request::OfferCallTrack { .. }
                     | Request::SharedRooms
                     | Request::Invite(_)
-                    | Request::OfferContact { .. } => Response::Error {
+                    | Request::OfferContact { .. }
+                    | Request::ChangeSource { .. } => Response::Error {
                         kind: ErrorKind::NotAllowed,
                         message: "one call only in this example".into(),
                     },
                     Request::DiskFree { .. }
                     | Request::MicState { .. }
                     | Request::SourceAck(_)
-                    | Request::CameraState { .. } => Response::Done,
+                    | Request::CameraState { .. }
+                    | Request::DeviceSources(_) => Response::Done,
                 };
                 if let Some(rpc) = self.rpc.get_mut(&id) {
                     let _ = rpc.respond(rid, response);

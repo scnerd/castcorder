@@ -35,7 +35,11 @@
 
 use std::collections::BTreeMap;
 
-use castcorder_protocol::ProfileIssue;
+use castcorder_protocol::{
+    BackupSource, BackupState, DeviceName, ProfileIssue, SourceChange, SourceList,
+};
+
+use super::lifecycle::producer_request;
 
 use super::*;
 use crate::session::source_track_name;
@@ -1137,8 +1141,283 @@ pub(super) fn toggle_dialog(ui: Ui) {
     }
 }
 
-/// Wire the dialog's rows (once, at start).
+/// Wire the dialog's rows (once, at start), and report this device's
+/// sources to the host whenever they change while joined (cast-swn).
 pub(super) fn bind(ui: Ui) {
     ROWS.set(Some(ui.devices.backups));
     init(ui);
+    Effect::new(move |_| {
+        let list = sources(ui, true);
+        if !ui.participant.get().is_empty() {
+            report_sources(list);
+        }
+    });
+}
+
+// ---- Remote sources (cast-swn) ----
+
+/// A People row's Devices fold (producers): `participant`'s microphone and
+/// camera pickers and backup microphones as their device reports them; each
+/// change is a request the host relays to that device. Nothing until the
+/// device has reported.
+pub(super) fn remote_sources(ui: Ui, participant: u64) -> impl IntoView {
+    let theirs = move || {
+        ui.sources
+            .get()
+            .into_iter()
+            .find(|p| p.participant.0 == participant)
+            .map(|p| p.sources)
+    };
+    let send = move |change: SourceChange| {
+        producer_request(
+            ui,
+            Request::ChangeSource {
+                participant: ParticipantId(participant),
+                change,
+            },
+            false,
+        )
+    };
+    let options = move |list: Vec<DeviceName>, current: String| {
+        list.into_iter()
+            .map(|x| {
+                let label = if x.label.is_empty() {
+                    "(unnamed device)".to_string()
+                } else {
+                    x.label
+                };
+                let selected = x.id == current;
+                view! { <option value=x.id selected=selected>{label}</option> }
+            })
+            .collect_view()
+    };
+    let summary = move || {
+        theirs().map(|s| {
+            let backups = s.backups.len();
+            format!(
+                "{}{}",
+                if s.live_mic.is_empty() {
+                    "Microphone".to_string()
+                } else {
+                    s.live_mic.clone()
+                },
+                match backups {
+                    0 => String::new(),
+                    1 => ", 1 backup".into(),
+                    n => format!(", {n} backups"),
+                }
+            )
+        })
+    };
+    view! {
+        <Show when=move || theirs().is_some()>
+            <details class="fold psources" data-participant=participant.to_string()>
+                <summary><span>"Devices"</span><span class="small muted">{summary}</span></summary>
+                <div class="fold-body">
+                    <label class="small">"Microphone"
+                        <select class="remote-mic" on:change=move |ev| send(SourceChange::Mic(event_target_value(&ev)))>
+                            {move || theirs().map(|s| view! {
+                                <option value="" selected=s.mic.is_empty()>"System default"</option>
+                                {options(s.mics, s.mic)}
+                            })}
+                        </select>
+                    </label>
+                    <label class="small">"Camera"
+                        <select class="remote-camera" on:change=move |ev| send(SourceChange::Camera(event_target_value(&ev)))>
+                            {move || theirs().map(|s| view! {
+                                <option value="" selected=s.camera.is_empty()>"System default"</option>
+                                {options(s.cameras, s.camera)}
+                            })}
+                        </select>
+                    </label>
+                    <ul class="list remote-backups">
+                        {move || theirs().map(|s| s.backups.into_iter().map(|b| {
+                            let source = b.source.clone();
+                            let state = match b.state {
+                                BackupState::Opening => "opening",
+                                BackupState::Ready => "ready",
+                                BackupState::Starting => "starting",
+                                BackupState::Recording => "recording",
+                                BackupState::Unavailable => "unavailable",
+                            };
+                            let words = if b.why.is_empty() { state.to_string() } else { format!("{state}: {}", b.why) };
+                            view! {
+                                <li class="remote-backup" data-source=b.source.clone() data-state=state>
+                                    <span>{b.label}</span>" "<span class="small muted">{words}</span>
+                                    <button class="btn tiny ghost remove-remote-backup"
+                                        on:click=move |_| send(SourceChange::RemoveBackup(source.clone()))>"Remove"</button>
+                                </li>
+                            }
+                        }).collect_view())}
+                    </ul>
+                    <label class="small">"Backup microphone"
+                        <select class="add-remote-backup" on:change=move |ev| {
+                            let id = event_target_value(&ev);
+                            if !id.is_empty() {
+                                send(SourceChange::AddBackup(id));
+                            }
+                        }>
+                            {move || theirs().map(|s| {
+                                let taken: Vec<String> = s.backups.iter().map(|b| b.label.clone()).collect();
+                                let free: Vec<DeviceName> = s.mics.into_iter()
+                                    .filter(|m| m.id != s.mic && !taken.contains(&m.label))
+                                    .collect();
+                                view! {
+                                    <option value="" selected=true>"Add a backup..."</option>
+                                    {options(free, String::new())}
+                                }
+                            })}
+                        </select>
+                    </label>
+                </div>
+            </details>
+        </Show>
+    }
+}
+
+thread_local! {
+    /// The sources last reported to the host since joining.
+    static REPORTED: RefCell<Option<SourceList>> = const { RefCell::new(None) };
+}
+
+/// This device's sources as the host is told them; `tracked`: read the
+/// signals so an effect follows them.
+pub(super) fn sources(ui: Ui, tracked: bool) -> SourceList {
+    let d = ui.devices;
+    let read = |s: RwSignal<Vec<Device>>| if tracked { s.get() } else { s.get_untracked() };
+    let text = |s: RwSignal<String>| if tracked { s.get() } else { s.get_untracked() };
+    let names = |v: Vec<Device>| {
+        v.into_iter()
+            .map(|x| DeviceName {
+                id: x.id,
+                label: x.label,
+            })
+            .collect()
+    };
+    let rows = if tracked {
+        d.backups.get()
+    } else {
+        d.backups.get_untracked()
+    };
+    SourceList {
+        mics: names(read(d.mics)),
+        cameras: names(read(d.cams)),
+        mic: text(d.mic),
+        live_mic: text(d.live_mic),
+        camera: text(d.cam),
+        camera_on: if tracked {
+            ui.camera.get()
+        } else {
+            ui.camera.get_untracked()
+        },
+        backups: rows
+            .into_iter()
+            .map(|r| BackupSource {
+                state: match r.state.as_str() {
+                    "opening" => BackupState::Opening,
+                    "starting" => BackupState::Starting,
+                    "recording" => BackupState::Recording,
+                    "unavailable" => BackupState::Unavailable,
+                    _ => BackupState::Ready,
+                },
+                source: r.source,
+                label: r.label,
+                why: r.why,
+            })
+            .collect(),
+    }
+}
+
+/// Remember `list` as reported (the join sends it itself, on an engine
+/// already borrowed).
+pub(super) fn reported(list: Option<SourceList>) {
+    REPORTED.with(|r| *r.borrow_mut() = list);
+}
+
+/// Tell the host this device's sources if they changed since last told.
+fn report_sources(list: SourceList) {
+    if REPORTED.with(|r| r.borrow().as_ref() == Some(&list)) {
+        return;
+    }
+    let sent = with_engine(|e| {
+        if e.participant.is_none() {
+            return false;
+        }
+        let Some(rpc) = e.rpc.as_mut() else {
+            return false;
+        };
+        match rpc.send(Request::DeviceSources(list.clone())) {
+            Ok(id) => {
+                e.source_requests.push(id);
+                true
+            }
+            Err(err) => {
+                warn!(error = ?err, "sources not reported");
+                false
+            }
+        }
+    });
+    if sent {
+        reported(Some(list));
+    }
+}
+
+/// A producer changed this device's sources (`Event::ChangeSource`): apply
+/// it as if picked in the Devices dialog, and say so in a call note.
+pub(super) fn remote_change(ui: Ui, by: &str, change: SourceChange) {
+    let d = ui.devices;
+    let by = format!("{by} (producer)");
+    let label = |kind: Kind, id: &str| -> Option<String> {
+        if id.is_empty() {
+            return Some("the system default".into());
+        }
+        d.list(kind)
+            .get_untracked()
+            .into_iter()
+            .find(|x| x.id == id)
+            .map(|x| x.label)
+    };
+    let note = |kind: &str, what: String| {
+        ui.notes
+            .update(|v| crate::notes::source_changed(v, &by, kind, &what));
+    };
+    info!(by = %by, change = ?change, "a producer changes this device's sources");
+    match change {
+        SourceChange::Mic(ref id)
+        | SourceChange::Camera(ref id)
+        | SourceChange::AddBackup(ref id) => {
+            let id = id.clone();
+            let (kind, what) = match &change {
+                SourceChange::Mic(_) => (Kind::Mic, "microphone"),
+                SourceChange::Camera(_) => (Kind::Camera, "camera"),
+                _ => (Kind::Mic, "backup"),
+            };
+            let Some(name) = label(kind, &id) else {
+                warn!(device = %id, kind = kind.key(), "a producer picked a device this browser does not list");
+                return;
+            };
+            if what == "backup" {
+                note(what, format!("added {name} as your backup microphone"));
+                spawn_local(add_backup(ui, id));
+            } else {
+                note(what, format!("switched your {what} to {name}"));
+                pick(ui, kind, id);
+            }
+        }
+        SourceChange::RemoveBackup(source) => {
+            let name = d
+                .backups
+                .get_untracked()
+                .into_iter()
+                .find(|r| r.source == source)
+                .map(|r| r.label);
+            match name {
+                Some(name) => {
+                    note("backup", format!("removed your backup microphone {name}"));
+                    remove_backup(&source);
+                }
+                None => warn!(source = %source, "a producer removed a backup that is not here"),
+            }
+        }
+    }
 }

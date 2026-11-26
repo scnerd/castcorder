@@ -206,6 +206,104 @@ pub enum Request {
         /// The contact code (`ContactCode::fragment`), or a link to it.
         code: String,
     },
+    /// This device's sources (cast-swn; appended): the microphones and
+    /// cameras its browser lists, which it uses, and its backup microphones.
+    /// Sent after every join and whenever any of it changes. The host shares
+    /// every participant's with producers ([`Event::DeviceSources`]).
+    /// Answered with [`Response::Done`].
+    DeviceSources(SourceList),
+    /// A producer changes a participant's sources (cast-swn; appended): the
+    /// host relays it to that participant's device ([`Event::ChangeSource`]),
+    /// which applies it as if picked in its own Devices dialog. Answered with
+    /// [`Response::Done`] once relayed, or an error with
+    /// [`ErrorKind::NotAllowed`] (not a producer) or
+    /// [`ErrorKind::InvalidState`] (no such participant in the call).
+    ChangeSource {
+        /// Whose sources.
+        participant: ParticipantId,
+        /// What to change.
+        change: SourceChange,
+    },
+}
+
+/// One input device as a participant's browser lists it (cast-swn).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceName {
+    /// The browser's device id (stable per site and browser profile).
+    pub id: String,
+    /// Its name.
+    pub label: String,
+}
+
+/// Where one backup microphone stands on its device (cast-swn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BackupState {
+    /// Being opened.
+    Opening,
+    /// Open; records from the next take.
+    Ready,
+    /// A take started; not yet recording.
+    Starting,
+    /// Recording.
+    Recording,
+    /// Cannot be opened or recorded on this device.
+    Unavailable,
+}
+
+/// One backup microphone: a recorded source of its own, never live.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupSource {
+    /// Its recorded source (`mic-2`, `mic-3`, ...).
+    pub source: String,
+    /// The device's name.
+    pub label: String,
+    /// Where it stands.
+    pub state: BackupState,
+    /// Why it cannot record (unavailable only).
+    pub why: String,
+}
+
+/// A device's sources as it reports them ([`Request::DeviceSources`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceList {
+    /// The microphones its browser lists.
+    pub mics: Vec<DeviceName>,
+    /// The cameras its browser lists.
+    pub cameras: Vec<DeviceName>,
+    /// The picked microphone's id (empty: the system default).
+    pub mic: String,
+    /// The live microphone's name, as opened.
+    pub live_mic: String,
+    /// The picked camera's id (empty: the system default).
+    pub camera: String,
+    /// The camera is on.
+    pub camera_on: bool,
+    /// Its backup microphones.
+    pub backups: Vec<BackupSource>,
+}
+
+/// One participant's sources, for producers ([`Event::DeviceSources`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParticipantSources {
+    /// Whose.
+    pub participant: ParticipantId,
+    /// As their device last reported them.
+    pub sources: SourceList,
+}
+
+/// A change a producer makes to a participant's sources
+/// ([`Request::ChangeSource`]); device ids are those of [`SourceList`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceChange {
+    /// Use this microphone (empty: the system default) for the live
+    /// microphone and the main recorded source.
+    Mic(String),
+    /// Use this camera (empty: the system default).
+    Camera(String),
+    /// Record this microphone as a backup too.
+    AddBackup(String),
+    /// Stop recording this backup (its source, as `mic-2`).
+    RemoveBackup(String),
 }
 
 /// An invite to a call, from a contact (CONTEXT.md "Invite"): the room's call
@@ -604,6 +702,18 @@ pub enum Event {
         /// Through a relay (false: direct).
         relayed: bool,
     },
+    /// Every participant's sources as their devices last reported them
+    /// ([`Request::DeviceSources`]; cast-swn, appended): sent to producers
+    /// only, after joining and whenever it changes.
+    DeviceSources(Vec<ParticipantSources>),
+    /// A producer changed this device's sources ([`Request::ChangeSource`];
+    /// cast-swn, appended): apply it as if picked here.
+    ChangeSource {
+        /// The producer's display name.
+        by: String,
+        /// What to change.
+        change: SourceChange,
+    },
 }
 
 /// One line of the live transcript: what one participant said in one
@@ -868,7 +978,65 @@ mod tests {
                 to: ParticipantId(3),
                 code: "contact.h.s".into(),
             },
+            Request::DeviceSources(sample_sources()),
+            Request::ChangeSource {
+                participant: ParticipantId(3),
+                change: SourceChange::Mic("dev-1".into()),
+            },
+            Request::ChangeSource {
+                participant: ParticipantId(3),
+                change: SourceChange::Camera(String::new()),
+            },
+            Request::ChangeSource {
+                participant: ParticipantId(3),
+                change: SourceChange::AddBackup("dev-2".into()),
+            },
+            Request::ChangeSource {
+                participant: ParticipantId(3),
+                change: SourceChange::RemoveBackup("mic-2".into()),
+            },
         ]
+    }
+
+    /// A device's sources, with one backup in every state.
+    fn sample_sources() -> SourceList {
+        let backup = |n: u8, state| BackupSource {
+            source: format!("mic-{n}"),
+            label: format!("USB {n}"),
+            state,
+            why: if state == BackupState::Unavailable {
+                "busy".into()
+            } else {
+                String::new()
+            },
+        };
+        SourceList {
+            mics: vec![
+                DeviceName {
+                    id: "dev-1".into(),
+                    label: "Built-in".into(),
+                },
+                DeviceName {
+                    id: "dev-2".into(),
+                    label: "USB 2".into(),
+                },
+            ],
+            cameras: vec![DeviceName {
+                id: "cam-1".into(),
+                label: "Webcam".into(),
+            }],
+            mic: "dev-1".into(),
+            live_mic: "Built-in".into(),
+            camera: String::new(),
+            camera_on: true,
+            backups: vec![
+                backup(2, BackupState::Opening),
+                backup(3, BackupState::Ready),
+                backup(4, BackupState::Starting),
+                backup(5, BackupState::Recording),
+                backup(6, BackupState::Unavailable),
+            ],
+        }
     }
 
     /// One or more samples of every [`Response`] and [`Event`] variant.
@@ -968,6 +1136,14 @@ mod tests {
             CoreMessage::Event(Event::Relayed {
                 participant: ParticipantId(2),
                 relayed: true,
+            }),
+            CoreMessage::Event(Event::DeviceSources(vec![ParticipantSources {
+                participant: ParticipantId(2),
+                sources: sample_sources(),
+            }])),
+            CoreMessage::Event(Event::ChangeSource {
+                by: "Ann".into(),
+                change: SourceChange::AddBackup("dev-2".into()),
             }),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
@@ -1508,6 +1684,27 @@ mod tests {
                 on: true
             }),
             vec![12, 4, 1]
+        );
+        // Remote sources (cast-swn, appended).
+        assert_eq!(
+            encode(&Request::DeviceSources(SourceList::default())),
+            vec![18, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            encode(&Request::ChangeSource {
+                participant: ParticipantId(3),
+                change: SourceChange::RemoveBackup(String::new()),
+            }),
+            vec![19, 3, 3, 0]
+        );
+        assert_eq!(encode(&BackupState::Unavailable), vec![4]);
+        assert_eq!(encode(&Event::DeviceSources(vec![])), vec![17, 0]);
+        assert_eq!(
+            encode(&Event::ChangeSource {
+                by: String::new(),
+                change: SourceChange::Mic(String::new()),
+            }),
+            vec![18, 0, 0, 0]
         );
     }
 

@@ -237,6 +237,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                         <span class="pdisk" class:low=d.low>{format!("{} free, {} of recording", format_bytes(d.free_bytes), format_time_left(d.seconds_left))}</span>
                                     })}
                                 </span>
+                                {move || (me() != Some(p.participant.0)).then(|| super::devices::remote_sources(ui, p.participant.0))}
                             </span>
                             <Show when=move || !p.host_machine>
                                 <div class="menu-wrap">
@@ -1030,6 +1031,7 @@ pub(super) fn App() -> impl IntoView {
         profile_warnings: RwSignal::new(Vec::new()),
         recorders: RwSignal::new(Vec::new()),
         relayed: RwSignal::new(Vec::new()),
+        sources: RwSignal::new(Vec::new()),
         takes: RwSignal::new(None),
         progress: RwSignal::new(Default::default()),
         delivered: RwSignal::new(Default::default()),

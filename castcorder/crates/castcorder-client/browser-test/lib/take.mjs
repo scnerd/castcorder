@@ -74,11 +74,13 @@ export async function takeChecks(A, B) {
   const plain = await A.evaluate(() => ({
     rows: [...document.querySelectorAll('#guests li.person')].map((li) => li.querySelector('.person-head').textContent.trim()),
     text: document.querySelector('#guests').textContent,
-    folded: [...document.querySelectorAll('details.fold')].map((d) => d.id + (d.open ? ':open' : ':folded')),
+    folded: [...document.querySelectorAll('details.fold:not(.psources)')].map((d) => d.id + (d.open ? ':open' : ':folded')),
+    // Each other participant's Devices fold (cast-swn) starts folded too.
+    devicesOpen: [...document.querySelectorAll('details.psources')].some((d) => d.open),
   }));
   check(plain.rows.some((r) => r.startsWith('A') && r.includes('(you)') && r.endsWith('Host')) && plain.rows.some((r) => r.startsWith('B') && /Guest|Producer/.test(r))
     && !/\(guest \d+\)|\[trusted\]|\[untrusted\]/.test(plain.text)
-    && plain.folded.join(',') === 'room-settings:folded,calls-section:folded,connection-details:folded',
+    && plain.folded.join(',') === 'room-settings:folded,calls-section:folded,connection-details:folded' && !plain.devicesOpen,
     'People rows read in plain language, the detail folded away: ' + JSON.stringify(plain));
 
   // The outbox: after the take, each guest's track (and its JSON sidecar) is
