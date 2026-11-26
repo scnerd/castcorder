@@ -136,6 +136,22 @@ impl Secrets {
 /// [`Secrets`], shared.
 pub type SharedSecrets = Arc<Mutex<Secrets>>;
 
+/// How often the host looks for a changed call link to update its relay gates.
+const GATE_CHECK: Duration = Duration::from_secs(2);
+
+/// The relay gates of every room's current call secret, sorted.
+fn current_gates(cfg: &Config) -> Vec<String> {
+    let mut g: Vec<String> = cfg
+        .secrets()
+        .rooms
+        .values()
+        .map(CallSecret::relay_gate)
+        .collect();
+    g.sort();
+    g.dedup();
+    g
+}
+
 /// Rotate a room's secret: write a fresh one to `room_dir` and make it the
 /// one offers for `room` are checked against. Guests already in the call
 /// stay; new joins need the new link.
@@ -628,10 +644,34 @@ fn session(
     // Every registration (start, reconnect) pings every contact install:
     // they may have missed us while we were away.
     cfg.contacts.presence_registered();
+    // The relay gates of every call link we admit (cast-d74): without one, a
+    // guest gets no relay credentials from the rendezvous.
+    let mut gates = current_gates(cfg);
+    send(
+        &mut ws,
+        &ClientMsg::RelayGates {
+            gates: gates.clone(),
+        },
+    )?;
     loop {
-        let Some(msg) = read_msg_until(&mut ws, renew_at, Some(stop))? else {
-            info!("renewing relay credentials: reconnecting to the rendezvous");
-            return Ok(());
+        let check = Instant::now() + GATE_CHECK;
+        let until = renew_at.map_or(check, |r| r.min(check));
+        let Some(msg) = read_msg_until(&mut ws, Some(until), Some(stop))? else {
+            if renew_at.is_some_and(|r| Instant::now() >= r) {
+                info!("renewing relay credentials: reconnecting to the rendezvous");
+                return Ok(());
+            }
+            // A call link was regenerated, or a room added: tell the rendezvous.
+            let now = current_gates(cfg);
+            if now != gates {
+                info!(
+                    gates = now.len(),
+                    "call links changed: updating the relay gates"
+                );
+                send(&mut ws, &ClientMsg::RelayGates { gates: now.clone() })?;
+                gates = now;
+            }
+            continue;
         };
         match msg {
             ServerMsg::Offer { from, sealed } => {

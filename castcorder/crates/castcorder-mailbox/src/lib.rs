@@ -37,10 +37,15 @@ pub type ConnId = u64;
 /// Milliseconds since any fixed origin; never decreasing.
 pub type Millis = u64;
 
+/// The most relay gates one host may have registered (one per call secret).
+const MAX_GATES: usize = 64;
+/// The longest gate accepted (a base64url SHA-256 is 43 characters).
+const MAX_GATE_LEN: usize = 64;
+
 /// The largest text frame a wrapper accepts.
 pub const MAX_FRAME: usize = 64 * 1024;
 
-pub use castcorder_link::wire::{MAILBOX_PARAM, RELAY_PARAM};
+pub use castcorder_link::wire::{MAILBOX_PARAM, PROOF_PARAM, RELAY_PARAM};
 
 /// The value of `name` in a URL query string (`a=1&b=2`), undecoded.
 pub fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
@@ -63,6 +68,12 @@ pub fn mailbox_of(query: &str) -> Option<HostId> {
 /// by a guest for the host it calls.
 pub fn relay_host(query: &str) -> Option<HostId> {
     query_param(query, RELAY_PARAM).and_then(|h| HostId::parse(h).ok())
+}
+
+/// The proof of a call secret a connection presents (`?proof=`), for the
+/// relay credentials it asks with `?host=`.
+pub fn relay_proof(query: &str) -> Option<&str> {
+    query_param(query, PROOF_PARAM)
 }
 
 /// A token bucket's shape: `burst` tokens, refilled at `per_minute`.
@@ -199,6 +210,8 @@ pub struct Mailbox {
     next: ConnId,
     conns: HashMap<ConnId, Conn>,
     hosts: HashMap<HostId, ConnId>,
+    /// Each online host's relay gates (cast-d74), as it last registered them.
+    gates: HashMap<HostId, Vec<String>>,
     ip_buckets: HashMap<IpAddr, Bucket>,
     host_buckets: HashMap<HostId, Bucket>,
     last_prune: Option<Millis>,
@@ -222,6 +235,7 @@ impl Mailbox {
             next: 1,
             conns: HashMap::new(),
             hosts: HashMap::new(),
+            gates: HashMap::new(),
             ip_buckets: HashMap::new(),
             host_buckets: HashMap::new(),
             last_prune: None,
@@ -381,6 +395,7 @@ impl Mailbox {
         conn: ConnId,
         host: HostId,
         ask: RelayAsk,
+        proof: Option<&str>,
         over_budget: Option<String>,
         now: Millis,
     ) -> Result<(), String> {
@@ -390,6 +405,15 @@ impl Mailbox {
             return Err(format!(
                 "{}: that host is not online; no relay credentials",
                 code::HOST_OFFLINE
+            ));
+        }
+        // A guest must show it holds a call link of this host (cast-d74):
+        // knowing the host id alone is not enough to mint.
+        if !registered && !self.proof_ok(host, proof) {
+            info!(conn, host = %host.short(), proof = proof.is_some(), "relay credentials refused: no proof of a call link");
+            return Err(format!(
+                "{}: relay credentials need a call link this host admits",
+                code::RELAY_PROOF
             ));
         }
         if let Some(why) = over_budget {
@@ -441,6 +465,12 @@ impl Mailbox {
             (ClientMsg::Answer { to, sealed }, Role::Host(host)) => {
                 self.answer(conn, host, to, sealed)
             }
+            (ClientMsg::RelayGates { gates }, Role::Host(host))
+                if self.hosts.get(&host) == Some(&conn) =>
+            {
+                self.set_gates(host, gates);
+                vec![]
+            }
             (m, role) => {
                 warn!(conn, ip = %ip, role = ?role, frame = ?std::mem::discriminant(&m), "frame not allowed in this state");
                 vec![error(
@@ -450,6 +480,39 @@ impl Mailbox {
                 )]
             }
         }
+    }
+
+    /// The relay gates `host` registered, if it is online and sent any.
+    pub fn gates_of(&self, host: HostId) -> Option<&[String]> {
+        self.gates.get(&host).map(Vec::as_slice)
+    }
+
+    /// Put back gates a wrapper kept for `host` (a Durable Object that lost its
+    /// memory while the host's connection stayed open). Ignored unless `host`
+    /// is online.
+    pub fn restore_gates(&mut self, host: HostId, gates: Vec<String>) {
+        if self.is_online(host) {
+            self.set_gates(host, gates);
+        }
+    }
+
+    fn set_gates(&mut self, host: HostId, gates: Vec<String>) {
+        let gates: Vec<String> = gates
+            .into_iter()
+            .filter(|g| g.len() <= MAX_GATE_LEN)
+            .take(MAX_GATES)
+            .collect();
+        info!(host = %host.short(), gates = gates.len(), "relay gates registered");
+        self.gates.insert(host, gates);
+    }
+
+    /// Whether `proof` (a guest's `?proof=`) shows knowledge of a call secret
+    /// the online `host` registered a gate for.
+    fn proof_ok(&self, host: HostId, proof: Option<&str>) -> bool {
+        let Some(gate) = proof.and_then(castcorder_link::link::relay_gate) else {
+            return false;
+        };
+        self.gates.get(&host).is_some_and(|gs| gs.contains(&gate))
     }
 
     /// Whether `conn` may address `host` (it is unscoped, or scoped to it).
@@ -488,6 +551,7 @@ impl Mailbox {
             ];
         };
         let mut out = vec![];
+        self.gates.remove(&id);
         if let Some(old) = self.hosts.insert(id, conn) {
             info!(conn = old, host = %id.short(), "host connection replaced by a newer one");
             if let Some(o) = self.conns.get_mut(&old) {
@@ -573,6 +637,7 @@ impl Mailbox {
             && self.hosts.get(&id) == Some(&conn)
         {
             self.hosts.remove(&id);
+            self.gates.remove(&id);
             info!(conn, host = %id.short(), "host went offline");
             for (gid, g) in &mut self.conns {
                 if g.role == Role::Guest(Some(id)) {
@@ -1066,14 +1131,20 @@ mod scope_restore_relay_tests {
         let key = HostKey::from_secret([1; 32]);
         let g = mb.open(addr(2).ip(), addr(2), [2; 32], None, NOW).unwrap();
         let why = mb
-            .relay(g, key.id(), RelayAsk::Hello, None, NOW)
+            .relay(g, key.id(), RelayAsk::Hello, None, None, NOW)
             .unwrap_err();
         assert!(why.starts_with(code::HOST_OFFLINE), "{why}");
 
         let (h, mut out) = register(&mut mb, 1, &key, None);
+        let secret = castcorder_link::CallSecret([5; 16]);
+        let proof = secret.relay_proof();
+        let gates = ClientMsg::RelayGates {
+            gates: vec![secret.relay_gate()],
+        };
+        assert!(mb.receive(h, &to_json(&gates), NOW).is_empty());
         // The host itself asks in `registered`: one token.
         assert_eq!(
-            mb.relay(h, key.id(), RelayAsk::Registered, None, NOW),
+            mb.relay(h, key.id(), RelayAsk::Registered, None, None, NOW),
             Ok(())
         );
         let s = IceServer {
@@ -1091,13 +1162,23 @@ mod scope_restore_relay_tests {
         // Over the wrapper's budget: that refusal wins and draws no token.
         let quota = format!("{}: over budget", code::RELAY_QUOTA);
         assert_eq!(
-            mb.relay(g, key.id(), RelayAsk::Hello, Some(quota.clone()), NOW),
+            mb.relay(
+                g,
+                key.id(),
+                RelayAsk::Hello,
+                Some(&proof),
+                Some(quota.clone()),
+                NOW
+            ),
             Err(quota)
         );
         // A guest's hello takes the second token; then the bucket is empty.
-        assert_eq!(mb.relay(g, key.id(), RelayAsk::Hello, None, NOW), Ok(()));
+        assert_eq!(
+            mb.relay(g, key.id(), RelayAsk::Hello, Some(&proof), None, NOW),
+            Ok(())
+        );
         let why = mb
-            .relay(g, key.id(), RelayAsk::Hello, None, NOW)
+            .relay(g, key.id(), RelayAsk::Hello, Some(&proof), None, NOW)
             .unwrap_err();
         assert!(why.starts_with(code::RATE_LIMITED), "{why}");
         let mut out = vec![Out::Send(
@@ -1115,8 +1196,127 @@ mod scope_restore_relay_tests {
         );
         // A second later one token is back.
         assert_eq!(
-            mb.relay(g, key.id(), RelayAsk::Hello, None, NOW + 1_000),
+            mb.relay(
+                g,
+                key.id(),
+                RelayAsk::Hello,
+                Some(&proof),
+                None,
+                NOW + 1_000
+            ),
             Ok(())
         );
+    }
+
+    fn gated() -> (Mailbox, HostKey, ConnId, ConnId) {
+        let mut mb = Mailbox::new(Limits {
+            ip: Rate {
+                per_minute: 600,
+                burst: 600,
+            },
+            host: Rate {
+                per_minute: 600,
+                burst: 600,
+            },
+        });
+        let key = HostKey::from_secret([1; 32]);
+        let (h, _) = register(&mut mb, 1, &key, None);
+        let g = mb.open(addr(2).ip(), addr(2), [2; 32], None, NOW).unwrap();
+        (mb, key, h, g)
+    }
+
+    fn set_gates(mb: &mut Mailbox, h: ConnId, secrets: &[castcorder_link::CallSecret]) -> Vec<Out> {
+        let gates = ClientMsg::RelayGates {
+            gates: secrets.iter().map(|s| s.relay_gate()).collect(),
+        };
+        mb.receive(h, &to_json(&gates), NOW)
+    }
+
+    fn ask(mb: &mut Mailbox, g: ConnId, key: &HostKey, proof: Option<&str>) -> Result<(), String> {
+        mb.relay(g, key.id(), RelayAsk::Hello, proof, None, NOW)
+    }
+
+    #[test]
+    fn relay_credentials_need_the_proof_of_a_call_link_the_host_admits() {
+        use castcorder_link::CallSecret;
+        let (mut mb, key, h, g) = gated();
+        let (a, b) = (CallSecret([5; 16]), CallSecret([6; 16]));
+        // Online, but it has registered no gates yet: nothing is minted.
+        let why = ask(&mut mb, g, &key, Some(&a.relay_proof())).unwrap_err();
+        assert!(why.starts_with(code::RELAY_PROOF), "{why}");
+        assert!(set_gates(&mut mb, h, std::slice::from_ref(&a)).is_empty());
+        // A stranger who knows only the host id (no proof, a made-up one, a
+        // proof of another secret, or the secret itself) gets nothing.
+        for bad in [
+            None,
+            Some("not-a-proof".to_string()),
+            Some(b.relay_proof()),
+            Some(a.encode()),
+        ] {
+            let why = ask(&mut mb, g, &key, bad.as_deref()).unwrap_err();
+            assert!(why.starts_with(code::RELAY_PROOF), "{bad:?}: {why}");
+        }
+        assert_eq!(ask(&mut mb, g, &key, Some(&a.relay_proof())), Ok(()));
+        // The same, when the wrapper hands back a credential it kept.
+        assert_eq!(
+            mb.relay(
+                g,
+                key.id(),
+                RelayAsk::HelloReused,
+                Some(&a.relay_proof()),
+                None,
+                NOW
+            ),
+            Ok(())
+        );
+        assert!(
+            mb.relay(g, key.id(), RelayAsk::HelloReused, None, None, NOW)
+                .is_err()
+        );
+        // Several calls: each secret's proof works; replacing the gates
+        // (a regenerated link) turns the old one away.
+        assert!(set_gates(&mut mb, h, &[a.clone(), b.clone()]).is_empty());
+        assert_eq!(ask(&mut mb, g, &key, Some(&b.relay_proof())), Ok(()));
+        assert!(set_gates(&mut mb, h, std::slice::from_ref(&b)).is_empty());
+        assert!(ask(&mut mb, g, &key, Some(&a.relay_proof())).is_err());
+        assert_eq!(ask(&mut mb, g, &key, Some(&b.relay_proof())), Ok(()));
+    }
+
+    #[test]
+    fn gates_belong_to_the_registered_host_connection_and_go_with_it() {
+        use castcorder_link::CallSecret;
+        let (mut mb, key, h, g) = gated();
+        let a = CallSecret([5; 16]);
+        // A guest cannot register gates for a host.
+        let out = set_gates(&mut mb, g, std::slice::from_ref(&a));
+        assert!(
+            matches!(&out[..], [Out::Send(_, ServerMsg::Error { code: c, .. })] if c == code::BAD_MESSAGE),
+            "{out:?}"
+        );
+        assert_eq!(mb.gates_of(key.id()), None);
+        set_gates(&mut mb, h, std::slice::from_ref(&a));
+        assert_eq!(mb.gates_of(key.id()), Some(&[a.relay_gate()][..]));
+        // A newer registration of the key starts with no gates.
+        let (h2, _) = register(&mut mb, 3, &key, None);
+        assert_eq!(mb.gates_of(key.id()), None);
+        assert!(ask(&mut mb, g, &key, Some(&a.relay_proof())).is_err());
+        set_gates(&mut mb, h2, std::slice::from_ref(&a));
+        assert_eq!(ask(&mut mb, g, &key, Some(&a.relay_proof())), Ok(()));
+        // The host going away takes them along.
+        mb.close(h2);
+        assert_eq!(mb.gates_of(key.id()), None);
+        // A wrapper that lost its memory puts them back, for an online host only.
+        mb.restore_gates(key.id(), vec![a.relay_gate()]);
+        assert_eq!(mb.gates_of(key.id()), None);
+        let (_h3, _) = register(&mut mb, 4, &key, None);
+        mb.restore_gates(key.id(), vec![a.relay_gate()]);
+        assert_eq!(ask(&mut mb, g, &key, Some(&a.relay_proof())), Ok(()));
+        // At most 64 gates, none over-long.
+        let many: Vec<String> = (0..100)
+            .map(|i| format!("g{i}"))
+            .chain(["x".repeat(65)])
+            .collect();
+        mb.restore_gates(key.id(), many);
+        assert_eq!(mb.gates_of(key.id()).map(<[String]>::len), Some(64));
     }
 }

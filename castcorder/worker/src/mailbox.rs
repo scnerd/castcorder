@@ -22,7 +22,7 @@ use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
 use castcorder_mailbox::turn::RelayDay;
 use castcorder_mailbox::{
     ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, RelayAsk, fill_registered,
-    relay_host,
+    relay_host, relay_proof,
 };
 use serde::{Deserialize, Serialize};
 use worker::{
@@ -41,6 +41,12 @@ struct Saved {
 
 /// The storage key of the host key's [`RelayDay`].
 const RELAY_DAY: &str = "relay-day";
+
+/// The storage key of the host's relay gates (cast-d74): the host sends them
+/// after registering and on every change, and a woken object (its memory lost
+/// while the host's WebSocket stays open) reads them back here before it
+/// answers a guest. Cleared when the host registers again or goes.
+const RELAY_GATES: &str = "relay-gates";
 
 fn now() -> Millis {
     Date::now().as_millis()
@@ -130,9 +136,21 @@ impl HostMailbox {
         conn: ConnId,
         host: HostId,
         ask: RelayAsk,
+        proof: Option<&str>,
         now: Millis,
     ) -> Option<std::result::Result<IceServer, String>> {
         let turn = relay::turn(&self.env)?;
+        // A woken object has lost the host's gates: read them back.
+        if ask != RelayAsk::Registered && self.mb.borrow().gates_of(host).is_none() {
+            if let Ok(Some(g)) = self
+                .state
+                .storage()
+                .get::<Vec<String>>(RELAY_GATES)
+                .await
+            {
+                self.mb.borrow_mut().restore_gates(host, g);
+            }
+        }
         let cap = relay::daily_cap(&self.env);
         let storage = self.state.storage();
         let day: RelayDay = match storage.get(RELAY_DAY).await {
@@ -149,7 +167,10 @@ impl HostMailbox {
         if over.is_some() {
             tracing::warn!(host = %host.short(), cap, "relay credentials refused: daily cap reached");
         }
-        let decided = self.mb.borrow_mut().relay(conn, host, ask, over, now);
+        let decided = self
+            .mb
+            .borrow_mut()
+            .relay(conn, host, ask, proof, over, now);
         if let Err(why) = decided {
             return Some(Err(why));
         }
@@ -162,8 +183,12 @@ impl HostMailbox {
         Some(turn.mint(&host, now / 1000).await)
     }
 
-    fn closed(&self, ws: &WebSocket) {
+    async fn closed(&self, ws: &WebSocket) {
         if let Some(id) = Self::conn_of(ws) {
+            if self.mb.borrow().host_of(id).is_some() {
+                // The host left: its gates go with it.
+                let _ = self.state.storage().delete(RELAY_GATES).await;
+            }
             let outs = self.mb.borrow_mut().close(id);
             self.dispatch(outs);
         }
@@ -224,7 +249,9 @@ impl DurableObject for HostMailbox {
         let mut ice_servers = relay::stun(&self.env);
         let mut relay_error = None;
         if let Some(host) = relay_host(&query)
-            && let Some(minted) = self.grant(id, host, RelayAsk::Hello, now).await
+            && let Some(minted) = self
+                .grant(id, host, RelayAsk::Hello, relay_proof(&query), now)
+                .await
         {
             // Only for a host that is connected now (the shared decision).
             match minted {
@@ -262,16 +289,32 @@ impl DurableObject for HostMailbox {
         if text.len() > MAX_FRAME {
             tracing::warn!(conn = id, bytes = text.len(), "frame too large; closing");
             let _ = ws.close(Some(1009), Some("frame too large"));
-            self.closed(&ws);
+            self.closed(&ws).await;
             return Ok(());
         }
         let now = now();
         let mut outs = self.mb.borrow_mut().receive(id, &text, now);
         let registered = self.mb.borrow().just_registered(id, &outs);
-        if let Some(host) = registered
-            && let Some(grant) = self.grant(id, host, RelayAsk::Registered, now).await
+        if let Some(host) = registered {
+            // A new registration starts with no gates (the host sends them next).
+            let _ = self.state.storage().delete(RELAY_GATES).await;
+            if let Some(grant) = self
+                .grant(id, host, RelayAsk::Registered, None, now)
+                .await
+            {
+                fill_registered(&mut outs, id, grant);
+            }
+        }
+        // A host's gates changed: keep them for a woken object.
+        if text.contains("\"relay_gates\"")
+            && let Some(host) = self.mb.borrow().host_of(id)
         {
-            fill_registered(&mut outs, id, grant);
+            let gates = self.mb.borrow().gates_of(host).map(<[String]>::to_vec);
+            if let Some(g) = gates {
+                if let Err(e) = self.state.storage().put(RELAY_GATES, g).await {
+                    tracing::error!(error = %e, "relay gates not stored");
+                }
+            }
         }
         self.dispatch(outs);
         Ok(())
@@ -284,12 +327,12 @@ impl DurableObject for HostMailbox {
         _reason: String,
         _was_clean: bool,
     ) -> Result<()> {
-        self.closed(&ws);
+        self.closed(&ws).await;
         Ok(())
     }
 
     async fn websocket_error(&self, ws: WebSocket, _error: worker::Error) -> Result<()> {
-        self.closed(&ws);
+        self.closed(&ws).await;
         Ok(())
     }
 }

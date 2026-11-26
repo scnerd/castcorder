@@ -30,6 +30,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { relayProof } from './lib/helpers.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -123,9 +124,12 @@ function startHost(name, port, bind = '127.0.0.1') {
     '--rendezvous', 'http://127.0.0.1:' + port], name);
 }
 
-// The host id from the call link the host prints.
+// The host id from the call link the host prints (its call secret, which a
+// guest holding the link proves it knows, is remembered for `guestHello`).
+const callSecrets = new Map();
 async function hostId(h) {
-  const m = await waitFor(() => h.out.match(/CALL_LINK \S+#([^.\s]+)\./), 'CALL_LINK');
+  const m = await waitFor(() => h.out.match(/CALL_LINK \S+#([^.\s]+)\.(\S+)/), 'CALL_LINK');
+  callSecrets.set(m[1], m[2]);
   return m[1];
 }
 
@@ -133,7 +137,8 @@ async function hostId(h) {
 // guest asks for relay credentials.
 function guestHello(port, host) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket('ws://127.0.0.1:' + port + '/ws?mailbox=' + host + '&host=' + host);
+    const proof = relayProof(callSecrets.get(host));
+    const ws = new WebSocket('ws://127.0.0.1:' + port + '/ws?mailbox=' + host + '&host=' + host + '&proof=' + proof);
     const t = setTimeout(() => { ws.close(); reject(new Error('no hello')); }, 15000);
     ws.onmessage = (e) => { clearTimeout(t); ws.close(); resolve(JSON.parse(e.data)); };
     ws.onerror = () => { clearTimeout(t); reject(new Error('WebSocket error')); };

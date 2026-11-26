@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { hkdfSync } from 'node:crypto';
 
 // The call folder of a room in a host library that was active last
 // (<library>/<room>/<YYYY-MM-DD>[-N], holding call.json); the room folder
@@ -166,3 +167,12 @@ export async function personAction(page, name, cls) {
 // Open the People panel's folded sections (Room settings, Calls in this
 // room, Connection details) before using a control inside them.
 export const unfold = (page) => page.evaluate(() => { for (const d of document.querySelectorAll('details.fold')) d.open = true; });
+
+// The proof of a call secret a guest shows the rendezvous to be given relay
+// credentials (`?proof=`): HKDF-SHA256 of the secret's bytes, as
+// castcorder_link::CallSecret::relay_proof does (cast-d74). Takes and returns
+// base64url without padding.
+export function relayProof(callSecret) {
+  const key = hkdfSync('sha256', Buffer.from(callSecret, 'base64url'), 'castcorder-relay-proof-v1', 'relay credentials', 32);
+  return Buffer.from(key).toString('base64url');
+}

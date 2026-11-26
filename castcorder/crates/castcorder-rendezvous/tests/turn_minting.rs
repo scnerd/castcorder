@@ -13,10 +13,10 @@
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
-use castcorder_link::HostKey;
 use castcorder_link::wire::{
     ClientMsg, IceServer, ServerMsg, b64, code, from_json, to_json, unb64,
 };
+use castcorder_link::{CallSecret, HostKey};
 use castcorder_rendezvous::mailbox::Limits;
 use castcorder_rendezvous::server::{Config, Metering, bind};
 use castcorder_rendezvous::turn::TurnConfig;
@@ -59,12 +59,26 @@ fn start_with(metering: Option<Metering>) -> (SocketAddr, Option<SocketAddr>) {
     rx.recv_timeout(Duration::from_secs(10)).expect("server up")
 }
 
+/// The call secret the test hosts admit (their registered gate), and the
+/// guests' proof of it.
+fn secret() -> CallSecret {
+    CallSecret([3; 16])
+}
+
+/// A connection naming `host`, with the proof of the test call link.
 fn connect(addr: SocketAddr, host: &str) -> Ws {
+    connect_with(addr, host, Some(&secret().relay_proof()))
+}
+
+fn connect_with(addr: SocketAddr, host: &str, proof: Option<&str>) -> Ws {
     let stream = TcpStream::connect(addr).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
-    let url = format!("ws://{addr}/ws?host={host}");
+    let url = match proof {
+        Some(p) => format!("ws://{addr}/ws?host={host}&proof={p}"),
+        None => format!("ws://{addr}/ws?host={host}"),
+    };
     tungstenite::client(url.as_str(), stream)
         .expect("handshake")
         .0
@@ -130,6 +144,8 @@ fn relay_credentials_only_for_a_host_that_is_online() {
         }
         other => panic!("expected registered, got {other:?}"),
     }
+    send_gates(&mut host, &[secret()]);
+    std::thread::sleep(Duration::from_millis(200));
 
     // Online: a guest naming it gets credentials.
     let mut guest = connect(addr, &id);
@@ -137,6 +153,38 @@ fn relay_credentials_only_for_a_host_that_is_online() {
     assert_eq!(turn_users(&ice).len(), 1, "{ice:?}");
     assert_eq!(why, None);
     drop(guest);
+
+    // Online, but a stranger who knows only the host id (no proof, or the
+    // proof of some other secret) gets nothing (cast-d74).
+    for proof in [None, Some(CallSecret([4; 16]).relay_proof())] {
+        let (_, ice, why) = hello(&mut connect_with(addr, &id, proof.as_deref()));
+        assert!(turn_users(&ice).is_empty(), "{proof:?}: {ice:?}");
+        let why = why.expect("a relay error");
+        assert!(why.starts_with(code::RELAY_PROOF), "{why}");
+    }
+    // The host regenerates its link: the old proof stops working, the new one works.
+    send_gates(&mut host, &[CallSecret([9; 16])]);
+    let t0 = Instant::now();
+    loop {
+        let (_, ice, _) = hello(&mut connect(addr, &id));
+        if turn_users(&ice).is_empty() {
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "the old proof still works"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let new = CallSecret([9; 16]).relay_proof();
+    let (_, ice, why) = hello(&mut connect_with(addr, &id, Some(&new)));
+    assert_eq!(turn_users(&ice).len(), 1, "{ice:?}: {why:?}");
+    send_gates(&mut host, &[secret()]);
+    let t0 = Instant::now();
+    while turn_users(&hello(&mut connect(addr, &id)).1).is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "gates not restored");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 
     // Another key that never connected: nothing.
     let other = HostKey::from_secret([8; 32]).id().encode();
@@ -161,6 +209,14 @@ fn relay_credentials_only_for_a_host_that_is_online() {
     }
 }
 
+/// A registered host's current relay gates, one per call secret.
+fn send_gates(ws: &mut Ws, secrets: &[CallSecret]) {
+    let m = ClientMsg::RelayGates {
+        gates: secrets.iter().map(CallSecret::relay_gate).collect(),
+    };
+    ws.send(Message::Text(to_json(&m).into())).unwrap();
+}
+
 fn register(addr: SocketAddr, key: &HostKey) -> (Ws, Vec<IceServer>, Option<String>) {
     let id = key.id().encode();
     let mut ws = connect(addr, &id);
@@ -175,7 +231,12 @@ fn register(addr: SocketAddr, key: &HostKey) -> (Ws, Vec<IceServer>, Option<Stri
             ice_servers,
             relay_error,
             ..
-        } => (ws, ice_servers, relay_error),
+        } => {
+            send_gates(&mut ws, &[secret()]);
+            // The server handles the frame on its own task; give it a moment.
+            std::thread::sleep(Duration::from_millis(200));
+            (ws, ice_servers, relay_error)
+        }
         other => panic!("expected registered, got {other:?}"),
     }
 }

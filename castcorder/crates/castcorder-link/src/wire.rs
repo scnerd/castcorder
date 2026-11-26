@@ -9,12 +9,19 @@
 //!                  {"urls":["turn:..."],"username":U,"credential":C}
 //! host -> server   {"type":"register","host":HOST_ID,"sig":B64}     sig over seal::register_message(nonce)
 //! server -> host   {"type":"registered","observed":"ip:port"}       the host's address as the server saw it
+//! host -> server   {"type":"relay_gates","gates":[B64,...]}         the calls' relay gates (see below); resent on every change
 //! guest -> server  {"type":"offer","to":HOST_ID,"sealed":B64}
 //! server -> host   {"type":"offer","from":N,"sealed":B64}           N names the guest's connection
 //! host -> server   {"type":"answer","to":N,"sealed":B64}
 //! server -> guest  {"type":"answer","sealed":B64}
 //! server -> any    {"type":"error","code":CODE,"message":TEXT}
 //! ```
+//!
+//! Relay credentials in a hello (`/ws?host=HOST_ID&proof=B64`) go only to a guest
+//! that shows [`PROOF_PARAM`], the proof of knowing one of the host's call
+//! secrets ([`crate::CallSecret::relay_proof`]): the server holds the gates the
+//! host registered ([`crate::link::relay_gate`] of each proof) and compares
+//! SHA-256 of the proof. A stranger who has only seen a host id gets none.
 //!
 //! The sealed bytes ([`crate::seal`]) open to [`OfferPlain`] and
 //! [`AnswerPlain`]; the server never sees them. A link request
@@ -85,6 +92,10 @@ pub mod code {
     /// relay is misconfigured, or the relay provider's API failed). Direct
     /// connections are unaffected.
     pub const RELAY_UNAVAILABLE: &str = "relay_unavailable";
+    /// Relay credentials were asked for without the proof of a call link the
+    /// host admits (or with one it no longer does): the guest may still try a
+    /// direct connection.
+    pub const RELAY_PROOF: &str = "relay_proof";
 }
 
 /// A frame from the server.
@@ -151,6 +162,14 @@ pub enum ClientMsg {
         host: String,
         /// Ed25519 signature over [`crate::seal::register_message`] of the nonce.
         sig: String,
+    },
+    /// A host's current relay gates, replacing the last ones: one
+    /// [`crate::link::relay_gate`] per call secret it admits, so the server can
+    /// tell a guest that holds a call link from a stranger (cast-d74). Only
+    /// from a registered host.
+    RelayGates {
+        /// The gates, base64url.
+        gates: Vec<String>,
     },
     /// A guest's sealed offer to a host.
     Offer {
@@ -483,6 +502,10 @@ pub const MAILBOX_PARAM: &str = "mailbox";
 /// The query parameter asking relay (TURN) credentials for a host in the
 /// hello.
 pub const RELAY_PARAM: &str = "host";
+
+/// The query parameter carrying the proof of a call secret
+/// ([`crate::CallSecret::relay_proof`]) beside [`RELAY_PARAM`].
+pub const PROOF_PARAM: &str = "proof";
 
 /// `ws_url` (the rendezvous `/ws` URL, perhaps with a query already) scoped
 /// to `host`'s mailbox.
