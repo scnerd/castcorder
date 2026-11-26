@@ -1015,7 +1015,10 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
     /// something to do: a puller with only that left is idle.
     pub fn is_idle(&self) -> bool {
         self.queue.values().all(|o| self.held(o))
-            && self.current.as_ref().is_none_or(|c| self.held(&c.entry.offer))
+            && self
+                .current
+                .as_ref()
+                .is_none_or(|c| self.held(&c.entry.offer))
             && self.done.is_empty()
     }
 
@@ -1123,7 +1126,11 @@ impl<S: Storage, C: MessageChannel> Puller<S, C> {
             self.done.pop_front();
             progress = true;
         }
-        if self.current.as_ref().is_some_and(|c| self.held(&c.entry.offer)) {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|c| self.held(&c.entry.offer))
+        {
             self.park_current(libs)?;
         }
         if self.current.is_none() && !recording {

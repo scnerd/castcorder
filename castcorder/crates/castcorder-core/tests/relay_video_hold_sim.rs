@@ -113,8 +113,16 @@ fn video_waits_for_a_direct_connection_while_audio_and_logs_sync() {
     // Relayed from the start.
     r.puller.set_video_allowed(false);
     let done = r.run(2_000);
-    assert_eq!(done, ["take0001-mic", "take0001-log"], "audio and logs only");
-    assert_eq!(r.outbox.pending().len(), 1, "the video is still the guest's");
+    assert_eq!(
+        done,
+        ["take0001-mic", "take0001-log"],
+        "audio and logs only"
+    );
+    assert_eq!(
+        r.outbox.pending().len(),
+        1,
+        "the video is still the guest's"
+    );
     assert!(r.puller.is_idle(), "held video is not work to do");
     assert_eq!(r.puller.video_held(), 1);
     let verified = |r: &mut Rig, kind: SourceKind| {
@@ -126,7 +134,10 @@ fn video_waits_for_a_direct_connection_while_audio_and_logs_sync() {
             .all(|e| e.verified)
     };
     assert!(verified(&mut r, SourceKind::Audio) && verified(&mut r, SourceKind::Log));
-    assert!(!verified(&mut r, SourceKind::Video), "no video reached the host");
+    assert!(
+        !verified(&mut r, SourceKind::Video),
+        "no video reached the host"
+    );
 
     // The path turns direct: the video syncs.
     r.puller.set_video_allowed(true);
@@ -158,8 +169,15 @@ fn a_video_transfer_under_way_pauses_when_the_connection_turns_relayed() {
     r.puller.set_video_allowed(false);
     r.add("take0001-mic", 1, SourceKind::Audio, "wav", &audio);
     let done = r.run(3_000);
-    assert_eq!(done, ["take0001-mic"], "audio is not stuck behind the paused video");
-    assert!(r.puller.receiving().is_none(), "video is paused, not receiving");
+    assert_eq!(
+        done,
+        ["take0001-mic"],
+        "audio is not stuck behind the paused video"
+    );
+    assert!(
+        r.puller.receiving().is_none(),
+        "video is paused, not receiving"
+    );
     assert!(r.puller.is_idle());
     assert_eq!(r.puller.video_held(), 1);
 

@@ -9,8 +9,7 @@
 use super::*;
 
 /// What the Relay badge (tiles, People) means (cast-9ok).
-pub(super) const RELAY_TITLE: &str =
-    "Connected to the host through a relay server: it works, but may add delay. Video recordings wait to upload until the connection is direct; audio uploads as usual.";
+pub(super) const RELAY_TITLE: &str = "Connected to the host through a relay server: it works, but may add delay. Video recordings wait to upload until the connection is direct; audio uploads as usual.";
 
 /// Up to two initials of a display name, for avatars.
 pub(super) fn initials(name: &str) -> String {
@@ -204,6 +203,20 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
     let me = move || ui.participant.get().parse::<u64>().ok();
     // A row's second line: is their machine recording, and its room left.
+    // Guests whose video cannot reach the host while their connection is
+    // relayed (cast-btf), for the warning beside the Record video control.
+    let relayed_names = move || -> Vec<String> {
+        let relayed = ui.relayed.get();
+        rows()
+            .into_iter()
+            .filter(|p| !p.host_machine && relayed.contains(&p.participant.0))
+            .map(|p| p.name)
+            .collect()
+    };
+    let video_warning = move || {
+        let names = relayed_names();
+        (record_video() && !names.is_empty()).then(|| crate::delivery::relay_video_warning(&names))
+    };
     let state_of = move |id: u64| {
         ui.recorders
             .get()
@@ -259,6 +272,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     </For>
                 </ul>
             </div>
+            <p id="video-relay-warning" class="warn-text small" role="status"
+                hidden=move || video_warning().is_none()>{move || video_warning().unwrap_or_default()}</p>
             <details class="fold" id="room-settings">
                 <summary><span>"Room settings"</span>
                     <span class="small muted">{move || format!("{}{}{}",
@@ -290,6 +305,8 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                     </div>
                     <span class="small">"Recording: " <span id="room-record-video">{move || if record_video() { "audio and video" } else { "audio only" }}</span>
                         <span class="muted">" (changes apply from the next take)"</span></span>
+                    <span class="small warn-text" id="record-video-relay-note"
+                        hidden=move || video_warning().is_none()>{move || video_warning().unwrap_or_default()}</span>
                     <div class="row">
                         <button id="record-video" class="btn" on:click=move |_| act(RoomAction::SetRecordVideo(!record_video()))>
                             {move || if record_video() { "Stop recording video" } else { "Record video" }}</button>
