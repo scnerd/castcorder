@@ -243,7 +243,7 @@ pub(crate) fn frame_for_stream(d: &[u8]) -> Option<Vec<u8>> {
         0b00 if d.len() >= 20 => Some(d.to_vec()),
         0b01 if d.len() >= 4 => {
             let mut v = d.to_vec();
-            while v.len() % 4 != 0 {
+            while !v.len().is_multiple_of(4) {
                 v.push(0);
             }
             Some(v)

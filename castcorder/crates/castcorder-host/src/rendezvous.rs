@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn stream_turn_urls_are_recognised() {
         use turn_stream::Kind::{Tcp, Tls};
-        let s = |u: &str| stream_turn(u).map(|(h, p, k)| (h, p, k));
+        let s = stream_turn;
         assert_eq!(s("turns:h:5349"), Some(("h".into(), 5349, Tls)));
         assert_eq!(s("turns:h"), Some(("h".into(), 5349, Tls)));
         assert_eq!(s("turns:h:443?transport=tcp"), Some(("h".into(), 443, Tls)));
