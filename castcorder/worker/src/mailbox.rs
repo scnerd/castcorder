@@ -141,10 +141,9 @@ impl HostMailbox {
     ) -> Option<std::result::Result<IceServer, String>> {
         let turn = relay::turn(&self.env)?;
         // A woken object has lost the host's gates: read them back.
-        if ask != RelayAsk::Registered && self.mb.borrow().gates_of(host).is_none() {
-            if let Ok(Some(g)) = self.state.storage().get::<Vec<String>>(RELAY_GATES).await {
-                self.mb.borrow_mut().restore_gates(host, g);
-            }
+        let lost = ask != RelayAsk::Registered && self.mb.borrow().gates_of(host).is_none();
+        if lost && let Ok(Some(g)) = self.state.storage().get::<Vec<String>>(RELAY_GATES).await {
+            self.mb.borrow_mut().restore_gates(host, g);
         }
         let cap = relay::daily_cap(&self.env);
         let storage = self.state.storage();
@@ -180,7 +179,8 @@ impl HostMailbox {
 
     async fn closed(&self, ws: &WebSocket) {
         if let Some(id) = Self::conn_of(ws) {
-            if self.mb.borrow().host_of(id).is_some() {
+            let is_host = self.mb.borrow().host_of(id).is_some();
+            if is_host {
                 // The host left: its gates go with it.
                 let _ = self.state.storage().delete(RELAY_GATES).await;
             }
@@ -298,15 +298,17 @@ impl DurableObject for HostMailbox {
             }
         }
         // A host's gates changed: keep them for a woken object.
-        if text.contains("\"relay_gates\"")
-            && let Some(host) = self.mb.borrow().host_of(id)
+        let gates = if text.contains("\"relay_gates\"") {
+            let mb = self.mb.borrow();
+            mb.host_of(id)
+                .and_then(|host| mb.gates_of(host).map(<[String]>::to_vec))
+        } else {
+            None
+        };
+        if let Some(g) = gates
+            && let Err(e) = self.state.storage().put(RELAY_GATES, g).await
         {
-            let gates = self.mb.borrow().gates_of(host).map(<[String]>::to_vec);
-            if let Some(g) = gates {
-                if let Err(e) = self.state.storage().put(RELAY_GATES, g).await {
-                    tracing::error!(error = %e, "relay gates not stored");
-                }
-            }
+            tracing::error!(error = %e, "relay gates not stored");
         }
         self.dispatch(outs);
         Ok(())
