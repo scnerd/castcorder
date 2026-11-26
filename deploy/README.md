@@ -196,6 +196,18 @@ infrastructure instead of the project's:
   `--turn-secret` mint coturn credentials) and coturn, behind TLS, as
   `docker-compose.yml` does for development (`task dev:up`). Start hosts with
   `--rendezvous https://your.host`.
+  - *TCP and TLS relay.* A host or guest on a network that blocks outbound UDP can still
+    reach coturn over TCP or TLS (the host's TURN client reaches it through a loopback
+    bridge, castcorder-host `turn_stream`). `--turn` repeats: give the UDP URL first, then
+    `--turn "turn:your.host:3478?transport=tcp"` and `--turn "turns:your.host:443?transport=tcp"`
+    (the UDP URLs are tried first; a stream URL is used once they go unanswered). coturn
+    already listens on TCP 3478 (publish `3478/tcp`, as `docker-compose.yml` does). For
+    TLS, drop `no-tls` from `coturn/turnserver.conf` and add `tls-listening-port=5349`
+    (or `alt-tls-listening-port=443` where only 443 gets out), `cert=` and `pkey=` for a
+    certificate valid for your host name (the clients check it against the public roots),
+    and publish that port. `task test:relay:tcp` exercises the TCP path against coturn in
+    Docker; the TLS path is covered by the bridge's unit tests (a local TLS server), not
+    against coturn.
 - **Your own Worker** (your Cloudflare account): fork the repository and follow the
   setup above (put your age key in `.sops.yaml`, your owner in `github_owner` and
   `github_repository` in `deploy/tofu/terraform.tfvars`, and delete the committed
