@@ -40,7 +40,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeInput, writeWav16 } from './gen-wav.mjs';
 import { VERSION } from './lib/version.mjs';
-import { callDir } from './lib/helpers.mjs';
+import { callDir, relayProof } from './lib/helpers.mjs';
 import { COTURN_IMAGE, docker, localAddressToward, startCoturn, stopCoturn } from './lib/coturn.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -328,7 +328,7 @@ try {
   const quotaLogged = await waitFor(() => /relay_quota/.test(host.err), 'host logs relay_quota', 60000).then(() => true, () => false);
   check(quotaLogged, 'the host, reconnected, logged that the rendezvous refused relay credentials with relay_quota');
   const guestHello = await new Promise((resolve, reject) => {
-    const ws = new WebSocket('ws://' + RV_HTTP + '/ws?host=' + HOST_ID);
+    const ws = new WebSocket('ws://' + RV_HTTP + '/ws?host=' + HOST_ID + '&proof=' + relayProof(link.split('#')[1].split('.')[1]));
     const t = setTimeout(() => { ws.close(); reject(new Error('no hello')); }, 10000);
     ws.onmessage = (ev) => { clearTimeout(t); ws.close(); resolve(JSON.parse(String(ev.data))); };
     ws.onerror = () => { clearTimeout(t); reject(new Error('websocket error')); };

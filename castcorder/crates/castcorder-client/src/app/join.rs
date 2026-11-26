@@ -381,7 +381,14 @@ fn relay_mailbox_url(url: &str, link: &castcorder_link::CallLink) -> String {
 fn mailbox_url(url: &str, link: &castcorder_link::CallLink, relay: bool) -> String {
     let sep = if url.contains('?') { '&' } else { '?' };
     let url = if relay {
-        format!("{url}{sep}host={}", link.host.encode())
+        // The proof of the call link's secret: the rendezvous mints relay
+        // credentials only for a guest that holds a link its host admits.
+        format!(
+            "{url}{sep}host={}&{}={}",
+            link.host.encode(),
+            castcorder_link::wire::PROOF_PARAM,
+            link.secret.relay_proof()
+        )
     } else {
         url.to_string()
     };

@@ -80,6 +80,24 @@ impl CallSecret {
         Ok(CallSecret(b.try_into().map_err(|_| LinkError::Secret)?))
     }
 
+    /// The proof of knowing this secret that a guest shows the rendezvous to be
+    /// given relay (TURN) credentials (`?proof=`): 32 bytes derived from the
+    /// secret with HKDF-SHA256 under a label of their own, base64url. The
+    /// rendezvous never sees the secret, and cannot get it back from the proof.
+    pub fn relay_proof(&self) -> String {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"castcorder-relay-proof-v1"), &self.0);
+        let mut proof = [0u8; 32];
+        hk.expand(b"relay credentials", &mut proof)
+            .expect("32 bytes is a valid HKDF output length");
+        B64.encode(proof)
+    }
+
+    /// What the host registers with the rendezvous to let this secret's proof
+    /// through: [`relay_gate`] of [`Self::relay_proof`].
+    pub fn relay_gate(&self) -> String {
+        relay_gate(&self.relay_proof()).expect("a proof this code made is well formed")
+    }
+
     /// Compare with a presented secret (text form) in constant time.
     pub fn admits(&self, presented: &str) -> bool {
         let Ok(p) = CallSecret::parse(presented) else {
@@ -97,6 +115,15 @@ impl std::fmt::Debug for CallSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CallSecret(..)")
     }
+}
+
+/// The gate a presented proof matches (the host registers the gates of its
+/// calls' secrets): SHA-256 of the proof's bytes, base64url. `None` if
+/// `proof` is not 32 bytes of base64url.
+pub fn relay_gate(proof: &str) -> Option<String> {
+    use sha2::Digest;
+    let b = B64.decode(proof).ok()?;
+    (b.len() == 32).then(|| B64.encode(sha2::Sha256::digest(&b)))
 }
 
 /// What a call link carries in its fragment.
@@ -145,6 +172,27 @@ impl CallLink {
 mod tests {
     use super::*;
     use crate::seal::HostKey;
+
+    /// The proof is a fixed function of the secret (the browser tests compute it
+    /// in JavaScript with node's hkdfSync, from the same vector), differs per
+    /// secret, and its gate is what a host registers.
+    #[test]
+    fn relay_proof_and_gate() {
+        let zero = CallSecret([0; 16]);
+        assert_eq!(
+            zero.relay_proof(),
+            "GUfuzCak64lqB-VSwZCtkb7hMKBlSw5I3L0FDqOHxoA"
+        );
+        assert_ne!(zero.relay_proof(), CallSecret([1; 16]).relay_proof());
+        assert_eq!(relay_gate(&zero.relay_proof()), Some(zero.relay_gate()));
+        assert_ne!(
+            zero.relay_gate(),
+            zero.relay_proof(),
+            "the gate is a hash of the proof"
+        );
+        assert_eq!(relay_gate("short"), None);
+        assert_eq!(relay_gate(&zero.encode()), None);
+    }
 
     fn link() -> CallLink {
         CallLink {

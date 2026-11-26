@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 
 use crate::mailbox::{
     ConnId, Limits, MAILBOX_PARAM, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered,
-    query_param, relay_host,
+    query_param, relay_host, relay_proof,
 };
 use crate::turn::{TurnConfig, mint};
 use crate::usage::{LEDGER_FILE, Ledger, parse_metrics, save};
@@ -449,7 +449,9 @@ async fn ws(
     let ip = client_ip(&hub, peer, &headers);
     let ice = ice_servers(&hub, &headers);
     let query = uri.query().unwrap_or_default();
-    let host = relay_host(query);
+    // The host relay credentials are asked for, with the guest's proof of a
+    // call link it admits.
+    let host = relay_host(query).map(|h| (h, relay_proof(query).map(str::to_string)));
     let scope = query_param(query, MAILBOX_PARAM).and_then(|h| HostId::parse(h).ok());
     upgrade
         .max_message_size(MAX_FRAME)
@@ -495,6 +497,7 @@ fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: 
             conn,
             host,
             RelayAsk::Registered,
+            None,
             quota_refusal(hub, &host),
             now,
         )
@@ -508,7 +511,7 @@ async fn connection(
     ip: IpAddr,
     peer: SocketAddr,
     mut ice: Vec<IceServer>,
-    host: Option<HostId>,
+    host: Option<(HostId, Option<String>)>,
     scope: Option<HostId>,
 ) {
     let mut nonce = [0u8; 32];
@@ -524,7 +527,7 @@ async fn connection(
         let r = g.0.open(ip, peer, nonce, scope, now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
-            if let (Some(turn), Some(host)) = (&hub.turn, host) {
+            if let (Some(turn), Some((host, proof))) = (&hub.turn, host) {
                 // Only for a host that is connected now: a link to a host
                 // that is gone (or never was) mints nothing. A host gets its
                 // own credentials once registered (see `registered`).
@@ -535,7 +538,7 @@ async fn connection(
                 } else {
                     RelayAsk::Hello
                 };
-                match g.0.relay(id, host, ask, over, now) {
+                match g.0.relay(id, host, ask, proof.as_deref(), over, now) {
                     Ok(()) => ice.push(reuse.unwrap_or_else(|| {
                         let s = mint(turn, &host, unix_now());
                         remember(&hub, ip, host, &s);
