@@ -53,9 +53,11 @@ pub(super) fn poll_syncers(
     syncers: &mut BTreeMap<GuestId, Syncer>,
     libs: &mut CallSet<'_, FsStorage>,
     hold: bool,
+    paths: &BTreeMap<GuestId, bool>,
 ) -> Vec<GuestId> {
     let mut failed = Vec::new();
     for (id, s) in syncers.iter_mut() {
+        s.puller.set_video_allowed(super::video_allowed(paths, *id));
         if let Err(e) = s.puller.poll(libs, hold) {
             warn!(guest = id.0, device = %s.device, error = %e, "sync-only transfer failed on disk; dropping the connection");
             failed.push(*id);
@@ -296,6 +298,7 @@ impl Call {
                     "device": s.device,
                     "room": s.room,
                     "idle": s.puller.is_idle(),
+                    "video_waiting_for_direct": s.puller.video_held(),
                 })
             })
             .collect()

@@ -10,7 +10,7 @@ use super::*;
 
 /// What the Relay badge (tiles, People) means (cast-9ok).
 pub(super) const RELAY_TITLE: &str =
-    "Connected to the host through a relay server: it works, but may add delay.";
+    "Connected to the host through a relay server: it works, but may add delay. Video recordings wait to upload until the connection is direct; audio uploads as usual.";
 
 /// Up to two initials of a display name, for avatars.
 pub(super) fn initials(name: &str) -> String {
