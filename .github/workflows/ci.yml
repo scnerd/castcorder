@@ -363,6 +363,11 @@ jobs:
       - name: Relay test (spans a credential renewal)
         run: task test:relay
 
+      # The same forced-relay call with coturn reachable over TCP only: the host's
+      # TURN client goes through its stream bridge (cast-bpl, cast-76o).
+      - name: Relay test over TCP
+        run: task test:relay:tcp
+
       # Tier 3 system test: guest joins by call link only through the rendezvous. Shares
       # the host, rendezvous and client builds (and the null sink) set up for the relay test.
       - name: System test (call link through the rendezvous)

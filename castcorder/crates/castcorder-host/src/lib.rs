@@ -31,6 +31,7 @@ mod tls;
 pub use tls::unverified_client;
 mod tracks;
 pub mod transcript;
+mod turn_stream;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};

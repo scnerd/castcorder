@@ -129,16 +129,21 @@ const audioFrom = (inbound, origin) => (inbound || []).filter((i) => i.kind === 
 
 const SECRET = randomBytes(18).toString('base64url');
 const CONTAINER = 'castcorder-relay-test-' + process.pid;
+// RELAY_TRANSPORT=tcp (task test:relay:tcp): the rendezvous hands out only
+// coturn's TCP URL, so the host (through its stream bridge) and the browser
+// guests all reach TURN over TCP and none over UDP.
+const TURN_TRANSPORT = process.env.RELAY_TRANSPORT === 'tcp' ? 'tcp' : 'udp';
 let coturnLog = '';
 let passed = false;
 let rv, host;
 try {
   const turn = await startCoturn(CONTAINER, SECRET, {
     publish: ['9641/tcp'],
+    transport: TURN_TRANSPORT,
     extra: ['--prometheus', '--prometheus-username-labels', '--user-quota=32', '--max-bps=2500000'],
   });
   const [TURN_IP, TURN_PORT, TURN_URL] = [turn.ip, turn.port, turn.url];
-  console.log('coturn (' + COTURN_IMAGE + ', Docker) answering STUN at ' + TURN_IP + ':' + TURN_PORT + '/udp');
+  console.log('coturn (' + COTURN_IMAGE + ', Docker) answering STUN at ' + TURN_IP + ':' + TURN_PORT + '/udp; clients use ' + TURN_URL);
 
   const METRICS_PORT = Number(docker(['port', CONTAINER, '9641/tcp']).split('\n')[0].split(':').pop());
   const METRICS_URL = 'http://' + TURN_IP + ':' + METRICS_PORT + '/metrics';

@@ -40,6 +40,7 @@ use tracing::{info, warn};
 use tungstenite::{Message, WebSocket};
 
 use crate::call::Command;
+use crate::turn_stream;
 
 /// Silence longer than this means the connection is dead (the server pings
 /// every 20 s, and the host pings after [`PING_AFTER`] of silence).
@@ -655,23 +656,32 @@ fn session(
     }
 }
 
-/// The first server with credentials and a UDP `turn:` URL among `servers`,
-/// resolved, and when its credentials expire (if known). Its other UDP URLs
-/// (Cloudflare's UDP 443 beside 3478) are the alternates the transport moves
-/// on to when an address goes unanswered.
+/// The first server with credentials and a `turn:` or `turns:` URL among
+/// `servers`, resolved, and when its credentials expire (if known). Its UDP
+/// URLs come first (and their other addresses, like Cloudflare's UDP 443
+/// beside 3478, are the alternates the transport moves on to when an address
+/// goes unanswered); its TCP and TLS URLs follow, each reached through a
+/// loopback [`turn_stream::Bridge`], so a network that blocks outbound UDP
+/// still gets a relay once the UDP addresses have gone unanswered.
 fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     servers.iter().find_map(|s| {
         let (username, password) = (s.username.clone()?, s.credential.clone()?);
         let mut addrs: Vec<SocketAddr> = vec![];
+        let mut streams: Vec<SocketAddr> = vec![];
         for u in &s.urls {
-            if is_stream_turn(u) {
-                info!(url = %u, "relay URL skipped: the host's TURN client is UDP only (no turn TCP or turns TLS yet)");
+            if let Some((host, port, kind)) = stream_turn(u) {
+                match turn_stream::bridge(&host, port, kind) {
+                    Ok(b) if !streams.contains(&b.addr()) => streams.push(b.addr()),
+                    Ok(_) => {}
+                    Err(e) => warn!(url = %u, error = %e, "cannot start the TURN stream bridge"),
+                }
             } else if let Some(a) = turn_addr(u)
                 && !addrs.contains(&a)
             {
                 addrs.push(a);
             }
         }
+        addrs.extend(streams);
         let (&addr, alternates) = addrs.split_first()?;
         Some((
             TurnServer {
@@ -685,12 +695,30 @@ fn turn_server(servers: &[IceServer]) -> Option<(TurnServer, Option<u64>)> {
     })
 }
 
-/// Whether `url` asks for TURN over TCP or TLS, which the host does not speak.
-fn is_stream_turn(url: &str) -> bool {
-    url.starts_with("turns:")
-        || url
+/// A TURN URL over TCP or TLS (`turn:H:P?transport=tcp`, `turns:H:P`) as
+/// host, port and kind. The default port is 3478, and 5349 for `turns:`.
+fn stream_turn(url: &str) -> Option<(String, u16, turn_stream::Kind)> {
+    let (rest, kind, default) = if let Some(r) = url.strip_prefix("turns:") {
+        (r, turn_stream::Kind::Tls, 5349)
+    } else {
+        let r = url.strip_prefix("turn:")?;
+        let tcp = r
             .split_once('?')
-            .is_some_and(|(_, q)| q.split('&').any(|kv| kv == "transport=tcp"))
+            .is_some_and(|(_, q)| q.split('&').any(|kv| kv == "transport=tcp"));
+        if !tcp {
+            return None;
+        }
+        (r, turn_stream::Kind::Tcp, 3478)
+    };
+    let hostport = rest.split_once('?').map_or(rest, |(h, _)| h);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => match p.parse() {
+            Ok(p) => (h, p),
+            Err(_) => (hostport, default),
+        },
+        _ => (hostport, default),
+    };
+    Some((host.trim_matches(['[', ']']).to_string(), port, kind))
 }
 
 /// `turn:HOST[:PORT][?transport=udp]` to a socket address (UDP only).
@@ -907,10 +935,20 @@ mod tests {
 
     #[test]
     fn stream_turn_urls_are_recognised() {
-        assert!(is_stream_turn("turns:h:5349"));
-        assert!(is_stream_turn("turn:h:3478?transport=tcp"));
-        assert!(!is_stream_turn("turn:h:3478?transport=udp"));
-        assert!(!is_stream_turn("turn:h:3478"));
+        use turn_stream::Kind::{Tcp, Tls};
+        let s = stream_turn;
+        assert_eq!(s("turns:h:5349"), Some(("h".into(), 5349, Tls)));
+        assert_eq!(s("turns:h"), Some(("h".into(), 5349, Tls)));
+        assert_eq!(s("turns:h:443?transport=tcp"), Some(("h".into(), 443, Tls)));
+        assert_eq!(s("turn:h:80?transport=tcp"), Some(("h".into(), 80, Tcp)));
+        assert_eq!(s("turn:h?transport=tcp"), Some(("h".into(), 3478, Tcp)));
+        assert_eq!(
+            s("turn:[::1]:3478?transport=tcp"),
+            Some(("::1".into(), 3478, Tcp))
+        );
+        assert_eq!(s("turn:h:3478?transport=udp"), None);
+        assert_eq!(s("turn:h:3478"), None);
+        assert_eq!(s("stun:h"), None);
     }
 
     #[test]
@@ -949,19 +987,18 @@ mod tests {
                 expires: None,
             },
         ];
-        // Every UDP URL, in order and once: the rest are alternates.
-        assert_eq!(
-            turn_server(&servers),
-            Some((
-                TurnServer {
-                    addr: "127.0.0.1:3478".parse().unwrap(),
-                    username: "1:h".into(),
-                    password: "pw".into(),
-                    alternates: vec!["127.0.0.1:443".parse().unwrap()],
-                },
-                Some(1)
-            ))
-        );
+        // Every UDP URL, in order and once, then the stream URLs (each its own
+        // loopback bridge, the same bridge for a repeated URL).
+        let (server, expires) = turn_server(&servers).unwrap();
+        assert_eq!(expires, Some(1));
+        assert_eq!(server.addr, "127.0.0.1:3478".parse().unwrap());
+        assert_eq!(server.alternates.len(), 3, "udp 443, then two bridges");
+        assert_eq!(server.alternates[0], "127.0.0.1:443".parse().unwrap());
+        for a in &server.alternates[1..] {
+            assert!(a.ip().is_loopback() && a.port() != 3478 && a.port() != 5349);
+        }
+        assert_ne!(server.alternates[1], server.alternates[2]);
+        assert_eq!(turn_server(&servers).unwrap().0, server);
     }
 
     #[test]

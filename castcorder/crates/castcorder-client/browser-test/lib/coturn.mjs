@@ -85,12 +85,12 @@ async function reachableDockerAddress(container, port) {
 }
 
 // Start coturn as `container` with `secret`; `extra` adds coturn flags and
-// `publish` more container ports. Resolves to { ip, port, url } (the UDP
-// turn: URL) once it answers STUN. Stop it with stopCoturn(container).
-export async function startCoturn(container, secret, { extra = [], publish = [] } = {}) {
+// `publish` more container ports; `transport: 'tcp'` also publishes TCP and
+// makes the URL a TCP one. Resolves to { ip, port, url } (the turn: URL) once it answers STUN. Stop it with stopCoturn(container).
+export async function startCoturn(container, secret, { extra = [], publish = [], transport = 'udp' } = {}) {
   const problem = dockerProblem();
   if (problem) throw new Error(problem);
-  docker(['run', '-d', '--rm', '--name', container, '-p', '3478/udp', ...publish.flatMap((p) => ['-p', p]), COTURN_IMAGE,
+  docker(['run', '-d', '--rm', '--name', container, '-p', '3478/udp', ...(transport === 'tcp' ? ['-p', '3478/tcp'] : []), ...publish.flatMap((p) => ['-p', p]), COTURN_IMAGE,
     '-n', '--listening-port=3478', '--realm=castcorder.test', '--fingerprint',
     '--use-auth-secret', '--static-auth-secret=' + secret, '--min-port=49160', '--max-port=49200',
     ...extra,
@@ -98,6 +98,13 @@ export async function startCoturn(container, secret, { extra = [], publish = [] 
   const mapped = docker(['port', container, '3478/udp']).split('\n')[0];
   const port = Number(mapped.split(':').pop());
   const ip = await reachableDockerAddress(container, port);
+  // transport 'tcp': the URL names coturn's TCP listener (a separately mapped
+  // port), so a client that follows it reaches TURN over TCP only; `port`
+  // stays the UDP one the host's address probe and STUN checks use.
+  if (transport === 'tcp') {
+    const tcpPort = Number(docker(['port', container, '3478/tcp']).split('\n')[0].split(':').pop());
+    return { ip, port, tcpPort, url: 'turn:' + ip + ':' + tcpPort + '?transport=tcp' };
+  }
   return { ip, port, url: 'turn:' + ip + ':' + port + '?transport=udp' };
 }
 
