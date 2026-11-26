@@ -623,6 +623,16 @@ fn Call(ui: Ui) -> impl IntoView {
             .filter(|t| !delivered.contains(&t.name))
             .count()
     };
+    // This device's video waits on a relayed connection (cast-btf): the host
+    // does not pull video that way, and the track list holds audio only.
+    let video_waiting = move || {
+        ui.video_pending.get() > 0
+            && ui
+                .participant
+                .get()
+                .parse::<u64>()
+                .is_ok_and(|me| ui.relayed.get().contains(&me))
+    };
     let connection_note = move || {
         let c = ui.connection.get();
         if c == "connected" {
@@ -734,6 +744,10 @@ fn Call(ui: Ui) -> impl IntoView {
                     <button class="chip" hidden=move || producer() || unsent() == 0
                         on:click=move |_| ui.panel.set(Panel::Recordings)>
                         {move || format!("Your recordings: {} not yet with the host", unsent())}</button>
+                    <button id="video-waiting-chip" class="chip warn" hidden=move || producer() || !video_waiting()
+                        title="Your video uploads once your connection is direct; audio uploads as usual"
+                        on:click=move |_| ui.panel.set(Panel::Recordings)>
+                        "Your video is waiting for a direct connection"</button>
                     <button class="chip warn" hidden=move || ui.errors.get().is_empty()
                         on:click=move |_| ui.panel.set(Panel::Recordings)>
                         <Icon name="alert" small=true/>
