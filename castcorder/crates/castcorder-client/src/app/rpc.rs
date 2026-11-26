@@ -299,6 +299,8 @@ pub(super) fn pump_rpc(ui: Ui) {
                             .filter(|p| !names.iter().any(|(q, _)| q == p)),
                     );
                     e.cameras.retain(|(p, _)| !left.contains(p));
+                    e.relayed.retain(|p| !left.contains(p));
+                    ui.relayed.set(e.relayed.clone());
                     e.names = names;
                     relabel = true;
                 }
@@ -341,6 +343,19 @@ pub(super) fn pump_rpc(ui: Ui) {
                         None => e.cameras.push((participant.0, on)),
                     }
                     show_camera(participant.0, on);
+                }
+                Event::Relayed {
+                    participant,
+                    relayed,
+                } => {
+                    info!(call = %ctx.call, device = %ctx.device, guest = participant.0, relayed,
+                        "connection path: {}", if relayed { "relay" } else { "direct" });
+                    e.relayed.retain(|p| *p != participant.0);
+                    if relayed {
+                        e.relayed.push(participant.0);
+                    }
+                    ui.relayed.set(e.relayed.clone());
+                    show_relay(participant.0, relayed);
                 }
                 Event::ContactOffer { from, name, code } => {
                     info!(call = %ctx.call, from = from.0, "offered to become contacts");
@@ -770,6 +785,15 @@ pub(super) fn remote_tile(origin: &str) -> Option<web_sys::Element> {
     let words = doc.create_element("span").ok()?;
     let _ = chip.append_child(&words);
     let _ = tile.append_child(&chip);
+    // Through a TURN relay (cast-9ok): shown once the host says so.
+    let relay = doc.create_element("div").ok()?;
+    relay.set_class_name("tile-relay");
+    let _ = relay.set_attribute("title", super::view::RELAY_TITLE);
+    relay.set_text_content(Some("Relay"));
+    let relayed =
+        origin_participant(origin).is_some_and(|p| with_engine(|e| e.relayed.contains(&p)));
+    let _ = relay.toggle_attribute_with_force("hidden", !relayed);
+    let _ = tile.append_child(&relay);
     // Its camera may have been signalled off before its first track came.
     if signalled_camera(origin_participant(origin)) == Some(false) {
         let _ = tile.class_list().add_1("camera-off");
@@ -819,6 +843,29 @@ fn show_camera(participant: u64, on: bool) {
             } else {
                 t.class_list().add_1("camera-off")
             };
+        }
+    }
+}
+
+/// Show or hide the Relay badge on a participant's tile (if it exists yet;
+/// [`remote_tile`] applies it to one made later).
+fn show_relay(participant: u64, relayed: bool) {
+    let Some(remote) = window()
+        .document()
+        .and_then(|d| d.get_element_by_id("remote"))
+    else {
+        return;
+    };
+    let tiles = remote.children();
+    for i in 0..tiles.length() {
+        if let Some(t) = tiles.item(i)
+            && t.get_attribute("data-origin")
+                .as_deref()
+                .and_then(origin_participant)
+                == Some(participant)
+            && let Ok(Some(badge)) = t.query_selector(".tile-relay")
+        {
+            let _ = badge.toggle_attribute_with_force("hidden", !relayed);
         }
     }
 }

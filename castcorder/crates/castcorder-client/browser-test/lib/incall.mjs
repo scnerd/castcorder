@@ -40,6 +40,11 @@ export async function inCallChecks() {
     const t = await tiles(X);
     return t.length === 1 && t[0].startsWith('Y-') ? t[0] : null;
   }, 'X shows one tile for Y', 40000);
+  // cast-9ok: direct connections show no Relay badge, once the host knows.
+  await waitFor(() => (ctx.host10Log.match(/relayed=false[^\n]*connection path|connection path[^\n]*relayed=false/g) || []).length >= 2,
+    'the host found both connections direct', 15000);
+  check(!(await X.isVisible('#remote .tile .tile-relay')) && !(await X.isVisible('.stage > .tile .tile-relay')),
+    'direct connections show no Relay badge');
 
   // cast-d13: Y muted shows no level on X (Y's audio was arriving first).
   await waitFor(async () => {
