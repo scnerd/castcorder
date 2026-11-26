@@ -134,8 +134,11 @@ jobs:
         run: task check
 
   # Native capture (GStreamer) on Windows (cast-51t): the official MSVC installer, as
-  # release.yml installs it, then task test:gst. A runner has no input device, so the
-  # microphone test skips itself; the file-source and live-branch tests run.
+  # release.yml installs it, then task test:gst. A hosted Windows runner has no audio
+  # input device and no null-sink equivalent, so the live-microphone contract tests skip
+  # here (CASTCORDER_CI is unset for that step: it turns their skip into a failure); the
+  # Linux gst job in ci.yml runs them against a pulseaudio null sink. The file-source,
+  # live-branch and encoder tests run.
   windows-gst:
     name: windows gst
     runs-on: windows-latest
@@ -189,7 +192,10 @@ jobs:
           "$root\bin" >> $env:GITHUB_PATH
 
       - name: Clippy and tests with native capture
-        run: task test:gst
+        shell: pwsh
+        run: |
+          Remove-Item Env:CASTCORDER_CI
+          task test:gst
 
   # Tier 3 relay run on a degraded network: Linux tc netem on the loopback adds latency,
   # jitter and loss under the forced-relay test (coturn in Docker, two relay-only guests).
