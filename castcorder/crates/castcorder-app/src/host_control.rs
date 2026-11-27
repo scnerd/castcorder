@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
+use castcorder_host::appupdate::AppUpdate;
 use castcorder_host::library::{self, Moved, Relocate};
 use castcorder_host::{Config, LiveStatus, NativeInput, NativeState, Running};
 
@@ -126,6 +127,41 @@ impl HostControl {
         if let Ok(mut c) = self.config.lock() {
             c.relocate = Some(relocate);
         }
+    }
+
+    /// Let the home install the app's update (cast-b3k): `ready` names the
+    /// version downloaded, `install` installs it and restarts the app. The
+    /// host refuses while a call is on, before `install` runs.
+    pub fn allow_updating(
+        self: &Arc<Self>,
+        ready: impl Fn() -> Option<String> + Send + Sync + 'static,
+        install: impl Fn() -> Result<(), String> + Send + Sync + 'static,
+    ) {
+        let me: Weak<Self> = Arc::downgrade(self);
+        let update = AppUpdate {
+            ready: Arc::new(ready),
+            install: Arc::new(move || {
+                let host = me.upgrade().ok_or("the app is stopping")?;
+                host.may_update()?;
+                install()
+            }),
+        };
+        if let Ok(mut c) = self.config.lock() {
+            c.update = Some(update);
+        }
+    }
+
+    /// Why the app cannot restart into its update now, if it cannot.
+    pub fn may_update(&self) -> Result<(), String> {
+        if let Some(live) = self.live_status()
+            && (live.guests > 0 || live.recording.is_some())
+        {
+            return Err("a call is on: update once everyone has left".into());
+        }
+        if self.native_state().is_some_and(|n| n.joined.is_some()) {
+            return Err("you are in a call: leave it, then update".into());
+        }
+        Ok(())
     }
 
     /// Why the library cannot move to `to` now, if it cannot.

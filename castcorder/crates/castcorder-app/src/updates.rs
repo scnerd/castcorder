@@ -1,16 +1,22 @@
-//! The app's update check (cast-qci): "Check for updates" in the tray menu.
+//! The app's updates (cast-qci, cast-b3k).
 //!
 //! The updater plugin is registered only when the build has a signing key
 //! and endpoint (`plugins.updater` in the config): release builds get them
 //! from the release workflow's overlay config once the project's
 //! `TAURI_UPDATER_PUBKEY` exists (docs/release.md); development builds and
-//! forks without the key have no update item at all.
+//! forks without the key have no updates at all.
 //!
-//! One click checks. If a newer signed release exists the item becomes
-//! "Install Castcorder X (restarts)"; the next click downloads it, verifies
-//! its signature against the pubkey, installs it and restarts the app.
+//! The app looks for a newer signed release at start and every
+//! [`EVERY`], and downloads one it finds in the background (its signature is
+//! checked on download and again on install). Once downloaded, the tray item
+//! reads "Restart to update to Castcorder X" and the home says the update is
+//! ready ([`ready`], through the host's `/settings`); either installs it and
+//! restarts, refused while a call is on. Quit installs a downloaded update
+//! too, so nobody stays on an old version for long. With nothing downloaded,
+//! the tray item checks now.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use tauri::menu::MenuItem;
 use tauri::{AppHandle, Manager, Wry};
@@ -19,10 +25,22 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 /// The menu item's id.
 pub const ID: &str = "update";
 
-/// The tray item and the update it offers, if any.
+/// How often the app looks for a newer release.
+pub const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// An update downloaded and verified, waiting to be installed.
+struct Downloaded {
+    update: Update,
+    bytes: Vec<u8>,
+}
+
+/// The tray item and the update state.
+#[derive(Default)]
 pub struct Updates {
-    item: MenuItem<Wry>,
-    pending: Mutex<Option<Update>>,
+    item: Mutex<Option<MenuItem<Wry>>>,
+    /// A check or download is running.
+    busy: Mutex<bool>,
+    downloaded: Mutex<Option<Downloaded>>,
 }
 
 /// Whether this build's config enables the updater.
@@ -30,52 +48,90 @@ pub fn configured(app: &AppHandle) -> bool {
     app.config().plugins.0.contains_key("updater")
 }
 
-/// Register the plugin (only when [`configured`]).
+/// Register the plugin and the update state (only when [`configured`]).
 pub fn register(app: &AppHandle) {
     if !configured(app) {
         return;
     }
     if let Err(e) = app.plugin(tauri_plugin_updater::Builder::new().build()) {
         tracing::warn!(error = %e, "the updater is not available");
+        return;
     }
+    app.manage(Updates::default());
 }
 
-/// The tray's update item, if the updater is configured; also checks once now.
+/// The tray's update item, if the updater is configured; also starts the
+/// checks (now and every [`EVERY`]).
 pub fn item(app: &AppHandle, smoke: bool) -> Option<MenuItem<Wry>> {
-    if !configured(app) {
-        return None;
-    }
+    let updates = app.try_state::<Updates>()?;
     let item = MenuItem::with_id(app, ID, "Check for updates", !smoke, None::<&str>).ok()?;
-    app.manage(Updates {
-        item: item.clone(),
-        pending: Mutex::new(None),
-    });
+    if let Ok(mut i) = updates.item.lock() {
+        *i = Some(item.clone());
+    }
     if !smoke {
-        check(app, false);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            loop {
+                check(&app, false);
+                std::thread::sleep(EVERY);
+            }
+        });
     }
     Some(item)
 }
 
-/// The item was clicked: install the update found, else look for one.
+/// The version downloaded and ready to install, if any.
+pub fn ready(app: &AppHandle) -> Option<String> {
+    let updates = app.try_state::<Updates>()?;
+    let d = updates.downloaded.lock().ok()?;
+    d.as_ref().map(|d| d.update.version.clone())
+}
+
+/// The item was clicked: install the update downloaded, else look for one.
 pub fn clicked(app: &AppHandle) {
-    let waiting = app
-        .try_state::<Updates>()
-        .is_some_and(|u| u.pending.lock().is_ok_and(|p| p.is_some()));
-    if waiting {
-        install(app);
+    if ready(app).is_some() {
+        let host = &app.state::<crate::Shell>().host;
+        match host.may_update() {
+            Ok(()) => {
+                let _ = restart_into_update(app);
+            }
+            Err(e) => set_text(app, &format!("Update waits: {e}")),
+        }
     } else {
         check(app, true);
     }
 }
 
 fn set_text(app: &AppHandle, text: &str) {
-    if let Some(u) = app.try_state::<Updates>() {
-        let _ = u.item.set_text(text);
+    if let Some(u) = app.try_state::<Updates>()
+        && let Ok(i) = u.item.lock()
+        && let Some(i) = i.as_ref()
+    {
+        let _ = i.set_text(text);
     }
 }
 
-/// Look for a newer release in the background; `say` also reports "up to date".
+fn ready_text(version: &str) -> String {
+    format!("Restart to update to Castcorder {version}")
+}
+
+/// Look for a newer release and download it, in the background; `say` also
+/// reports "up to date" and failures on the tray item. Nothing happens while
+/// a check runs or an update waits.
 fn check(app: &AppHandle, say: bool) {
+    let Some(updates) = app.try_state::<Updates>() else {
+        return;
+    };
+    if ready(app).is_some() {
+        return;
+    }
+    match updates.busy.lock() {
+        Ok(mut b) if !*b => *b = true,
+        _ => return,
+    }
+    if say {
+        set_text(app, "Checking for updates...");
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let found = match app.updater() {
@@ -84,18 +140,25 @@ fn check(app: &AppHandle, say: bool) {
         };
         match found {
             Ok(Some(update)) => {
-                tracing::info!(version = %update.version, "an update is available");
+                tracing::info!(version = %update.version, "an update is available; downloading it");
                 set_text(
                     &app,
-                    &format!(
-                        "Install Castcorder {} (stops hosting, restarts)",
-                        update.version
-                    ),
+                    &format!("Downloading Castcorder {}...", update.version),
                 );
-                if let Some(u) = app.try_state::<Updates>()
-                    && let Ok(mut p) = u.pending.lock()
-                {
-                    *p = Some(update);
+                match update.download(|_, _| {}, || {}).await {
+                    Ok(bytes) => {
+                        tracing::info!(version = %update.version, "update downloaded");
+                        set_text(&app, &ready_text(&update.version));
+                        if let Some(u) = app.try_state::<Updates>()
+                            && let Ok(mut d) = u.downloaded.lock()
+                        {
+                            *d = Some(Downloaded { update, bytes });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "update not downloaded");
+                        set_text(&app, "Update download failed (try again)");
+                    }
                 }
             }
             Ok(None) => {
@@ -111,32 +174,49 @@ fn check(app: &AppHandle, say: bool) {
                 }
             }
         }
+        if let Some(u) = app.try_state::<Updates>()
+            && let Ok(mut b) = u.busy.lock()
+        {
+            *b = false;
+        }
     });
 }
 
-/// Download, verify and install the pending update, then restart.
-fn install(app: &AppHandle) {
-    let Some(update) = app
-        .try_state::<Updates>()
-        .and_then(|u| u.pending.lock().ok().and_then(|mut p| p.take()))
-    else {
-        return;
-    };
+/// Take the downloaded update.
+fn take(app: &AppHandle) -> Option<Downloaded> {
+    app.try_state::<Updates>()?.downloaded.lock().ok()?.take()
+}
+
+/// Install the downloaded update and restart into it, on a thread of its
+/// own (stopping the host waits for open files). Err when none is ready.
+pub fn restart_into_update(app: &AppHandle) -> Result<(), String> {
+    let d = take(app).ok_or("no update is ready")?;
     set_text(app, "Installing the update...");
     let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        match update.download_and_install(|_, _| {}, || {}).await {
+    std::thread::spawn(move || {
+        // Stop hosting first, as Quit does: open files get finished.
+        app.state::<crate::Shell>().host.stop();
+        match d.update.install(&d.bytes) {
             Ok(()) => {
-                tracing::info!(version = %update.version, "update installed; restarting");
-                // Stop hosting first, as Quit does: open files get finished.
-                // This runs on the async runtime, not the event loop.
-                app.state::<crate::Shell>().host.stop();
+                tracing::info!(version = %d.update.version, "update installed; restarting");
                 app.restart();
             }
             Err(e) => {
-                tracing::warn!(error = %e, "update not installed");
-                set_text(&app, "Update failed (check again)");
+                tracing::error!(error = %e, "update not installed; starting again on this version");
+                app.restart();
             }
         }
     });
+    Ok(())
+}
+
+/// On Quit, after the host stopped: install a downloaded update, so the next
+/// start is on it.
+pub fn install_on_quit(app: &AppHandle) {
+    if let Some(d) = take(app) {
+        match d.update.install(&d.bytes) {
+            Ok(()) => tracing::info!(version = %d.update.version, "update installed on quit"),
+            Err(e) => tracing::warn!(error = %e, "update not installed on quit"),
+        }
+    }
 }

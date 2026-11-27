@@ -179,6 +179,17 @@ struct SharedRoomCard {
 /// link, so not every refresh).
 const SHARED_EVERY_MS: i32 = 20_000;
 
+/// How often the home asks whether the app downloaded an update (cast-b3k).
+const UPDATE_EVERY_MS: i32 = 60_000;
+
+/// The app's update as `GET /settings` tells it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+struct UpdateView {
+    /// The version downloaded and ready to install.
+    #[serde(default)]
+    update_ready: Option<String>,
+}
+
 /// The app's own link for a call link: `castcorder://` in place of the
 /// scheme, which opens the app's call window on that room's lobby.
 pub(super) fn app_link(link: &str) -> String {
@@ -384,8 +395,31 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         1500,
     );
     let shared_timer = every(SHARED_EVERY_MS, ask_shared);
+    // An update the app downloaded (cast-b3k): offered until it installs.
+    let update = RwSignal::new(None::<String>);
+    let update_note = RwSignal::new(String::new());
+    let ask_update = move || {
+        spawn_local(async move {
+            if let Ok(t) = home_request("GET", "/settings", None).await
+                && let Ok(v) = serde_json::from_str::<UpdateView>(&t)
+                && update.get_untracked() != v.update_ready
+            {
+                update.set(v.update_ready);
+            }
+        })
+    };
+    ask_update();
+    let update_timer = every(UPDATE_EVERY_MS, ask_update);
+    let install_update = move |_| {
+        update_note.set("Restarting into the update...".into());
+        spawn_local(async move {
+            if let Err(e) = home_request("POST", "/settings/update", Some("{}".into())).await {
+                update_note.set(e);
+            }
+        })
+    };
     on_cleanup(move || {
-        for t in [timer, shared_timer].into_iter().flatten() {
+        for t in [timer, shared_timer, update_timer].into_iter().flatten() {
             window().clear_interval_with_handle(t);
         }
         if let Ok(t) = first_ask {
@@ -516,6 +550,18 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     </div>
                 </nav>
                 <div class="home-main">
+                    <div id="update-ready" class="room-card update-ready" hidden=move || update.with(Option::is_none)>
+                        <div class="room-head">
+                            <div class="room-title"><h2>{move || format!("Castcorder {} is ready", update.get().unwrap_or_default())}</h2></div>
+                            <span class="small muted room-line" id="update-note">{move || {
+                                let n = update_note.get();
+                                if n.is_empty() { "It installs when you restart the app or quit it.".to_string() } else { n }
+                            }}</span>
+                            <span class="room-actions">
+                                <button id="install-update" class="btn primary" on:click=install_update>"Restart to update"</button>
+                            </span>
+                        </div>
+                    </div>
                     <ul id="invites" class="list" hidden=move || invites.get().invites.is_empty()>
                         <For each=move || invites.get().invites key=|i| i.id let:i>
                             {

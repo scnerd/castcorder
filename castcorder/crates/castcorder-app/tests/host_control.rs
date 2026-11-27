@@ -272,6 +272,39 @@ fn the_call_window_bridge_makes_and_uses_contact_codes() {
 /// for a folder that has files; otherwise the host stops, the whole library
 /// (rooms and the person beside them) moves, and the host starts again on
 /// it as the same person with the same rooms.
+/// A guest connected to the host's call, with its data channels open.
+fn connect_guest(addr: SocketAddr) -> TestGuest<UdpDatagramSocket, SystemClock> {
+    let (_, role) = request(addr, "GET", "/role", "");
+    let host_id = serde_json::from_str::<serde_json::Value>(&role).unwrap()["host"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (mut guest, offer) = TestGuest::new(
+        UdpDatagramSocket::bind_loopback().unwrap(),
+        SystemClock::new(),
+    );
+    let proof = identity::sign_offer(&[7; 32], &host_id, None, now_ms(), &offer);
+    let body = serde_json::json!({
+        "type": "offer",
+        "sdp": offer,
+        "proof": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&proof)
+        ).unwrap(),
+    })
+    .to_string();
+    let (code, answer) = request(addr, "POST", "/offer?name=guest", &body);
+    assert_eq!(code, 200, "{answer}");
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    guest.accept_answer(answer["sdp"].as_str().unwrap());
+    let end = Instant::now() + Duration::from_secs(15);
+    while !(guest.connected && guest.channels_open()) {
+        assert!(Instant::now() < end, "the guest did not connect");
+        guest.step();
+        sleep(Duration::from_millis(1));
+    }
+    guest
+}
+
 #[test]
 fn settings_moves_the_whole_library_and_the_host_comes_back_on_it() {
     let root = scratch("move-library");
@@ -310,34 +343,7 @@ fn settings_moves_the_whole_library_and_the_host_comes_back_on_it() {
     assert_eq!(code, 409, "{why}");
 
     // So is a move while a guest is in the call.
-    let (_, role) = request(status.http_addr, "GET", "/role", "");
-    let host_id = serde_json::from_str::<serde_json::Value>(&role).unwrap()["host"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let (mut guest, offer) = TestGuest::new(
-        UdpDatagramSocket::bind_loopback().unwrap(),
-        SystemClock::new(),
-    );
-    let proof = identity::sign_offer(&[7; 32], &host_id, None, now_ms(), &offer);
-    let body = serde_json::json!({
-        "type": "offer",
-        "sdp": offer,
-        "proof": serde_json::from_str::<serde_json::Value>(
-            &castcorder_link::wire::to_json(&proof)
-        ).unwrap(),
-    })
-    .to_string();
-    let (code, answer) = request(status.http_addr, "POST", "/offer?name=guest", &body);
-    assert_eq!(code, 200, "{answer}");
-    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
-    guest.accept_answer(answer["sdp"].as_str().unwrap());
-    let end = Instant::now() + Duration::from_secs(15);
-    while !(guest.connected && guest.channels_open()) {
-        assert!(Instant::now() < end, "the guest did not connect");
-        guest.step();
-        sleep(Duration::from_millis(1));
-    }
+    let guest = connect_guest(status.http_addr);
     let (code, why) = ask(status.http_addr, &to);
     assert_eq!(code, 409);
     assert!(why.contains("call"), "{why}");
@@ -369,4 +375,61 @@ fn settings_moves_the_whole_library_and_the_host_comes_back_on_it() {
     assert!(rooms.contains("keep-me"), "the same rooms: {rooms}");
     control.stop();
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// cast-b3k: the home sees the update the app downloaded and installs it
+/// through the host, which refuses while a guest is in the call.
+#[test]
+fn the_home_offers_the_apps_update_and_installs_it_once_the_call_is_empty() {
+    let root = scratch("app-update");
+    let control = std::sync::Arc::new(HostControl::new(config(&root)));
+    let installs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = installs.clone();
+    control.allow_updating(
+        || Some("9.9.9".to_string()),
+        move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        },
+    );
+    let status = control.start().unwrap();
+    let (_, settings) = home(status.http_addr, "GET", "/settings", "");
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(settings["update_ready"], "9.9.9");
+
+    // Only the host machine's own page may install it.
+    let (code, _) = request(status.http_addr, "POST", "/settings/update", "{}");
+    assert_eq!(code, 403);
+
+    // Not while a guest is in the call.
+    let guest = connect_guest(status.http_addr);
+    let (code, why) = home(status.http_addr, "POST", "/settings/update", "{}");
+    assert_eq!(code, 409, "{why}");
+    assert!(why.contains("call"), "{why}");
+    assert_eq!(installs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(guest);
+    let end = Instant::now() + Duration::from_secs(30);
+    while control.live_status().unwrap().guests > 0 {
+        assert!(Instant::now() < end, "the guest did not leave");
+        sleep(Duration::from_millis(50));
+    }
+
+    let (code, why) = home(status.http_addr, "POST", "/settings/update", "{}");
+    assert_eq!(code, 200, "{why}");
+    assert_eq!(installs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    control.stop();
+}
+
+/// Without an app that updates itself, the home offers nothing.
+#[test]
+fn a_host_without_the_app_offers_no_update() {
+    let root = scratch("no-app-update");
+    let control = HostControl::new(config(&root));
+    let status = control.start().unwrap();
+    let (_, settings) = home(status.http_addr, "GET", "/settings", "");
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert!(settings["update_ready"].is_null(), "{settings}");
+    let (code, _) = home(status.http_addr, "POST", "/settings/update", "{}");
+    assert_eq!(code, 409);
+    control.stop();
 }

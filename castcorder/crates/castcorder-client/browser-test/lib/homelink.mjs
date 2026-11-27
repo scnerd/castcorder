@@ -54,6 +54,7 @@ export async function homeLinkChecks() {
   const old = P.locator('#joined-cards li[data-joined-room="Old-show"]');
   check((await old.textContent()).includes('Removed') && (await old.locator('a').count()) === 0,
     'a room the device was removed from says so and offers no way in');
+  check(await P.locator('#update-ready').isHidden(), 'a host whose app does not update itself offers no update on the home');
   // Replacing a room's link asks first (cast-7jv): it breaks every copy of the
   // old link, so one click on the menu item does nothing until confirmed.
   const mainCard = P.locator('#rooms li[data-room="main-show"]');
