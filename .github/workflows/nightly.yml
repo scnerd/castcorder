@@ -264,10 +264,52 @@ jobs:
           DEGRADED: "1"
         run: task test:relay
 
+  # The release workflow, run by hand on this commit: it verifies the version, then builds the
+  # installers on Windows, macOS and Linux and smoke-starts each one (no release is made). Run
+  # here so a change that breaks an installer build shows up in the nightly, not at a tag
+  # (cast-5gx). This job starts the run and waits for it.
+  installers:
+    name: release installers
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      actions: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ github.head_ref || github.ref_name }}
+    steps:
+      - name: Start the release workflow
+        run: |
+          started=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          id=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --event workflow_dispatch \
+              --branch "$BRANCH" --limit 10 --json databaseId,createdAt \
+              --jq "[.[] | select(.createdAt >= \"$started\")] | sort_by(.createdAt) | last | .databaseId // empty")
+            [ -n "$id" ] && break
+          done
+          if [ -z "$id" ]; then
+            echo "::error::the release workflow run did not start"
+            exit 1
+          fi
+          echo "RELEASE_RUN=$id" >> "$GITHUB_ENV"
+          echo "Release workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
+
+      - name: Wait for it
+        run: gh run watch "$RELEASE_RUN" --repo "$GITHUB_REPOSITORY" --interval 60 --exit-status
+
+      # This job was cancelled (a newer run replaced it): do not leave the builds running.
+      - name: Cancel the release workflow run
+        if: ${{ cancelled() && env.RELEASE_RUN != '' }}
+        run: gh run cancel "$RELEASE_RUN" --repo "$GITHUB_REPOSITORY"
+
   # A failing scheduled run files an issue pointing at it.
   report:
     name: report
-    needs: [heavy, camtoggle, platforms, windows-gst, degraded]
+    needs: [heavy, camtoggle, platforms, windows-gst, degraded, installers]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
