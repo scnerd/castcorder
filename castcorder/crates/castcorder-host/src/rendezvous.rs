@@ -1213,8 +1213,7 @@ mod tests {
     }
 
     /// A contact request (an empty call secret) is answered by the contacts,
-    /// not the host thread, through the real sealing: pending until someone
-    /// accepts it.
+    /// not the host thread, through the real sealing: accepted at once.
     #[test]
     fn a_contact_request_needs_no_call_secret_and_skips_the_host_thread() {
         let cfg = Config {
@@ -1260,11 +1259,11 @@ mod tests {
             &mut exchange,
             Instant::now(),
         );
-        assert!(matches!(r, Err(w) if w.contains("in time")));
+        assert!(r.is_ok(), "{r:?}");
         assert!(rx.try_recv().is_err());
         let v = cfg.contacts.view(crate::wall_ms());
-        assert_eq!(v.requests.len(), 1);
-        assert_eq!(v.requests[0].name, "Bob");
+        assert_eq!(v.contacts.len(), 1);
+        assert_eq!(v.contacts[0].name, "Bob");
     }
 
     /// Regenerating the link: the old secret no longer admits, the new one

@@ -455,9 +455,6 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .lobby-room a { color: var(--accent); }
 
 /* Home > Contacts (cast-40e.13). */
-.nav-badge { margin-left: auto; min-width: 20px; height: 20px; padding: 0 6px; box-sizing: border-box; border-radius: 10px;
-  background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700;
-  display: inline-flex; align-items: center; justify-content: center; }
 .contacts-page { display: flex; flex-direction: column; gap: 12px; }
 .contacts-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .contacts-head h2 { margin: 0; }
@@ -477,9 +474,6 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .contacts-lists section { display: flex; flex-direction: column; gap: 4px; }
 .group-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); padding: 0 4px 4px; }
 .group-label.accent { color: var(--accent); }
-.contact-requests-card { padding: 14px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--surface); }
-.contact-request { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.contact-request .contact-text { flex: 1 1 200px; }
 .contact-group { gap: 2px; }
 .contact-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 4px; border-radius: 10px; }
 .contact-row.on { background: var(--surface2); }

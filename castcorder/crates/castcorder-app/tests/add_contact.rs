@@ -289,7 +289,6 @@ fn a_participant_offers_another_to_become_contacts_through_the_host() {
     wait("Cy and Bob to be contacts", || {
         c.contact(&bob_id).is_some() && b.contact(&cy_id).is_some()
     });
-    assert!(b.contacts().requests.is_empty());
     drop((pb, pc, x));
     h.stop();
     b.stop();

@@ -32,8 +32,8 @@
 //!   is open, so presence pings every contact install, at most every few
 //!   minutes); `POST /contacts/code`
 //!   answers `{"links":[...],"code":FRAGMENT}`, a new one-time contact code;
-//!   `POST /contacts/decide` `{"device":ID,"accept":B}`; `POST /contacts/add`
-//!   `{"code":CODE}` asks the code's person in the background;
+//!   `POST /contacts/add` `{"code":CODE}` asks the code's person in the
+//!   background (the first install to use a code is added at once);
 //!   `POST /contacts/nickname` `{"person":ID,"nickname":N}`;
 //!   `POST /contacts/remove` `{"person":ID}`; `POST /contacts/presence`
 //!   `{"appear_offline":B}`. Each answers the view, or 409
@@ -185,10 +185,6 @@ struct ContactRequest {
     #[serde(default)]
     code: Option<String>,
     #[serde(default)]
-    device: Option<String>,
-    #[serde(default)]
-    accept: bool,
-    #[serde(default)]
     person: Option<String>,
     #[serde(default)]
     nickname: Option<String>,
@@ -233,12 +229,6 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
             ),
             Err(e) => text(409, e.to_string()),
         },
-        "/contacts/decide" => done(
-            r.device
-                .clone()
-                .ok_or_else(|| "no device".to_string())
-                .and_then(|d| app.contacts.decide(&d, r.accept)),
-        ),
         "/contacts/add" => done(
             r.code
                 .clone()
@@ -819,7 +809,6 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/contacts/code"
-            | "/contacts/decide"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"
@@ -857,7 +846,6 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         (
             "POST",
             "/contacts/code"
-            | "/contacts/decide"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"

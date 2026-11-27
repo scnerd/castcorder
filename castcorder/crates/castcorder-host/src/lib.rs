@@ -505,11 +505,6 @@ impl Running {
         ))
     }
 
-    /// Accept or decline the contact request of an app install.
-    pub fn decide_contact(&self, device: &str, accept: bool) -> Result<(), String> {
-        self.contacts.decide(device, accept)
-    }
-
     /// Ask the person whose app made `code` to become a contact, in the
     /// background ([Running::contacts]' `adding` follows it).
     pub fn add_contact(&self, code: &str) -> Result<(), String> {

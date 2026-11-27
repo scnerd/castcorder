@@ -12,22 +12,24 @@
 //!   one-time contact code (single use, [`CODE_TTL_MS`]). The first app
 //!   install to send a contact request with it claims it, bound to the key
 //!   that signed the request; anyone else is refused. The request must carry
-//!   that install's own certificate (an app install's, of another person),
-//!   and waits until someone here accepts or declines it, by the asking
-//!   person's name and the install's fingerprint. Accepted, the next request
-//!   of that key is answered with this install's certificate and person name,
-//!   the code is spent, and the asking person is a contact here.
+//!   that install's own certificate (an app install's, of another person).
+//!   It is accepted at once: answered with this install's certificate and
+//!   person name, and the asking person is a contact here. Nobody here is
+//!   asked (David, 2026-11-27): making and sending the code was the decision,
+//!   and the code is single use. The claim is kept until the code expires,
+//!   so the same install asking again (its answer lost) is answered again.
 //! - Pairing, at the person who uses the code ([`Contacts::add`]): seal a
 //!   contact request to the code's host key, send it (rendezvous mailbox or
 //!   the LAN listener's `POST /contact`), and ask again every
-//!   [`crate::person::POLL`] until accepted or refused. Accepted, the answer's
+//!   [`crate::person::POLL`] until accepted or refused (an older install may
+//!   still answer pending first). Accepted, the answer's
 //!   certificate must be for the very host key the code names (the key the
 //!   answer was sealed with), so a person's key is pinned to the install the
 //!   code came from; the other person is then a contact here too.
-//! - Both sides agree: the maker by making and sharing the code and then
-//!   accepting the request, the other by using the code. If the accepted
-//!   answer is lost on the way, only the maker lists the other until they
-//!   pair again (pairing an existing contact updates it).
+//! - Both sides agree: the maker by making and sharing the code, the other
+//!   by using it. If every accepted answer is lost on the way, only the
+//!   maker lists the other until they pair again (pairing an existing contact
+//!   updates it).
 //! - Removing a contact is local: the other side is not told (it stops
 //!   being answered: presence, castcorder-host `presence`). Room trust granted to
 //!   a contact's person stays until revoked in the room: being a contact
@@ -43,8 +45,7 @@ use std::time::Instant;
 
 use castcorder_link::identity::{self, device_id};
 use castcorder_link::person::{
-    ContactCode, DeviceCert, DeviceKind, Revocation, fingerprint, person_id, verify_cert,
-    verify_revocation,
+    ContactCode, DeviceCert, DeviceKind, Revocation, person_id, verify_cert, verify_revocation,
 };
 use castcorder_link::wire::{
     AnswerPlain, ContactAnswer, ContactAsk, ContactGrant, OfferPlain, OwnSync, PresenceAnswer,
@@ -129,43 +130,15 @@ struct Saved {
     appear_offline: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaimState {
-    Waiting,
-    Accepted,
-    Declined,
-}
-
-#[derive(Clone, Debug)]
-struct Claim {
-    key: [u8; 32],
-    person: [u8; 32],
-    cert: DeviceCert,
-    name: String,
-    state: ClaimState,
-}
-
 #[derive(Clone, Debug)]
 struct Code {
     secret: [u8; 16],
     made_ms: u64,
-    claim: Option<Claim>,
+    /// The key of the install that used it: only it may ask again.
+    claim: Option<[u8; 32]>,
     /// Made for this person (its id) from a call (cast-40e.10): their
-    /// request is accepted at once; anyone else's waits as usual.
+    /// request is accepted, anyone else's refused.
     for_person: Option<String>,
-}
-
-/// A contact request waiting for a decision, as the home shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct Request {
-    /// The asking install's device id (what [`Contacts::decide`] names).
-    pub device: String,
-    /// Its short fingerprint.
-    pub fingerprint: String,
-    /// The asking person's id.
-    pub person: String,
-    /// The name they gave.
-    pub name: String,
 }
 
 /// Using someone's contact code, as the home shows it.
@@ -215,8 +188,6 @@ pub struct ContactView {
 pub struct View {
     /// Every contact, in the order added.
     pub contacts: Vec<ContactView>,
-    /// Contact requests waiting for a decision.
-    pub requests: Vec<Request>,
     /// Unspent contact codes.
     pub codes: usize,
     /// Using someone's contact code, if started.
@@ -313,18 +284,6 @@ impl Contacts {
                     devices: c.devices.len(),
                     added_ms: c.added_ms,
                     presence: g.board.view(&c.id, now_ms, &self.timing),
-                })
-                .collect(),
-            requests: g
-                .codes
-                .iter()
-                .filter_map(|c| c.claim.as_ref())
-                .filter(|c| c.state == ClaimState::Waiting)
-                .map(|c| Request {
-                    device: device_id(&c.key),
-                    fingerprint: fingerprint(&c.key),
-                    person: person_id(&c.person),
-                    name: c.name.clone(),
                 })
                 .collect(),
             codes: g.codes.iter().filter(|c| c.claim.is_none()).count(),
@@ -486,30 +445,6 @@ impl Contacts {
             host: self.host.id(),
             secret,
         })
-    }
-
-    /// Accept or decline the contact request of the install `device`.
-    pub fn decide(&self, device: &str, accept: bool) -> Result<(), String> {
-        let mut g = self.lock();
-        let claim = g
-            .codes
-            .iter_mut()
-            .filter_map(|c| c.claim.as_mut())
-            .find(|c| c.state == ClaimState::Waiting && device_id(&c.key) == device)
-            .ok_or("no contact request from that device")?;
-        claim.state = if accept {
-            ClaimState::Accepted
-        } else {
-            ClaimState::Declined
-        };
-        crate::room::decision(
-            device,
-            "guest",
-            "add contact",
-            accept,
-            "decided at this device",
-        );
-        Ok(())
     }
 
     /// Give a contact a local nickname (empty: none).
@@ -1234,51 +1169,40 @@ impl Inner {
             return refuse("unknown or expired contact code");
         };
         let code = &mut self.codes[i];
-        let claim = match &mut code.claim {
-            None => {
-                let chosen = code.for_person.as_deref() == Some(person_id(&person).as_str());
-                let c = Claim {
-                    key,
-                    person,
-                    cert: cert.clone(),
-                    name: crate::http::clean_label(&ask.name),
-                    state: if chosen {
-                        ClaimState::Accepted
-                    } else {
-                        ClaimState::Waiting
-                    },
-                };
-                code.claim = Some(c.clone());
-                if !chosen {
-                    info!(device, name = %ask.name, "contact request waiting for a decision");
-                    return ContactAnswer::Pending;
-                }
-                info!(device, name = %ask.name, "contact request from the person chosen in a call");
-                c
-            }
-            Some(c) if c.key != key => return refuse("contact code already used by someone else"),
-            Some(c) => c.clone(),
-        };
-        match claim.state {
-            ClaimState::Waiting => ContactAnswer::Pending,
-            ClaimState::Declined => {
-                self.codes.remove(i);
-                refuse("declined")
-            }
-            ClaimState::Accepted => {
-                self.codes.remove(i);
-                self.upsert(claim.person, &claim.name, &claim.cert, now_ms);
-                self.board.sweep();
-                if let Err(e) = self.save() {
-                    warn!(error = %e, "could not save the new contact");
-                }
-                crate::room::decision(device, "guest", "add contact", true, "accepted");
-                ContactAnswer::Accepted(ContactGrant {
-                    cert: me_cert,
-                    name: me_name,
-                })
-            }
+        if code.claim.is_some_and(|c| c != key) {
+            return refuse("contact code already used by someone else");
         }
+        if code
+            .for_person
+            .as_deref()
+            .is_some_and(|p| p != person_id(&person))
+        {
+            return refuse("this contact code was made for someone else");
+        }
+        let name = crate::http::clean_label(&ask.name);
+        let first = code.claim.is_none();
+        code.claim = Some(key);
+        self.upsert(person, &name, cert, now_ms);
+        if first {
+            self.board.sweep();
+            if let Err(e) = self.save() {
+                warn!(error = %e, "could not save the new contact");
+            }
+            info!(device, name = %name, "contact added: they used this install's contact code");
+            crate::room::decision(
+                device,
+                "guest",
+                "add contact",
+                true,
+                "used the contact code",
+            );
+        } else if let Err(e) = self.save() {
+            warn!(error = %e, "could not save the contact");
+        }
+        ContactAnswer::Accepted(ContactGrant {
+            cert: me_cert,
+            name: me_name,
+        })
     }
 }
 

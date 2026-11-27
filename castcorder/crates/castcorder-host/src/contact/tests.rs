@@ -79,20 +79,13 @@ fn ask(code: &ContactCode, me: &HostKey, cert: Option<DeviceCert>, now: u64) -> 
     }
 }
 
-/// B asks A with `code` through A's real answering code; `decide` runs at
-/// A once the request is waiting. B's outcome.
-fn pair(
-    a: &Install,
-    b: &Install,
-    code: &ContactCode,
-    mut decide: impl FnMut(),
-) -> Result<String, String> {
+/// B asks A with `code` through A's real answering code. B's outcome; it
+/// must take a single exchange (nobody at A is asked).
+fn pair(a: &Install, b: &Install, code: &ContactCode) -> Result<String, String> {
     let mut calls = 0;
     let mut exchange = |sealed: &[u8]| {
         calls += 1;
-        if calls == 2 {
-            decide();
-        }
+        assert_eq!(calls, 1, "answered at once, not pending");
         let answer = a
             .contacts
             .answer_sealed(&b64(sealed), crate::wall_ms())
@@ -111,24 +104,14 @@ fn pair(
 }
 
 #[test]
-fn two_persons_become_contacts_only_once_the_maker_accepts() {
+fn two_persons_become_contacts_as_soon_as_the_code_is_used() {
     let (a, b) = (install("Ann", 1), install("Bob", 2));
     let code = a.contacts.new_code(crate::wall_ms()).unwrap();
     assert_eq!(a.contacts.view(crate::wall_ms()).codes, 1);
-    let waiting = std::cell::RefCell::new(None);
-    let r = pair(&a, &b, &code, || {
-        // B's request waits at A, by B's name and install fingerprint.
-        let v = a.contacts.view(crate::wall_ms());
-        assert_eq!(v.requests.len(), 1, "{v:?}");
-        assert!(v.contacts.is_empty(), "nothing kept before accepting");
-        *waiting.borrow_mut() = Some(v.requests[0].clone());
-        a.contacts.decide(&v.requests[0].device, true).unwrap();
-    });
+    // Making and sending the code was Ann's decision: Bob using it pairs
+    // them with nobody at Ann asked (David, 2026-11-27).
+    let r = pair(&a, &b, &code);
     assert_eq!(r, Ok("Ann".into()));
-    let req = waiting.into_inner().unwrap();
-    assert_eq!(req.name, "Bob");
-    assert_eq!(req.fingerprint, fingerprint(&b.host.id().0));
-    assert_eq!(req.person, b.persons.id());
 
     // Each lists the other, by person, with the install it paired from.
     let (va, vb) = (
@@ -150,29 +133,16 @@ fn two_persons_become_contacts_only_once_the_maker_accepts() {
         vec![b.persons.cert()]
     );
 
-    // A spent code is refused.
-    let again = a.contacts.answer(
-        &ask(&code, &b.host, Some(b.persons.cert()), crate::wall_ms()),
-        crate::wall_ms(),
-    );
+    // Past its lifetime even Bob is refused.
+    let late = crate::wall_ms() + CODE_TTL_MS + 1;
+    let again = a
+        .contacts
+        .answer(&ask(&code, &b.host, Some(b.persons.cert()), late), late);
     assert!(matches!(again, ContactAnswer::Refused(w) if w.contains("unknown")));
 
     // Both survive a restart.
     let back = Contacts::load(&a.dir, &a.host, a.persons.clone(), NOW).unwrap();
     assert_eq!(back.get(&b.persons.id()).unwrap().name, "Bob");
-}
-
-#[test]
-fn a_declined_request_leaves_neither_side_a_contact() {
-    let (a, b) = (install("Ann", 3), install("Bob", 4));
-    let code = a.contacts.new_code(crate::wall_ms()).unwrap();
-    let r = pair(&a, &b, &code, || {
-        let v = a.contacts.view(crate::wall_ms());
-        a.contacts.decide(&v.requests[0].device, false).unwrap();
-    });
-    assert_eq!(r, Err("declined".into()));
-    assert!(a.contacts.is_empty() && b.contacts.is_empty());
-    assert_eq!(a.contacts.view(crate::wall_ms()).codes, 0, "spent");
 }
 
 #[test]
@@ -183,22 +153,29 @@ fn only_the_first_app_to_use_a_code_may_and_codes_expire() {
     let first = a
         .contacts
         .answer(&ask(&code, &b.host, Some(b.persons.cert()), now), now);
-    assert_eq!(first, ContactAnswer::Pending);
+    assert!(matches!(first, ContactAnswer::Accepted(_)), "{first:?}");
+    assert_eq!(a.contacts.view(now).codes, 0, "claimed");
     let other = a.contacts.answer(
         &ask(&code, &c.host, Some(c.persons.cert()), now + 1),
         now + 1,
     );
     assert!(matches!(other, ContactAnswer::Refused(w) if w.contains("someone else")));
-    assert_eq!(a.contacts.view(now).requests.len(), 1);
-    // Unanswered past its lifetime, the request is gone and nobody is added.
+    assert!(a.contacts.get(&c.persons.id()).is_none());
+    // Bob asking again (his answer lost) is answered again: one contact.
+    let again = a.contacts.answer(
+        &ask(&code, &b.host, Some(b.persons.cert()), now + 2),
+        now + 2,
+    );
+    assert!(matches!(again, ContactAnswer::Accepted(_)), "{again:?}");
+    assert_eq!(a.contacts.view(now + 2).contacts.len(), 1);
+    // An unused code past its lifetime adds nobody.
+    let unused = a.contacts.new_code(now).unwrap();
     let late = now + CODE_TTL_MS + 1;
-    assert!(a.contacts.view(late).requests.is_empty());
-    assert!(a.contacts.decide(&device_id(&b.host.id().0), true).is_err());
     let after = a
         .contacts
-        .answer(&ask(&code, &b.host, Some(b.persons.cert()), late), late);
+        .answer(&ask(&unused, &c.host, Some(c.persons.cert()), late), late);
     assert!(matches!(after, ContactAnswer::Refused(w) if w.contains("expired")));
-    assert!(a.contacts.is_empty());
+    assert!(a.contacts.get(&c.persons.id()).is_none());
 }
 
 #[test]
@@ -258,12 +235,8 @@ fn an_accepting_answer_must_come_from_the_install_the_code_names() {
 #[test]
 fn nicknames_are_local_pairing_again_updates_and_removal_is_local() {
     let (a, b) = (install("Ann", 12), install("Bob", 13));
-    let accept = |a: &Install| {
-        let v = a.contacts.view(crate::wall_ms());
-        a.contacts.decide(&v.requests[0].device, true).unwrap();
-    };
     let code = a.contacts.new_code(crate::wall_ms()).unwrap();
-    pair(&a, &b, &code, || accept(&a)).unwrap();
+    pair(&a, &b, &code).unwrap();
     let ann = a.persons.id();
     b.contacts.set_nickname(&ann, "  Annie ").unwrap();
     assert_eq!(b.contacts.get(&ann).unwrap().nickname, "Annie");
@@ -271,7 +244,7 @@ fn nicknames_are_local_pairing_again_updates_and_removal_is_local() {
     // nickname kept.
     a.persons.set_names(Some("Ann B"), None).unwrap();
     let code = a.contacts.new_code(crate::wall_ms()).unwrap();
-    pair(&a, &b, &code, || accept(&a)).unwrap();
+    pair(&a, &b, &code).unwrap();
     let v = b.contacts.view(crate::wall_ms());
     assert_eq!(v.contacts.len(), 1);
     assert_eq!(
@@ -292,11 +265,7 @@ fn nicknames_are_local_pairing_again_updates_and_removal_is_local() {
 fn an_install_with_contacts_does_not_join_another_person() {
     let (a, b) = (install("Ann", 14), install("Bob", 15));
     let code = a.contacts.new_code(crate::wall_ms()).unwrap();
-    pair(&a, &b, &code, || {
-        let v = a.contacts.view(crate::wall_ms());
-        a.contacts.decide(&v.requests[0].device, true).unwrap();
-    })
-    .unwrap();
+    pair(&a, &b, &code).unwrap();
     let link = a.persons.new_code(NOW).unwrap();
     let r = b
         .contacts
@@ -375,11 +344,7 @@ fn ping_full(
 fn paired(n: u8) -> (Install, Install) {
     let (a, b) = (install("Ann", n), install("Bob", n + 1));
     let code = a.contacts.new_code(crate::wall_ms()).unwrap();
-    pair(&a, &b, &code, || {
-        let v = a.contacts.view(crate::wall_ms());
-        a.contacts.decide(&v.requests[0].device, true).unwrap();
-    })
-    .unwrap();
+    pair(&a, &b, &code).unwrap();
     (a, b)
 }
 
@@ -649,7 +614,7 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
 }
 
 /// A code made for a person chosen in a call (cast-40e.10) pairs that
-/// person with nobody asked; anyone else using it waits for a decision.
+/// person; anyone else using it is refused.
 #[test]
 fn a_code_made_for_a_chosen_person_is_accepted_at_once_for_them_only() {
     let (a, b, c) = (install("Ann", 54), install("Bob", 55), install("Cy", 56));
@@ -657,23 +622,19 @@ fn a_code_made_for_a_chosen_person_is_accepted_at_once_for_them_only() {
         .contacts
         .new_code_for(&b.persons.id(), crate::wall_ms())
         .unwrap();
-    // Cy got hold of it: Cy's request waits, and Ann declines it.
-    let r = pair(&a, &c, &code, || {
-        let v = a.contacts.view(crate::wall_ms());
-        assert_eq!(v.requests.len(), 1, "Cy's request waits for Ann");
-        a.contacts.decide(&v.requests[0].device, false).unwrap();
-    });
-    assert!(matches!(r, Err(w) if w.contains("declined")));
+    // Cy got hold of it: refused.
+    let r = pair(&a, &c, &code);
+    assert!(matches!(&r, Err(w) if w.contains("someone else")), "{r:?}");
+    assert!(a.contacts.get(&c.persons.id()).is_none());
     // A fresh one for Bob: accepted at once, nobody asked.
     let code = a
         .contacts
         .new_code_for(&b.persons.id(), crate::wall_ms())
         .unwrap();
-    let name = pair(&a, &b, &code, || panic!("Ann was asked")).unwrap();
+    let name = pair(&a, &b, &code).unwrap();
     assert_eq!(name, "Ann");
     assert!(a.contacts.get(&b.persons.id()).is_some());
     assert!(b.contacts.get(&a.persons.id()).is_some());
-    assert!(a.contacts.view(crate::wall_ms()).requests.is_empty());
 }
 
 #[test]

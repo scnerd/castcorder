@@ -34,7 +34,7 @@ A person you have mutually agreed to know. Contacts can see when each other's de
 _Avoid_: Friend, buddy, peer
 
 **Contact Code**:
-A one-time code, shared as a link or QR code, that one person's app install makes so that another person can ask to become their contact. The maker accepts or declines the request; it is single use and expires.
+A one-time code, shared as a link or QR code, that one person's app install makes so that another person can ask to become their contact. Whoever uses it first becomes a contact, with nothing for the maker to accept; it is single use and expires.
 _Avoid_: Contact link, invite, friend code
 
 **Trusted Device**:

@@ -113,9 +113,6 @@ fn contact_links_tell_shared_rooms_and_carry_invites() {
     let links = a.contact_code().unwrap();
     let lan = links.iter().find(|l| !l.contains("/v/")).unwrap();
     b.add_contact(lan).unwrap();
-    wait("Bob's request at Ann", || a.contacts().requests.len() == 1);
-    a.decide_contact(&a.contacts().requests[0].device.clone(), true)
-        .unwrap();
     wait("Bob to be added", || b.contacts().contacts.len() == 1);
     wait("Ann to see Bob", || online(&a) == ["Laptop"]);
 
