@@ -123,6 +123,20 @@ export async function homeLinkChecks() {
   check((await P.locator('#leave-person').innerText()).trim() === 'Leave for good?', 'Leave asks once more before leaving');
   check(errors.length === 0, 'the link page raised no page errors: ' + errors.join('; '));
 
+  // The Rooms explanation is a dismissible tip that stays gone (cast-n56.12).
+  await P.click('#nav-rooms');
+  const tip = P.locator('[data-hint="rooms-link"]');
+  check(await tip.isVisible(), 'the Rooms page shows its explanation as a tip');
+  await tip.locator('.hint-dismiss').click();
+  check(!(await tip.isVisible()), 'Got it hides the tip');
+  await P.reload();
+  await P.click('#nav-rooms');
+  check(!(await P.locator('[data-hint="rooms-link"]').isVisible()), 'a dismissed tip stays gone after a reload');
+  // The left nav is pinned: scrolling the page's content leaves it in place.
+  const navTop = () => P.evaluate(() => Math.round(document.querySelector('.home-nav').getBoundingClientRect().top));
+  await P.evaluate(() => { const m = document.querySelector('.home-main'); m.scrollTop = m.scrollHeight; window.scrollTo(0, document.body.scrollHeight); });
+  check((await navTop()) === 0, 'the left nav stays pinned at the top while the page scrolls');
+
   // Last: in Firefox a custom-scheme link leaves the page deaf to later clicks.
   // "Rooms you joined": say what it does, where the click happened.
   await P.click('#nav-rooms');
