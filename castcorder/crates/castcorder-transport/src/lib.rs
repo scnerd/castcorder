@@ -545,6 +545,8 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             sent: a.sent + b.sent,
             received: a.received + b.received,
             timeouts: a.timeouts + b.timeouts,
+            keepalives: a.keepalives + b.keepalives,
+            keepalives_answered: a.keepalives_answered + b.keepalives_answered,
             last_error: self.relays[self.active]
                 .stats
                 .last_error

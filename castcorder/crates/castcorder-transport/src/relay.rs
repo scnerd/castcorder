@@ -18,6 +18,15 @@
 //! - Datagrams from the TURN server are offered to the client first: its own
 //!   responses are consumed; Data indications come back as the peer's
 //!   datagram addressed to the relayed address.
+//! - While an allocation is held, a STUN Binding request goes to the server
+//!   every [`KEEPALIVE`] (cast-9tr). Without it, a host with no call (so no
+//!   permissions to refresh) sent nothing on the flow until the allocation's
+//!   Refresh 29 minutes in, and Cloudflare never answered that Refresh. The
+//!   likely cause is the idle flow itself: home routers drop an idle UDP
+//!   mapping within minutes, and an anycast edge may lose an idle flow, so
+//!   the Refresh no longer reaches the server holding the allocation. The
+//!   keepalive keeps the flow busy, and a run of unanswered keepalives is
+//!   logged, so a dead path shows before the Refresh fails.
 
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -39,6 +48,15 @@ pub const RETRY: Duration = Duration::from_secs(5);
 /// library's own retransmissions only give up after about 40 s, long enough to
 /// look like silence.
 pub const ALLOCATE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How often a held allocation's flow carries a STUN Binding request to the
+/// server (cast-9tr): well inside the shortest UDP mapping timeouts of home
+/// routers (30 s is common) and of the server's edge.
+pub const KEEPALIVE: Duration = Duration::from_secs(15);
+
+/// Keepalives unanswered in a row before the relay says the server stopped
+/// answering.
+const KEEPALIVE_SILENT: u32 = 4;
 
 /// A TURN server and the long-term credentials to use on it (for coturn's
 /// `use-auth-secret`: username `expiry:id`, password the base64 HMAC-SHA1 of
@@ -86,6 +104,10 @@ pub struct RelayStats {
     pub received: u64,
     /// Allocations abandoned after [`ALLOCATE_TIMEOUT`] without a grant.
     pub timeouts: u64,
+    /// Keepalives sent to the server ([`KEEPALIVE`]).
+    pub keepalives: u64,
+    /// Keepalives the server answered.
+    pub keepalives_answered: u64,
     /// Why the last allocation went wrong, if one did: a TURN error response
     /// (`allocate 401 Unauthorized`), a timeout, or a datagram the host could
     /// not send.
@@ -119,6 +141,12 @@ pub(crate) struct Relay {
     /// [`Relay::exhausted`]).
     exhausted: bool,
     requested: Vec<IpAddr>,
+    /// When the next keepalive is due, and the one awaiting its answer.
+    keepalive_at: Duration,
+    keepalive: Option<castcorder_link::stun::TxId>,
+    keepalive_seq: u64,
+    /// Keepalives in a row that went unanswered.
+    unanswered: u32,
     pub(crate) stats: RelayStats,
 }
 
@@ -330,6 +358,7 @@ impl Relay {
             self.at = next;
             return self.retry_at;
         }
+        self.keep_alive(socket, now);
         let c = self.client.as_mut().expect("just set");
         let next = match c.poll(instant(now)) {
             TurnPollRet::WaitUntil(t) => duration(t).max(now),
@@ -341,9 +370,40 @@ impl Relay {
             _ => now + Duration::from_millis(50),
         };
         self.flush(socket, now);
+        let next = if self.relayed.is_some() {
+            next.min(self.keepalive_at)
+        } else {
+            next
+        };
         match self.deadline {
             Some(d) if self.client.is_some() => next.min(d),
             _ => next,
+        }
+    }
+
+    /// Send a keepalive if one is due (only while an allocation is held).
+    fn keep_alive<S: DatagramSocket>(&mut self, socket: &S, now: Duration) {
+        if self.relayed.is_none() || now < self.keepalive_at {
+            return;
+        }
+        let Some(to) = self.server() else {
+            return;
+        };
+        if self.keepalive.is_some() {
+            self.unanswered += 1;
+            if self.unanswered == KEEPALIVE_SILENT {
+                warn!(server = %to, relayed = ?self.relayed.map(|r| r.to_string()), "the turn server stopped answering keepalives");
+            }
+        }
+        self.keepalive_seq += 1;
+        let mut txid = [0u8; 12];
+        txid[..4].copy_from_slice(b"ccka");
+        txid[4..].copy_from_slice(&(now.as_nanos() as u64 ^ self.keepalive_seq).to_be_bytes());
+        self.keepalive = Some(txid);
+        self.keepalive_at = now + KEEPALIVE;
+        self.stats.keepalives += 1;
+        if let Err(e) = socket.send_to(&castcorder_link::stun::binding_request(txid), to) {
+            debug!(error = %e, to = %to, "turn keepalive not sent");
         }
     }
 
@@ -390,6 +450,7 @@ impl Relay {
                 TurnEvent::AllocationCreated(_, relayed) => {
                     info!(relayed = %relayed, server = %c.remote_addr(), "turn allocation created");
                     self.relayed = Some(relayed);
+                    self.keepalive_at = now + KEEPALIVE;
                     self.deadline = None;
                     self.stats.last_error = None;
                     self.stats.allocations += 1;
@@ -426,6 +487,18 @@ impl Relay {
             return FromServer::NotTurn(payload);
         };
         let local = c.local_addr();
+        if let Some(want) = self.keepalive
+            && let Some((txid, _)) = castcorder_link::stun::parse_binding_success(&payload)
+            && txid == want
+        {
+            if self.unanswered >= KEEPALIVE_SILENT {
+                info!(server = %source, "the turn server answers keepalives again");
+            }
+            self.keepalive = None;
+            self.unanswered = 0;
+            self.stats.keepalives_answered += 1;
+            return FromServer::Handled;
+        }
         // A 401 to the first Allocate (it brings the realm and nonce) and a
         // 438 (stale nonce) are routine, so error responses are logged at
         // info and kept; the warning when an allocation fails names the last.
