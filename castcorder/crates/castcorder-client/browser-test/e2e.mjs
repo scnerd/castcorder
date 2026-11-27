@@ -108,6 +108,7 @@ import { capChecks } from './lib/cap.mjs';
 import { namesChecks } from './lib/names.mjs';
 import { roomsChecks } from './lib/rooms.mjs';
 import { rejoinChecks } from './lib/rejoin.mjs';
+import { hostRestartChecks } from './lib/hostrestart.mjs';
 import { joinFailChecks } from './lib/joinfail.mjs';
 import { lobbyChecks } from './lib/lobby.mjs';
 import { takeInfoChecks } from './lib/takeinfo.mjs';
@@ -194,7 +195,7 @@ Object.assign(ctx, { MODE, FULL, exe, dist, RESULTS, LIBRARY, HTTP, HTTPS, host,
 let passed = false;
 try {
   // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
-  // sections (security, identity, cap, names, takeinfo, rooms, rejoin,
+  // sections (security, identity, cap, names, takeinfo, rooms, restart, rejoin,
   // devices, homelink, incall, joinfail, lobby, transcript), each on its own host, skipping guests A and B (for iterating).
   const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
   const want = (s) => ONLY.length === 0 || ONLY.includes(s);
@@ -371,6 +372,7 @@ try {
   if (MODE !== 'fallback' && want('takeinfo')) await takeInfoChecks();
   if (MODE === 'chromium' && want('transcript')) await transcriptChecks();
   if (MODE !== 'fallback' && want('rooms')) await roomsChecks();
+  if (MODE !== 'fallback' && want('restart')) await hostRestartChecks();
   if ((FULL || MODE === 'firefox') && want('rejoin')) await rejoinChecks();
   if (FULL && want('joinfail')) await joinFailChecks();
   if (MODE !== 'fallback' && want('lobby')) await lobbyChecks();
@@ -391,6 +393,7 @@ try {
   if (ctx.host5) ctx.host5.kill();
   if (ctx.host6) ctx.host6.kill();
   if (ctx.host12) ctx.host12.kill();
+  if (ctx.host13) ctx.host13.kill();
   if (ctx.host7) ctx.host7.kill();
   if (ctx.host8) ctx.host8.kill();
   if (ctx.rv8) ctx.rv8.kill();
@@ -414,6 +417,7 @@ for (const n of ['A', 'B']) writeFileSync(join(RESULTS, 'guest-' + n + (FULL ? '
 for (const n of Object.keys(logs)) if (!['A', 'B', 'X', 'Y'].includes(n)) writeFileSync(join(RESULTS, 'guest-' + n + '-' + MODE + '.log'), logs[n].join('\n'));
 if (ctx.host5) writeFileSync(join(RESULTS, 'host-names-' + MODE + '.log'), ctx.host5Log || '');
 if (ctx.host6) writeFileSync(join(RESULTS, 'host-takeinfo-' + MODE + '.log'), ctx.host6Log || '');
+if (ctx.host13) writeFileSync(join(RESULTS, 'host-restart-' + MODE + '.log'), ctx.host13Log || '');
 if (ctx.host12) writeFileSync(join(RESULTS, 'host-transcript-' + MODE + '.log'), ctx.host12Log || '');
 if (!passed) {
   console.log('host log tail:');
