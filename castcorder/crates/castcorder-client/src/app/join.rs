@@ -645,6 +645,7 @@ pub(super) async fn renew_with_host_restart(pc: &RtcPeerConnection, offer: &str)
         {
             crate::mailbox::sleep_ms(50).await;
         }
+        info!("relay credentials renewal under way carried into the host's ICE restart");
         return;
     }
     let near = with_engine(|e| {
