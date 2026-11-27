@@ -354,3 +354,82 @@ fn an_archived_call_is_hidden_not_deleted_and_continuing_it_restores_it() {
     host.archive_call("show", &first, true).unwrap();
     assert_eq!(archived(&first), Some(true));
 }
+
+/// Renaming and archiving a room (cast-66n) change what the home shows and
+/// nothing else: the folder, the call link and the calls stay, both survive
+/// a restart, a blank name goes back to the folder name, and a room someone
+/// is in cannot be hidden.
+#[test]
+fn a_room_is_renamed_and_archived_without_moving_anything() {
+    let root =
+        std::env::temp_dir().join(format!("castcorder-app-room-edit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dist = root.join("dist");
+    std::fs::create_dir_all(&dist).unwrap();
+    std::fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
+    let config = || {
+        let mut c = Config::new(dist.clone());
+        c.library = root.join("library");
+        c.room = "show".into();
+        c.open = true;
+        c.bind = std::net::Ipv4Addr::LOCALHOST.into();
+        c.https_port = 0;
+        c.http_port = 0;
+        c.udp_port = 0;
+        c.align = None;
+        c
+    };
+    let host = castcorder_host::start(config(), |_| {}).unwrap();
+    assert_eq!(host.create_room("junk").unwrap(), "junk");
+    let view = |host: &castcorder_host::Running, room: &str| {
+        host.rooms().into_iter().find(|r| r.name == room).unwrap()
+    };
+    let before = view(&host, "junk");
+    assert_eq!((before.title.as_str(), before.archived), ("junk", false));
+
+    host.edit_room("junk", Some("  Old   test room "), None)
+        .unwrap();
+    let after = view(&host, "junk");
+    assert_eq!(after.title, "Old test room", "spaces are tidied");
+    assert_eq!(after.link, before.link, "the call link stays");
+    assert!(root.join("library/junk").is_dir(), "the folder stays");
+    host.edit_room("junk", None, Some(true)).unwrap();
+    assert!(view(&host, "junk").archived);
+    assert!(!view(&host, "show").archived, "only that room");
+
+    // Nonsense is refused and changes nothing.
+    assert!(host.edit_room("junk", Some(&"x".repeat(81)), None).is_err());
+    assert!(host.edit_room("nowhere", Some("x"), None).is_err());
+    assert!(host.edit_room("../x", None, Some(true)).is_err());
+    assert_eq!(view(&host, "junk").title, "Old test room");
+
+    // Both survive a restart (room.json).
+    host.stop();
+    let host = castcorder_host::start(config(), |_| {}).unwrap();
+    let again = view(&host, "junk");
+    assert_eq!(
+        (again.title.as_str(), again.archived),
+        ("Old test room", true)
+    );
+    host.edit_room("junk", Some(" "), Some(false)).unwrap();
+    let back = view(&host, "junk");
+    assert_eq!(
+        (back.title.as_str(), back.archived),
+        ("junk", false),
+        "a blank name is the folder name"
+    );
+
+    // The live room cannot be hidden, but can be renamed.
+    let (a, a_rpc, _) = join(&host, "show", 1, None).unwrap();
+    let e = host.edit_room("show", None, Some(true)).unwrap_err();
+    assert!(e.contains("live"), "{e}");
+    host.edit_room("show", Some("The Show"), None).unwrap();
+    assert_eq!(view(&host, "show").title, "The Show");
+    drop(a_rpc);
+    drop(a);
+    wait("the show empties", || !live(&host));
+    host.edit_room("show", None, Some(true)).unwrap();
+    assert!(view(&host, "show").archived);
+    host.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}

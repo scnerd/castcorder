@@ -176,6 +176,18 @@ pub enum Command {
         /// Whether it was done, or why not.
         reply: mpsc::Sender<Result<(), String>>,
     },
+    /// Rename a room or hide it from the Rooms list (the host machine's
+    /// home; cast-66n).
+    EditRoom {
+        /// The room (its folder name).
+        room: String,
+        /// Its new name (blank: its folder name), if renamed.
+        title: Option<String>,
+        /// Hide it (else bring it back), if that changes.
+        archived: Option<bool>,
+        /// Whether it was done, or why not.
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     /// Trust (or stop trusting) a whole person in a room (the host
     /// machine's home; ADR 0005).
     TrustPerson {
@@ -2218,6 +2230,17 @@ impl Call {
                 reply,
             } => {
                 let _ = reply.send(self.archive_call(&room, &call, archived));
+            }
+            Command::EditRoom {
+                room,
+                title,
+                archived,
+                reply,
+            } => {
+                let done = title
+                    .map_or(Ok(()), |t| self.rename_room(&room, &t))
+                    .and_then(|()| archived.map_or(Ok(()), |a| self.archive_room(&room, a)));
+                let _ = reply.send(done);
             }
             Command::TrustPerson {
                 room,

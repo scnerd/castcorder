@@ -397,9 +397,13 @@ struct HomeRequest {
     room: Option<String>,
     #[serde(default)]
     call: Option<String>,
-    /// `/rooms/archive`: hide the call (else bring it back).
+    /// `/rooms/archive`: hide the call, or the room when no call is named
+    /// (else bring it back).
     #[serde(default)]
     archived: bool,
+    /// `/rooms/rename`: the room's new name (blank: its folder name).
+    #[serde(default)]
+    title: Option<String>,
     /// `/folder/open`: the whole recordings folder (Settings).
     #[serde(default)]
     library: bool,
@@ -937,8 +941,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
-            | "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/person"
-            | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
+            | "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/rooms/rename"
+            | "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
             | "/person/leave",
         ) if !native_allowed(req, producer) => text(
             403,
@@ -1016,7 +1020,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             ),
             None => gone(),
         },
-        ("POST", "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive") => {
+        ("POST", "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/rooms/rename") => {
             let r = match serde_json::from_slice::<HomeRequest>(&req.body) {
                 Ok(r) => r,
                 Err(e) => return text(400, format!("bad json: {e}")),
@@ -1032,6 +1036,20 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                     reply,
                 })
                 .map(|a| a.map(|link| serde_json::json!({ "link": link }))),
+                "/rooms/archive" if r.call.is_none() => ask(app, |reply| Command::EditRoom {
+                    room: r.room.unwrap_or_default(),
+                    title: None,
+                    archived: Some(r.archived),
+                    reply,
+                })
+                .map(|a| a.map(|()| serde_json::json!({}))),
+                "/rooms/rename" => ask(app, |reply| Command::EditRoom {
+                    room: r.room.unwrap_or_default(),
+                    title: Some(r.title.unwrap_or_default()),
+                    archived: None,
+                    reply,
+                })
+                .map(|a| a.map(|()| serde_json::json!({}))),
                 "/rooms/archive" => ask(app, |reply| Command::ArchiveCall {
                     room: r.room.unwrap_or_default(),
                     call: r.call.unwrap_or_default(),

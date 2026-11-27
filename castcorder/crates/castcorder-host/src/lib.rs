@@ -798,6 +798,29 @@ impl Running {
             .map_err(|_| "the host did not answer")?
     }
 
+    /// Rename `room` (`title`; blank: its folder name) and/or hide it from
+    /// the home's Rooms list or bring it back (cast-66n). Its folder, link
+    /// and recordings stay. A room someone is in cannot be hidden.
+    pub fn edit_room(
+        &self,
+        room: &str,
+        title: Option<&str>,
+        archived: Option<bool>,
+    ) -> Result<(), String> {
+        let (reply, rx) = mpsc::channel();
+        self.finisher
+            .tx
+            .send(call::Command::EditRoom {
+                room: room.to_string(),
+                title: title.map(str::to_string),
+                archived,
+                reply,
+            })
+            .map_err(|_| "the host is stopping")?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|_| "the host did not answer")?
+    }
+
     /// The live status (guests, recording take, syncing outboxes), asked of
     /// the call's thread; `None` once the host is stopping.
     pub fn live_status(&self) -> Option<LiveStatus> {

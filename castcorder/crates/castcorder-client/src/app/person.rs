@@ -413,6 +413,16 @@ struct SharedRoomItem {
     /// Its call link, where the contact's install trusts this one.
     #[serde(default)]
     link: Option<String>,
+    /// The name its host gave it, if any (cast-66n).
+    #[serde(default)]
+    title: Option<String>,
+}
+
+impl SharedRoomItem {
+    /// The name it shows.
+    fn shown(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.room)
+    }
 }
 
 /// One install's answer (`GET /contacts/rooms`).
@@ -440,11 +450,11 @@ impl SharedView {
             .flat_map(|i| i.rooms.iter())
             .map(|r| {
                 if r.live && !r.in_call.is_empty() {
-                    format!("{} (live: {})", r.room, r.in_call.join(", "))
+                    format!("{} (live: {})", r.shown(), r.in_call.join(", "))
                 } else if r.live {
-                    format!("{} (live)", r.room)
+                    format!("{} (live)", r.shown())
                 } else {
-                    r.room.clone()
+                    r.shown().to_string()
                 }
             })
             .collect();
