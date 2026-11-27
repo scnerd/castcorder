@@ -26,7 +26,8 @@
 // `usage` subcommand on its data dir) shows bytes relayed for the host key.
 // Restarted on the same port and data dir with --relay-budget 1, it refuses
 // relay credentials with relay_quota: the reconnecting host logs it, and a
-// guest's hello for that host carries it with no turn: server.
+// guest's hello for that host carries it with no turn: server, and a guest
+// forced onto the relay is shown a note saying why it cannot connect.
 //
 // Every port is picked by the OS. CARGO_TARGET_DIR and CASTCORDER_DIST select
 // other build dirs; DOCKER_HOST is honoured by the docker CLI.
@@ -104,7 +105,7 @@ function check(ok, what) {
   console.log((ok ? 'ok   ' : 'BAD  ') + what);
 }
 
-const logs = { A: [], B: [], C: [], P: [], G: [] };
+const logs = { A: [], B: [], C: [], P: [], G: [], Q: [] };
 const browsers = [];
 async function openGuest(name, url, extraArgs = [], display = null) {
   const browser = await chromium.launch({
@@ -394,6 +395,13 @@ try {
   const turnGiven = (guestHello.ice_servers || []).some((s) => s.urls.some((u) => u.startsWith('turn:')));
   check(String(guestHello.relay_error || '').startsWith('relay_quota') && !turnGiven,
     'a guest calling the host over budget gets no relay, with relay_error ' + guestHello.relay_error);
+  // A guest whose connection needs a relay is told why it cannot connect (cast-gln).
+  const Q = await openGuest('Q', link.replace('/#', '/?name=Q&iceTransportPolicy=relay#'));
+  await Q.click('#join');
+  const told = await waitFor(async () => (await text(Q, '#call-notes')).includes('relay allowance'),
+    'Q told the relay allowance is used up', 30000).then(() => true, () => false);
+  check(told, 'a guest that needs a relay over budget is told so: ' + (await text(Q, '#call-notes')));
+  await Q.close().catch(() => {});
 
   coturnLog = docker(['logs', CONTAINER]);
   check(/session \d+: new, realm=<castcorder.test>/.test(coturnLog) || coturnLog.includes('ALLOCATE processed, success'),

@@ -133,6 +133,70 @@ jobs:
       - name: Check (format, clippy, tests)
         run: task check
 
+  # Native capture (GStreamer) on Windows (cast-51t): the official MSVC installer, as
+  # release.yml installs it, then task test:gst. A hosted Windows runner has no audio
+  # input device and no null-sink equivalent, so the live-microphone contract tests skip
+  # here (CASTCORDER_CI is unset for that step: it turns their skip into a failure); the
+  # Linux gst job in ci.yml runs them against a pulseaudio null sink. The file-source,
+  # live-branch and encoder tests run.
+  windows-gst:
+    name: windows gst
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # Keep in step with release.yml.
+      GST_VERSION: 1.28.8
+      GST_SHA256: e4c41ee6ee9c6c32a45d198463ec08d79bac3bd5fa58adc93d13fe4a08abc9d9
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-windows-gst
+
+      - name: Cache the GStreamer installer
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/gstreamer-installer
+          key: gstreamer-msvc-x86_64-${{ env.GST_VERSION }}
+
+      - name: Install GStreamer
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'gstreamer-installer'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $exe = Join-Path $dir "gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+          if (-not (Test-Path $exe)) {
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -UseBasicParsing -OutFile $exe -Uri "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GST_VERSION/msvc/gstreamer-1.0-msvc-x86_64-$env:GST_VERSION.exe"
+          }
+          if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $env:GST_SHA256) { throw 'GStreamer installer checksum mismatch' }
+          Start-Process -Wait $exe -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TYPE=full', '/DIR=C:\gstreamer'
+          $pc = Get-ChildItem C:\gstreamer -Recurse -Filter gstreamer-1.0.pc | Select-Object -First 1
+          if (-not $pc) { Get-ChildItem C:\gstreamer -Depth 3 | Select-Object -First 30 FullName; throw 'no GStreamer development files' }
+          $root = $pc.Directory.Parent.Parent.FullName
+          Write-Host "GStreamer at $root"
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root\" >> $env:GITHUB_ENV
+          "PKG_CONFIG_PATH=$root\lib\pkgconfig" >> $env:GITHUB_ENV
+          "$root\bin" >> $env:GITHUB_PATH
+
+      - name: Clippy and tests with native capture
+        shell: pwsh
+        run: |
+          Remove-Item Env:CASTCORDER_CI
+          task test:gst
+
   # Tier 3 relay run on a degraded network: Linux tc netem on the loopback adds latency,
   # jitter and loss under the forced-relay test (coturn in Docker, two relay-only guests).
   degraded:
@@ -245,7 +309,7 @@ jobs:
   # A failing scheduled run files an issue pointing at it.
   report:
     name: report
-    needs: [heavy, camtoggle, platforms, degraded, installers]
+    needs: [heavy, camtoggle, platforms, windows-gst, degraded, installers]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

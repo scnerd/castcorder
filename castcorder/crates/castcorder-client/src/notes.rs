@@ -40,9 +40,29 @@ pub fn source_changed(notes: &mut Vec<String>, by: &str, kind: &str, what: &str)
     }
 }
 
+/// What a guest whose connection needs a relay is told when the host's relay
+/// budget is spent (cast-gln): once, however often it reconnects.
+pub fn relay_budget_spent(notes: &mut Vec<String>) {
+    const NOTE: &str = "This call's host has used up its relay allowance for now, so your \
+        connection cannot go through a relay. If you cannot connect, try another network, \
+        such as a home connection instead of a work or public one.";
+    if !notes.iter().any(|n| n == NOTE) {
+        notes.push(NOTE.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_relay_budget_note_is_said_once() {
+        let mut n = Vec::new();
+        relay_budget_spent(&mut n);
+        relay_budget_spent(&mut n);
+        assert_eq!(n.len(), 1, "{n:?}");
+        assert!(n[0].contains("relay allowance"), "{n:?}");
+    }
 
     #[test]
     fn a_later_source_change_replaces_the_earlier_one() {
