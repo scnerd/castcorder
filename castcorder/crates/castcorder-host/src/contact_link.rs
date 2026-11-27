@@ -8,9 +8,13 @@
 //!   this install's certificate, and its proof signs the SDP. The other side
 //!   answers only a current contact (anyone else hears nothing), then
 //!   accepts it as a sync-only connection: data channels only.
-//! - The offering side is a [`Dialer`] on its own UDP socket. It gathers no
-//!   relay candidate of its own (no TURN credentials are minted for it); it
-//!   reaches the other side's host, server-reflexive or relay candidates.
+//! - The offering side is a [`Dialer`] on its own UDP socket. It offers its
+//!   host candidates and its server-reflexive address (asked of the STUN
+//!   server the rendezvous named, from that socket), and gathers no relay
+//!   candidate of its own (no TURN credentials are minted for it). Across
+//!   two routers that is what lets the other side's relay (or, through
+//!   endpoint-independent NATs, its server-reflexive address) reach it: the
+//!   other side's ICE checks open a TURN permission for that address.
 //! - One link per install, reused while open; closed after [`IDLE`] with
 //!   nothing asked (the other side closes it after a minute too).
 //! - All links live on one thread ([`spawn`]); an offer and its answer go
@@ -212,6 +216,7 @@ pub fn spawn(
     base: String,
     bind: IpAddr,
     advertise: Vec<IpAddr>,
+    health: crate::rendezvous::SharedHealth,
     stop: Arc<AtomicBool>,
 ) -> (Links, thread::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel::<Ask>();
@@ -263,8 +268,9 @@ pub fn spawn(
                     let (contacts, base, advertise, done) =
                         (contacts.clone(), base.clone(), advertise.clone(), opened_tx.clone());
                     let to = ask.to;
+                    let stun = health.lock().ok().and_then(|h| h.stun);
                     let spawned = thread::Builder::new().name("contact-link-offer".into()).spawn(move || {
-                        let r = dial(&contacts.me(), &to, &base, bind, &advertise);
+                        let r = dial(&contacts.me(), &to, &base, bind, &advertise, stun);
                         let _ = done.send((to.0, r));
                     });
                     if let Err(e) = spawned {
@@ -367,6 +373,7 @@ fn dial(
     base: &str,
     bind: IpAddr,
     advertise: &[IpAddr],
+    stun: Option<SocketAddr>,
 ) -> Result<Dial, String> {
     let socket = UdpDatagramSocket::bind(SocketAddr::new(bind, 0))
         .map_err(|e| format!("cannot bind a UDP socket: {e}"))?;
@@ -375,10 +382,12 @@ fn dial(
         .iter()
         .map(|ip| SocketAddr::new(*ip, port))
         .collect();
-    let (mut dialer, sdp) = Dialer::new(
+    let reflexive = stun.and_then(|server| reflexive(&socket, server));
+    let (mut dialer, sdp) = Dialer::with_reflexive(
         socket,
         SystemClock::new(),
         &advertise,
+        reflexive,
         DialTiming::default(),
     )?;
     let answer = offer(me, to, &sdp, crate::wall_ms(), &mut |sealed| {
@@ -386,4 +395,36 @@ fn dial(
     })?;
     dialer.accept_answer(&answer)?;
     Ok(dialer)
+}
+
+/// This socket's server-reflexive address, asked of `server` (a STUN Binding
+/// request, three tries 400 ms apart); `None` when it does not answer.
+fn reflexive(socket: &UdpDatagramSocket, server: SocketAddr) -> Option<SocketAddr> {
+    use castcorder_link::stun::{binding_request, parse_binding_success};
+    use castcorder_port_net::DatagramSocket;
+    for attempt in 0u8..3 {
+        let mut txid = [0u8; 12];
+        txid[..8].copy_from_slice(&(crate::wall_ms() ^ u64::from(attempt)).to_be_bytes());
+        txid[8..].copy_from_slice(&u32::from(socket.local_addr().port()).to_be_bytes());
+        if socket.send_to(&binding_request(txid), server).is_err() {
+            return None;
+        }
+        let until = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < until {
+            match socket.try_recv_from() {
+                Ok(Some((b, from))) if from == server => {
+                    if let Some((id, mapped)) = parse_binding_success(&b)
+                        && id == txid
+                    {
+                        debug!(reflexive = %mapped, "contact link: server-reflexive address learned");
+                        return Some(mapped);
+                    }
+                }
+                Ok(_) => thread::sleep(Duration::from_millis(5)),
+                Err(_) => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+    }
+    warn!(server = %server, "contact link: no STUN answer; offering host candidates only");
+    None
 }
