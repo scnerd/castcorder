@@ -287,7 +287,7 @@ async fn cloudflare(
         .await
         .and_then(|a| cf_usage::generated_servers(&a))
     {
-        Ok(s) => s,
+        Ok(s) => s.into_iter().map(cf_usage::with_firewall_ports).collect(),
         Err(e) => {
             // Still relay, untagged: this host's use goes unmetered.
             tracing::error!(host = %host.short(), error = %e, "tagged Cloudflare TURN credentials not minted; minting untagged");

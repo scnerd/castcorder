@@ -59,6 +59,35 @@ pub fn generated_servers(body: &str) -> Result<Vec<IceServer>, String> {
     })
 }
 
+/// A `credentials/generate` entry with the URLs `generate-ice-servers` would
+/// have given: that endpoint answers only the standard ports (3478, TLS on
+/// 5349) plus a `stun:` URL, while Cloudflare's TURN also listens on TCP 80
+/// and TLS 443, which strict firewalls leave open. So beside each
+/// `turn:HOST:3478?transport=tcp` this adds `turn:HOST:80?transport=tcp`,
+/// beside each `turns:HOST:5349?transport=tcp` it adds
+/// `turns:HOST:443?transport=tcp`, and it drops `stun:` URLs (every hello
+/// carries STUN on its own).
+pub fn with_firewall_ports(mut server: IceServer) -> IceServer {
+    let mut urls = Vec::with_capacity(server.urls.len() + 2);
+    for u in server.urls.drain(..) {
+        if u.starts_with("stun:") {
+            continue;
+        }
+        let extra = [
+            ("turn:", ":3478?transport=tcp", ":80?transport=tcp"),
+            ("turns:", ":5349?transport=tcp", ":443?transport=tcp"),
+        ]
+        .iter()
+        .find(|(scheme, port, _)| u.starts_with(scheme) && u.ends_with(port))
+        .map(|(_, port, alt)| format!("{}{alt}", &u[..u.len() - port.len()]));
+        urls.push(u);
+        urls.extend(extra);
+    }
+    urls.dedup();
+    server.urls = urls;
+    server
+}
+
 /// A host key's last known relay usage, as stored in its Durable Object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
@@ -225,6 +254,33 @@ mod tests {
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].credential.as_deref(), Some("c"));
         assert!(generated_servers(r#"{"result":null}"#).is_err());
+    }
+
+    #[test]
+    fn tagged_credentials_get_the_firewall_ports() {
+        let s = IceServer {
+            urls: [
+                "stun:stun.cloudflare.com:3478",
+                "turn:turn.cloudflare.com:3478?transport=udp",
+                "turn:turn.cloudflare.com:3478?transport=tcp",
+                "turns:turn.cloudflare.com:5349?transport=tcp",
+            ]
+            .map(String::from)
+            .to_vec(),
+            username: Some("u".into()),
+            credential: Some("c".into()),
+            expires: None,
+        };
+        assert_eq!(
+            with_firewall_ports(s).urls,
+            [
+                "turn:turn.cloudflare.com:3478?transport=udp",
+                "turn:turn.cloudflare.com:3478?transport=tcp",
+                "turn:turn.cloudflare.com:80?transport=tcp",
+                "turns:turn.cloudflare.com:5349?transport=tcp",
+                "turns:turn.cloudflare.com:443?transport=tcp",
+            ]
+        );
     }
 
     #[test]
