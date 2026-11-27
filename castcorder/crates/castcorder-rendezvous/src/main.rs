@@ -51,13 +51,7 @@ fn fail(msg: &str) -> ! {
 }
 
 fn rate(v: &str) -> Rate {
-    let parsed = v
-        .split_once('/')
-        .and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
-    match parsed {
-        Some((per_minute, burst)) if burst > 0 => Rate { per_minute, burst },
-        _ => fail("rates are PER_MIN/BURST, e.g. 120/60"),
-    }
+    Rate::parse(v).unwrap_or_else(|| fail("rates are PER_MIN/BURST, e.g. 120/60"))
 }
 
 fn parse_args() -> Config {

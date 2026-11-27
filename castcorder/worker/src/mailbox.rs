@@ -24,7 +24,7 @@ use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
 use castcorder_mailbox::cf_usage::Usage;
 use castcorder_mailbox::turn::RelayDay;
 use castcorder_mailbox::{
-    ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, RelayAsk, fill_registered,
+    ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered,
     relay_host, relay_proof,
 };
 use serde::{Deserialize, Serialize};
@@ -244,9 +244,25 @@ impl HostMailbox {
     }
 }
 
+/// The rate limits: the defaults, or `IP_RATE` and `HOST_RATE` as
+/// `PER_MIN/BURST` (as castcorder-rendezvous's `--ip-rate`/`--host-rate`).
+/// The system test sets a high `IP_RATE`, since all its browsers share one
+/// address.
+fn limits(env: &Env) -> Limits {
+    let mut l = Limits::default();
+    let rate = |name: &str| env.var(name).ok().and_then(|v| Rate::parse(&v.to_string()));
+    if let Some(r) = rate("IP_RATE") {
+        l.ip = r;
+    }
+    if let Some(r) = rate("HOST_RATE") {
+        l.host = r;
+    }
+    l
+}
+
 impl DurableObject for HostMailbox {
     fn new(state: State, env: Env) -> Self {
-        let mut mb = Mailbox::new(Limits::default());
+        let mut mb = Mailbox::new(limits(&env));
         let mut restored = 0;
         for ws in state.get_websockets() {
             let saved = ws

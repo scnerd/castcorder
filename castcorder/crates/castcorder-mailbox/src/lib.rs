@@ -86,6 +86,15 @@ pub struct Rate {
     pub burst: u32,
 }
 
+impl Rate {
+    /// `PER_MIN/BURST` (e.g. `120/60`); `None` if malformed or the burst is 0.
+    pub fn parse(v: &str) -> Option<Self> {
+        let (a, b) = v.trim().split_once('/')?;
+        let (per_minute, burst) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+        (burst > 0).then_some(Self { per_minute, burst })
+    }
+}
+
 /// The rate limits.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -865,6 +874,15 @@ mod tests {
             )]
         );
         assert_eq!(t.mb.hosts_online(), 0);
+    }
+
+    #[test]
+    fn a_rate_parses_from_per_min_slash_burst() {
+        let r = Rate::parse(" 6000/600 ").unwrap();
+        assert_eq!((r.per_minute, r.burst), (6000, 600));
+        for bad in ["", "120", "120/0", "a/b", "120/60/1"] {
+            assert!(Rate::parse(bad).is_none(), "{bad}");
+        }
     }
 
     #[test]
