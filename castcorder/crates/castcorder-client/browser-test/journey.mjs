@@ -13,6 +13,7 @@
 //  3. Dana invites Eli to the call; the invite shows on Eli's home. Both join:
 //     Dana from the room card, Eli from the invite.
 //  4. Dana records a take, stops it; Eli's track reaches Dana's install.
+//     A second take: Eli leaves while it records; the track arrives after it stops.
 //  5. Both leave and press "Back to your rooms" to get home.
 //
 // Needs: target/release/castcorder-host and castcorder-rendezvous, the
@@ -208,8 +209,34 @@ try {
   }, 'Eli\'s take 1 track on Dana\'s install', 60000, 1000).catch(() => null);
   check(eliTrack !== null, 'Eli\'s recording of take 1 reached Dana\'s install: ' + eliTrack);
 
+  // 4b. Eli leaves while take 2 still records, and stays on the page (it
+  // stands in for the app's call window, whose outbox delivers beside no
+  // call): nothing arrives while the take runs, then Eli's track reaches
+  // Dana's install, with Eli in no call (cast-t8v0).
+  await DC.click('#take-start');
+  await waitFor(async () => (await text(DC, '#take-status')).startsWith('recording'), 'take 2 recording', 15000);
+  await sleep(3000);
+  await EC.click('#leave');
+  await waitFor(async () => (await state(EC)) === 'left', 'Eli left mid-take', 15000);
+  if (await EC.locator('#left-stay').isVisible().catch(() => false)) await EC.click('#left-stay');
+  const eliTrack2 = () => {
+    for (const call of existsSync(lib) ? readdirSync(lib) : []) {
+      const take = join(lib, call, 'take02');
+      if (!existsSync(take)) continue;
+      const f = readdirSync(take).find((n) => n.startsWith('take02_Eli') && n.endsWith('_mic.wav'));
+      if (f) return join(call, 'take02', f);
+    }
+    return null;
+  };
+  await sleep(8000);
+  check(eliTrack2() === null, 'nothing of Eli\'s take 2 reached Dana\'s install while the take still recorded');
+  await DC.click('#take-stop');
+  await waitFor(async () => (await text(DC, '#take-status')).startsWith('idle'), 'take 2 stopped', 15000);
+  const late = await waitFor(eliTrack2, 'Eli\'s take 2 track on Dana\'s install', 90000, 1000).catch(() => null);
+  check(late !== null, 'Eli\'s track of take 2 reached Dana\'s install although Eli had left the call: ' + late);
+
   // 5. Both leave and go home.
-  for (const [p, who] of [[EC, 'Eli'], [DC, 'Dana']]) {
+  for (const [p, who] of [[DC, 'Dana']]) {
     await p.click('#leave');
     await waitFor(async () => (await state(p)) === 'left', who + ' left', 15000);
   }
