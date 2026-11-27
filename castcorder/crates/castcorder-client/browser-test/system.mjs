@@ -229,12 +229,16 @@ async function relayPhase() {
   const exp0 = Number((planned.match(/expires = (\d+)/) || [])[1]);
   check(exp0 > 0 && exp0 - Date.now() / 1000 <= RELAY_TTL + 5, 'D got relay credentials from the Worker lasting about ' + RELAY_TTL + ' s (expires ' + exp0 + ')');
   const before = counted();
-  const RENEWED = 'relay credentials renewed; asked the host to restart ICE';
+  const RENEWED = 'relay credentials renewed; they take effect at the next ICE restart';
   await waitFor(() => logs.D.some((l) => l.includes(RENEWED)), 'D renewing its relay credentials', (RELAY_TTL + 10) * 1000, 250);
   const at = logs.D.findIndex((l) => l.includes(RENEWED));
   check(Date.now() / 1000 < exp0, 'D renewed its relay credentials before they expired');
-  await waitFor(() => h.err.includes('guest renewed its relay credentials; restarting ICE'), 'the host restarting ICE for D', 10000);
-  check(true, 'D asked the host for an ICE restart and the host restarted ICE');
+  // The renewed credentials wait for an ICE restart: the host's own renewal
+  // (it carries them), or, if none comes by half the old ones' remaining
+  // life, one D asks for (cast-um1).
+  const restarted = await waitFor(() => (h.err.includes('guest renewed its relay credentials; restarting ICE') && 'D asked the host for one')
+    || (logs.D.slice(at).some((l) => l.includes('it carries them')) && 'the host\'s own renewal carried them'), 'an ICE restart for D', 15000);
+  check(true, 'an ICE restart took D\'s renewed credentials: ' + restarted);
   check(counted() > before, 'the Worker minted (and counted) D\'s renewed credentials: ' + before + ' -> ' + counted());
   const relayAnswer = (from) => logs.D.slice(from).find((l) => l.includes('answered host renegotiation')
     && Number((l.match(/relay_candidates = (\d+)/) || [])[1] || 0) >= 1);
