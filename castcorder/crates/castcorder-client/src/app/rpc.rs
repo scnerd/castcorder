@@ -38,6 +38,7 @@ pub(super) fn answer_offers(ui: Ui) {
 }
 
 pub(super) async fn answer_one(pc: &RtcPeerConnection, sdp: &str) -> Result<(), JsValue> {
+    super::join::renew_with_host_restart(pc, sdp).await;
     let offer = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
     offer.set_sdp(sdp);
     JsFuture::from(pc.set_remote_description(&offer)).await?;

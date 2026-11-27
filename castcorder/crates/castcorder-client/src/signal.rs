@@ -81,6 +81,26 @@ pub fn renew_after_ms(expires: u64, now_ms: f64) -> f64 {
 /// The shortest wait before renewing relay credentials.
 pub const MIN_RENEW_MS: f64 = 10_000.0;
 
+/// Whether a renewal due at `due_ms` (credentials expiring at `expires_ms`,
+/// both unix ms) is close enough at `now_ms` to bring forward into an ICE
+/// restart the host is offering anyway: once less time is left before the
+/// renewal than half the credentials' remaining life (from 60% of the
+/// lifetime on, with renewal at 80%). Renewing then needs no restart of its
+/// own. Two restarts a few seconds apart, as when the host and its guests
+/// renew credentials of the same lifetime minted moments apart, can leave a
+/// guest on a lossy network with no working path (cast-um1).
+pub fn renew_early(due_ms: f64, expires_ms: f64, now_ms: f64) -> bool {
+    due_ms - now_ms <= (expires_ms - now_ms) / 2.0
+}
+
+/// The ICE username fragment of an SDP (the first `a=ice-ufrag:`): an offer
+/// whose fragment differs from the current remote description's restarts
+/// ICE.
+pub fn ice_ufrag(sdp: &str) -> Option<&str> {
+    sdp.lines()
+        .find_map(|l| l.trim_end().strip_prefix("a=ice-ufrag:"))
+}
+
 /// How soon to try again after a failed renewal. The host renews its own
 /// credentials at the same point of the same lifetime, by reconnecting to
 /// the rendezvous, so a guest renewing then may briefly find it offline.
@@ -208,6 +228,27 @@ mod tests {
             relay_expires(&[turn(Some(200)), stun, turn(Some(100))]),
             Some(100)
         );
+    }
+
+    #[test]
+    fn a_renewal_joins_a_host_restart_only_when_it_is_near() {
+        // 60 s credentials minted at 0 renew at 48 s.
+        let (due, expires) = (48_000.0, 60_000.0);
+        assert!(!renew_early(due, expires, 20_000.0));
+        assert!(!renew_early(due, expires, 35_000.0));
+        assert!(renew_early(due, expires, 36_000.0));
+        // The host renews its own (minted a few seconds earlier) at 45 s.
+        assert!(renew_early(due, expires, 45_000.0));
+        assert!(renew_early(due, expires, 50_000.0));
+    }
+
+    #[test]
+    fn an_ice_restart_shows_as_a_new_ufrag() {
+        let a = "v=0\r\na=ice-ufrag:abcd\r\na=ice-pwd:x\r\nm=audio\r\na=ice-ufrag:abcd\r\n";
+        let b = "v=0\r\na=ice-ufrag:wxyz\r\na=ice-pwd:y\r\n";
+        assert_eq!(ice_ufrag(a), Some("abcd"));
+        assert_eq!(ice_ufrag(b), Some("wxyz"));
+        assert_eq!(ice_ufrag("v=0\r\n"), None);
     }
 
     #[test]

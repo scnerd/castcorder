@@ -204,6 +204,9 @@ struct Engine {
     recording: Option<TakeId>,
     offers: VecDeque<String>,
     answering: bool,
+    /// When and how the call connection's relay (TURN) credentials are
+    /// renewed next, while it has some (cast-lxt.11).
+    relay_renew: Option<join::RelayRenew>,
     /// Interval timers of this join (the 1 s tick).
     timers: Vec<i32>,
     mid_origin: Vec<(String, String)>,
