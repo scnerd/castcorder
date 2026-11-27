@@ -107,6 +107,11 @@ struct Who {
     name: String,
     #[serde(default)]
     device_name: String,
+    /// The host app's version and operating system, for a bug report.
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    os: String,
 }
 
 /// An invite to a call from a contact (`GET /contacts`, `invites`).
@@ -513,6 +518,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                         }}</span>
                         <span class="small muted">{move || who.get().device_name}</span>
                         <span id="reachability" class="small muted">{reach}</span>
+                        <a id="report-bug" class="small" target="_blank" rel="noopener noreferrer"
+                            href=move || castcorder_core::bugreport::url(&who.get().version, &who.get().os)>"Report a bug"</a>
                     </div>
                 </nav>
                 <div class="home-main">

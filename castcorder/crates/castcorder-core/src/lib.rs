@@ -22,6 +22,7 @@
 //! - [`timing`]: the timing metadata file written beside every track.
 //! - [`safety`]: the host's copy of each guest's live Opus stream, per take.
 
+pub mod bugreport;
 pub mod clocksync;
 pub mod diskspace;
 pub mod library;

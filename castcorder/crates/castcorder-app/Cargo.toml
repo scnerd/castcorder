@@ -45,6 +45,7 @@ vulkan = ["transcribe", "castcorder-host/whisper-vulkan"]
 metal = ["transcribe", "castcorder-host/whisper-metal"]
 
 [dependencies]
+castcorder-core.workspace = true
 castcorder-host = { path = "../castcorder-host" }
 castcorder-link.workspace = true
 tracing.workspace = true
@@ -64,7 +65,6 @@ tauri-plugin-single-instance = { version = "2", optional = true, features = [
 tauri-build = { version = "2", optional = true, features = [] }
 
 [dev-dependencies]
-castcorder-core.workspace = true
 castcorder-port-capture.workspace = true
 castcorder-port-disk.workspace = true
 castcorder-protocol.workspace = true

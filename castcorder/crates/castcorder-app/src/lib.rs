@@ -11,6 +11,7 @@
 //! (feature `desktop`).
 
 pub mod deeplink;
+pub mod external;
 pub mod host_control;
 pub mod remembered;
 

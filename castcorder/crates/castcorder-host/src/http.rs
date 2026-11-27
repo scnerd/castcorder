@@ -151,7 +151,13 @@ fn settings_json(app: &App) -> String {
 }
 
 fn person_json(app: &App) -> String {
-    serde_json::to_string(&app.persons.view(crate::wall_ms())).unwrap_or_default()
+    let mut v = serde_json::to_value(app.persons.view(crate::wall_ms())).unwrap_or_default();
+    // Where a bug report starts: the home's "Report a bug" link prefills them.
+    if let Some(o) = v.as_object_mut() {
+        o.insert("version".into(), env!("CARGO_PKG_VERSION").into());
+        o.insert("os".into(), std::env::consts::OS.into());
+    }
+    v.to_string()
 }
 
 /// A link or contact code's links (its `fragment`): through the rendezvous

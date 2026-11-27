@@ -51,6 +51,15 @@ export async function homeLinkChecks() {
   check((await theirs.textContent()).includes('2 calls'), 'the home lists a room the app joined elsewhere as a card with its calls');
   check((await theirs.locator('a').getAttribute('href')) === 'castcorder://rv.example.org/v/1/#hostid.secret',
     'its card opens the room in the app\x27s call window');
+  // "Report a bug" opens the bug-report issue form with this app's version and system
+  // filled in (cast-0wr), in a new tab, not over the home.
+  const bug = await waitFor(async () => {
+    const h = await P.getAttribute('#report-bug', 'href');
+    return h && h.includes('&version=') && h.includes('&system=') ? h : null;
+  }, 'the home links to the bug report with version and system', 10000, 250).catch(() => null);
+  check(bug !== null && bug.startsWith('https://github.com/scnerd/castcorder/issues/new?template=bug_report.yml&version=')
+    && (await P.getAttribute('#report-bug', 'target')) === '_blank',
+    'the home offers Report a bug: the issue form with version and system filled in, in a new tab' + (bug ? ' (' + bug + ')' : ''));
   const old = P.locator('#joined-cards li[data-joined-room="Old-show"]');
   check((await old.textContent()).includes('Removed') && (await old.locator('a').count()) === 0,
     'a room the device was removed from says so and offers no way in');

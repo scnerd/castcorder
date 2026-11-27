@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in Castcorder did not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do not include passwords, call links or anything private:
+        a call link lets anyone who has it join your call.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Where did it happen?
+      options:
+        - As the host (in the app)
+        - As a guest in the app
+        - As a guest in a browser
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Castcorder version
+      description: Filled in by the Report a bug link; see the tray menu or the installer name otherwise.
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and browser
+      description: For example Windows 11 and Chrome 130, or macOS 15 and Safari.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: |
+        Host logs are in the `logs` folder of your Castcorder library (`Documents\Castcorder` or `~/Castcorder`);
+        guest logs sync there after a call. Paste the lines around the problem, not the whole file.
+      render: text
