@@ -395,6 +395,7 @@ fn Lobby(ui: Ui) -> impl IntoView {
         })
     };
     let named = move || !clean_name(&ui.name.get()).is_empty();
+    let phone_notice = phone::lobby_notice();
     // The host refused the last attempt for its password (or one is typed).
     let asked_password = move || {
         ui.join_note.get() == refusal_note("wrong_password:")
@@ -510,8 +511,14 @@ fn Lobby(ui: Ui) -> impl IntoView {
                     <LinkBar ui=ui id="call-link-lobby"/>
                     <div class="notice" role="note">
                         <span class="info" aria-hidden="true">"i"</span>
-                        <span>"This call is recorded. Your computer records your microphone, and your camera if it is on, at full quality and sends the files to the host after each take. Producers can see and switch which microphone and camera you use."</span>
+                        <span>"This call is recorded. This device records your microphone, and your camera if it is on, at full quality and sends the files to the host after each take. Producers can see and switch which microphone and camera you use."</span>
                     </div>
+                    {(!phone_notice.is_empty()).then(|| view! {
+                        <div class="notice warn" role="note" id="phone-notice">
+                            <span class="info" aria-hidden="true">"!"</span>
+                            <span>{phone_notice}</span>
+                        </div>
+                    })}
                     <button id="join" class="btn primary big" disabled=move || ui.joined.get() || !named() on:click=on_join>"Join call"</button>
                     <span class="small muted" id="name-needed" hidden=named>"Type your name to join."</span>
                     <div id="join-note" class="lobby-error" role="alert" hidden=move || ui.join_note.get().is_empty()>

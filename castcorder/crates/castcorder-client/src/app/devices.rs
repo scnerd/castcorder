@@ -419,6 +419,7 @@ async fn switch_mic(ui: Ui, epoch: u32) {
             return;
         }
     };
+    phone::watch(ui, &raw, epoch);
     let label = first_audio(&raw).map(|t| t.label()).unwrap_or_default();
     let (ctx, take, old_raw, old_live, sources, audio, worklet) = with_engine(|e| {
         e.capture = None;

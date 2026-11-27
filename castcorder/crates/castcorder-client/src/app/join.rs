@@ -69,6 +69,7 @@ pub(super) async fn join(ui: Ui) -> Result<(), JsValue> {
         stop_tracks(&[Some(raw), Some(live)], &[]);
         return Ok(());
     }
+    phone::watch(ui, &raw, epoch);
     with_engine(|e| {
         e.raw = Some(handle(&raw));
         e.live = Some(handle(&live));

@@ -84,6 +84,10 @@
 //    person over the LAN; "Link a device" and "Rooms you joined" show a visible
 //    result: see homeLinkChecks() in lib/homelink.mjs.
 //
+// 14. (chromium) Guests on phones, with device emulation: the lobby's phone
+//    notice and layout, and the microphone paused by the system mid-take:
+//    see mobileChecks() in lib/mobile.mjs.
+//
 // Run from the repo root with:  task test:browser:client  (or task test:browser)
 // Everything printed is ASCII. Logs go to browser-test/test-results/.
 
@@ -118,6 +122,7 @@ import { homeLinkChecks } from './lib/homelink.mjs';
 import { inCallChecks } from './lib/incall.mjs';
 import { openGuest } from './lib/guest.mjs';
 import { phoneLeaveChecks } from './lib/phone.mjs';
+import { mobileChecks } from './lib/mobile.mjs';
 import { recordingsWhileRecording, recordingsAfterSync, watchToasts } from './lib/recordings.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -196,7 +201,7 @@ let passed = false;
 try {
   // CASTCORDER_E2E_ONLY=<section>[,<section>...] runs only those of the later
   // sections (security, identity, cap, names, takeinfo, rooms, restart, rejoin,
-  // devices, homelink, incall, joinfail, lobby, transcript), each on its own host, skipping guests A and B (for iterating).
+  // devices, homelink, incall, joinfail, lobby, transcript, mobile), each on its own host, skipping guests A and B (for iterating).
   const ONLY = (process.env.CASTCORDER_E2E_ONLY || '').split(',').filter((s) => s.length > 0);
   const want = (s) => ONLY.length === 0 || ONLY.includes(s);
   if (ONLY.length === 0) {
@@ -380,6 +385,7 @@ try {
   if (want('devices')) await devicesChecks();
   if (MODE !== 'fallback' && want('homelink')) await homeLinkChecks();
   if (MODE !== 'fallback' && want('incall')) await inCallChecks();
+  if (MODE === 'chromium' && want('mobile')) await mobileChecks();
   passed = checks.every((c) => c.ok);
 
 } catch (e) {
@@ -419,6 +425,7 @@ if (ctx.host5) writeFileSync(join(RESULTS, 'host-names-' + MODE + '.log'), ctx.h
 if (ctx.host6) writeFileSync(join(RESULTS, 'host-takeinfo-' + MODE + '.log'), ctx.host6Log || '');
 if (ctx.host13) writeFileSync(join(RESULTS, 'host-restart-' + MODE + '.log'), ctx.host13Log || '');
 if (ctx.host12) writeFileSync(join(RESULTS, 'host-transcript-' + MODE + '.log'), ctx.host12Log || '');
+if (ctx.host13) writeFileSync(join(RESULTS, 'host-mobile-' + MODE + '.log'), ctx.host13Log || '');
 if (!passed) {
   console.log('host log tail:');
   console.log(ctx.hostLog.split('\n').slice(-30).join('\n'));
