@@ -200,57 +200,104 @@ pub(crate) fn is_deallocation(d: &[u8]) -> bool {
 /// allocation is refreshed every few minutes while it lives).
 const IDLE: Duration = Duration::from_secs(15 * 60);
 
+/// Most reads of one stream in a turn.
+const MAX_READS_PER_TURN: usize = 16;
+/// Most datagrams taken from the client sockets before the streams get a turn.
+const MAX_PER_TURN: usize = 512;
+
+/// Send one datagram a client socket sent to that socket's stream, opening it
+/// first when there is none (at most once per [`RECONNECT`]).
+#[allow(clippy::too_many_arguments)]
+fn forward(
+    data: &[u8],
+    from: SocketAddr,
+    conns: &mut HashMap<SocketAddr, Conn>,
+    last_try: &mut HashMap<SocketAddr, Instant>,
+    host: &str,
+    port: u16,
+    kind: Kind,
+    roots: &Arc<rustls::RootCertStore>,
+) {
+    if !conns.contains_key(&from) && last_try.get(&from).is_none_or(|t| t.elapsed() >= RECONNECT) {
+        last_try.insert(from, Instant::now());
+        match connect(host, port, kind, roots) {
+            Ok(stream) => {
+                debug!(%host, port, ?kind, client = %from, "TURN stream connected");
+                conns.insert(
+                    from,
+                    Conn {
+                        stream,
+                        inbuf: Vec::new(),
+                        last_sent: Instant::now(),
+                        close_at: None,
+                    },
+                );
+            }
+            Err(e) => {
+                warn!(%host, port, ?kind, error = %e, "TURN stream connect failed")
+            }
+        }
+    }
+    if let Some(c) = conns.get_mut(&from) {
+        c.last_sent = Instant::now();
+        if is_deallocation(data) {
+            debug!(client = %from, "TURN stream: deallocation seen; closing the stream soon");
+            c.close_at = Some(Instant::now() + CLOSE_AFTER_DEALLOCATE);
+        }
+        if let Some(frame) = frame_for_stream(data)
+            && let Err(e) = c.stream.write_all(&frame).and_then(|()| c.stream.flush())
+        {
+            warn!(error = %e, "TURN stream write failed; reconnecting");
+            conns.remove(&from);
+        }
+    }
+}
+
 fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::RootCertStore>) {
     let mut conns: HashMap<SocketAddr, Conn> = HashMap::new();
     let mut last_try: HashMap<SocketAddr, Instant> = HashMap::new();
     let mut buf = vec![0u8; 65_536];
     loop {
-        // Datagram -> its client's stream.
-        match udp.recv_from(&mut buf) {
-            Ok((n, from)) => {
-                if !conns.contains_key(&from)
-                    && last_try.get(&from).is_none_or(|t| t.elapsed() >= RECONNECT)
-                {
-                    last_try.insert(from, Instant::now());
-                    match connect(host, port, kind, roots) {
-                        Ok(stream) => {
-                            debug!(%host, port, ?kind, client = %from, "TURN stream connected");
-                            conns.insert(
-                                from,
-                                Conn {
-                                    stream,
-                                    inbuf: Vec::new(),
-                                    last_sent: Instant::now(),
-                                    close_at: None,
-                                },
-                            );
-                        }
-                        Err(e) => {
-                            warn!(%host, port, ?kind, error = %e, "TURN stream connect failed")
-                        }
+        // Datagrams -> their clients' streams. Take everything that is waiting,
+        // not one per turn: each turn also reads every stream (up to POLL
+        // each), and one datagram per turn capped the bridge at a few hundred
+        // a second, so a bulk upload's acknowledgements queued behind each
+        // other and starved the call's heartbeats and audio (cast-ej4).
+        let mut taken = 0;
+        loop {
+            match udp.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    taken += 1;
+                    if taken == 1 {
+                        // The first waited up to POLL; the rest are only
+                        // those already queued.
+                        let _ = udp.set_nonblocking(true);
+                    }
+                    forward(
+                        &buf[..n],
+                        from,
+                        &mut conns,
+                        &mut last_try,
+                        host,
+                        port,
+                        kind,
+                        roots,
+                    );
+                    if taken >= MAX_PER_TURN {
+                        break;
                     }
                 }
-                if let Some(c) = conns.get_mut(&from) {
-                    c.last_sent = Instant::now();
-                    if is_deallocation(&buf[..n]) {
-                        debug!(client = %from, "TURN stream: deallocation seen; closing the stream soon");
-                        c.close_at = Some(Instant::now() + CLOSE_AFTER_DEALLOCATE);
-                    }
-                    if let Some(frame) = frame_for_stream(&buf[..n])
-                        && let Err(e) = c.stream.write_all(&frame).and_then(|()| c.stream.flush())
-                    {
-                        warn!(error = %e, "TURN stream write failed; reconnecting");
-                        conns.remove(&from);
-                    }
+                Err(e) if is_timeout(&e) => break,
+                // A reply to a closed peer socket surfaces here on some systems.
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
+                Err(e) => {
+                    warn!(error = %e, "TURN bridge socket failed; stopping");
+                    return;
                 }
             }
-            Err(e) if is_timeout(&e) => {}
-            // A reply to a closed peer socket surfaces here on some systems.
-            Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {}
-            Err(e) => {
-                warn!(error = %e, "TURN bridge socket failed; stopping");
-                return;
-            }
+        }
+        if taken > 0 {
+            let _ = udp.set_nonblocking(false);
         }
         // Each stream -> datagrams to its client.
         let mut gone: Vec<SocketAddr> = vec![];
@@ -259,30 +306,36 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
                 gone.push(*peer);
                 continue;
             }
-            let mut chunk = [0u8; 8192];
-            match c.stream.read(&mut chunk) {
-                Ok(0) => {
-                    warn!(client = %peer, "TURN stream closed by the server");
-                    gone.push(*peer);
-                }
-                Ok(n) => {
-                    c.inbuf.extend_from_slice(&chunk[..n]);
-                    match drain(&mut c.inbuf) {
-                        Ok(frames) => {
-                            for f in frames {
-                                let _ = udp.send_to(&f, peer);
+            // A busy stream gets several reads a turn, not one.
+            for _ in 0..MAX_READS_PER_TURN {
+                let mut chunk = [0u8; 8192];
+                match c.stream.read(&mut chunk) {
+                    Ok(0) => {
+                        warn!(client = %peer, "TURN stream closed by the server");
+                        gone.push(*peer);
+                        break;
+                    }
+                    Ok(n) => {
+                        c.inbuf.extend_from_slice(&chunk[..n]);
+                        match drain(&mut c.inbuf) {
+                            Ok(frames) => {
+                                for f in frames {
+                                    let _ = udp.send_to(&f, peer);
+                                }
+                            }
+                            Err(()) => {
+                                warn!("TURN stream carried something that is not STUN; closing it");
+                                gone.push(*peer);
+                                break;
                             }
                         }
-                        Err(()) => {
-                            warn!("TURN stream carried something that is not STUN; closing it");
-                            gone.push(*peer);
-                        }
                     }
-                }
-                Err(e) if is_timeout(&e) => {}
-                Err(e) => {
-                    warn!(error = %e, "TURN stream read failed");
-                    gone.push(*peer);
+                    Err(e) if is_timeout(&e) => break,
+                    Err(e) => {
+                        warn!(error = %e, "TURN stream read failed");
+                        gone.push(*peer);
+                        break;
+                    }
                 }
             }
         }
@@ -479,6 +532,67 @@ mod tests {
         }
         assert_eq!(got, Some(stun(8, 4)));
         h.join().unwrap();
+    }
+
+    /// A burst of datagrams from one client socket (a bulk upload's
+    /// acknowledgements) must not queue behind the bridge's per-turn waits on
+    /// its other streams (cast-ej4): it took one datagram a turn, and each turn
+    /// also waited on every stream.
+    #[test]
+    fn a_burst_of_datagrams_is_forwarded_without_waiting_a_turn_each() {
+        const N: usize = 1500;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let server = l.local_addr().unwrap();
+        let h = thread::spawn(move || {
+            // Two connections, as the host has two client sockets: the second
+            // carries nothing, so each turn waits on it.
+            let (idle, _) = l.accept().unwrap();
+            let (mut busy, _) = l.accept().unwrap();
+            let _ = idle.set_read_timeout(Some(Duration::from_millis(1)));
+            busy.set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            let start = Instant::now();
+            let mut buf = Vec::new();
+            let mut got = 0;
+            let mut chunk = [0u8; 8192];
+            while got < N && start.elapsed() < Duration::from_secs(20) {
+                if let Ok(n) = busy.read(&mut chunk)
+                    && n > 0
+                {
+                    buf.extend_from_slice(&chunk[..n]);
+                    got += drain(&mut buf).unwrap().len();
+                }
+            }
+            (got, start.elapsed())
+        });
+        let b = start(
+            &server.ip().to_string(),
+            server.port(),
+            Kind::Tcp,
+            Arc::new(rustls::RootCertStore::empty()),
+        )
+        .unwrap();
+        let idle = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let busy = UdpSocket::bind("127.0.0.1:0").unwrap();
+        idle.send_to(&stun(8, 1), b.addr()).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        busy.send_to(&stun(8, 2), b.addr()).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let t = Instant::now();
+        // In groups, as a sender's window releases them: about 10 000 a second.
+        for i in 1..N {
+            busy.send_to(&stun(8, 2), b.addr()).unwrap();
+            if i % 10 == 0 {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let (got, _) = h.join().unwrap();
+        assert_eq!(got, N, "every datagram of the burst reached the server");
+        assert!(
+            t.elapsed() < Duration::from_secs(3),
+            "the burst took {:?}",
+            t.elapsed()
+        );
     }
 
     /// TURN allocations are per five-tuple: each client socket needs its own

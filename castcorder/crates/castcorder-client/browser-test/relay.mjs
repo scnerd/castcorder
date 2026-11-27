@@ -295,19 +295,6 @@ try {
   // On a degraded network (the nightly's netem run, DEGRADED=1) a guest's connection may
   // flicker through "disconnected" and recover by itself; it must still not rejoin.
   const degraded = !!process.env.DEGRADED;
-  if (TURN_TRANSPORT === 'tcp') {
-    // cast-ej4: over TURN/TCP a guest can still drop when the old allocation
-    // goes away (its replacement pair is slow to carry traffic). Until that is
-    // fixed the check is that every guest is back, with audio flowing.
-    const back = await waitFor(async () => {
-      for (const p of [A, B]) if ((await text(p, '#participant')).length === 0) return null;
-      const x = audioFrom(await json(B, '#debug-inbound'), 'A');
-      await sleep(2000);
-      const y = audioFrom(await json(B, '#debug-inbound'), 'A');
-      return y.packets > x.packets ? true : null;
-    }, 'both guests back with audio flowing (cast-ej4)', 60000, 0).catch(() => null);
-    check(back !== null, 'every guest is back with audio flowing after the renewal (TCP; cast-ej4 tracks the guest that still drops: ' + (lost.join(', ') || 'none lost this time') + ')');
-  } else
   check((lost.length === 0 || degraded) && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
     + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : '')
     + (same.length === 2 ? '' : ' (rejoined: ' + ['A', 'B'].filter((n) => !same.includes(n)).join(', ') + ')'));
@@ -322,8 +309,7 @@ try {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
   };
-  // cast-ej4: over TCP a guest that dropped at the renewal may not finish syncing take 2 in time.
-  const synced2 = await waitFor(() => verified2() >= (TURN_TRANSPORT === 'tcp' ? 3 : 6), 'take 2 verified on the host', 90000, 250).catch(() => false);
+  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 90000, 250).catch(() => false);
   check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
