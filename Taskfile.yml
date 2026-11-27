@@ -147,7 +147,9 @@ tasks:
       RELAY=coturn with RELAY_DAILY_CAP=3: three credentials minted and checked
       (the host's and two guests'), the fourth refused with relay_quota, and
       still refused after wrangler restarts on the same state (the count is in
-      Durable Object storage). With CF_TURN_KEY_ID and CF_TURN_API_TOKEN set
+      Durable Object storage). Relay metering against a local stand-in for
+      Cloudflare's TURN and analytics APIs (RELAY_BUDGET_BYTES=1000). With
+      CF_TURN_KEY_ID and CF_TURN_API_TOKEN set
       (a Cloudflare Realtime TURN key), RELAY=cloudflare for real: the host
       must allocate on turn.cloudflare.com and a guest hello must carry the
       TURN URLs including TLS on 443. Without them that part prints SKIP, the

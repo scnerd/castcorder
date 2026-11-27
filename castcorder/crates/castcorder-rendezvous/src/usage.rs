@@ -28,7 +28,7 @@ use castcorder_link::HostId;
 use serde::{Deserialize, Serialize};
 
 /// The rolling budget window, in days.
-pub const WINDOW_DAYS: u64 = 30;
+pub const WINDOW_DAYS: u64 = castcorder_mailbox::cf_usage::WINDOW_DAYS;
 const DAY_S: u64 = 86_400;
 
 /// The ledger's file name in the data dir.
@@ -211,12 +211,7 @@ impl Ledger {
     pub fn refusal(&self, host: &HostId, budget: Option<u64>, now_unix: u64) -> Option<String> {
         let budget = budget?;
         let used = self.used(host, now_unix);
-        (used >= budget).then(|| {
-            format!(
-                "{}: this host has used its relay budget ({used} of {budget} bytes in {WINDOW_DAYS} days); direct connections still work",
-                castcorder_link::wire::code::RELAY_QUOTA
-            )
-        })
+        (used >= budget).then(|| castcorder_mailbox::cf_usage::budget_refusal(used, budget))
     }
 
     /// The ledger as stored.

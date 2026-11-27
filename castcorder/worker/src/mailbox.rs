@@ -13,12 +13,15 @@
 //!
 //! The one thing kept in the object's storage is the host key's daily count
 //! of relay credentials ([`RelayDay`] under [`RELAY_DAY`]), so the daily cap
-//! (`RELAY_DAILY_CAP`, [`crate::relay`]) survives hibernation and restarts.
+//! (`RELAY_DAILY_CAP`, [`crate::relay`]) survives hibernation and restarts,
+//! and, when relay metering is on, its last known relay egress ([`Usage`]
+//! under [`RELAY_USAGE`]).
 
 use std::cell::RefCell;
 
 use castcorder_link::HostId;
 use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
+use castcorder_mailbox::cf_usage::Usage;
 use castcorder_mailbox::turn::RelayDay;
 use castcorder_mailbox::{
     ConnId, ConnState, Limits, MAX_FRAME, Mailbox, Millis, Out, RelayAsk, fill_registered,
@@ -41,6 +44,10 @@ struct Saved {
 
 /// The storage key of the host key's [`RelayDay`].
 const RELAY_DAY: &str = "relay-day";
+
+/// The storage key of the host key's [`Usage`]: its 30-day relay egress as
+/// Cloudflare's analytics last reported it.
+const RELAY_USAGE: &str = "relay-usage";
 
 /// The storage key of the host's relay gates (cast-d74): the host sends them
 /// after registering and on every change, and a woken object (its memory lost
@@ -147,6 +154,9 @@ impl HostMailbox {
         }
         let cap = relay::daily_cap(&self.env);
         let storage = self.state.storage();
+        // Before the daily count is read: the analytics call awaits, and a
+        // count read before it could be stale when stored.
+        let over_budget = self.over_budget(host, now).await;
         let day: RelayDay = match storage.get(RELAY_DAY).await {
             Ok(d) => d.unwrap_or_default(),
             Err(e) => {
@@ -157,10 +167,13 @@ impl HostMailbox {
                 )));
             }
         };
-        let over = day.exhausted(cap, now);
-        if over.is_some() {
-            tracing::warn!(host = %host.short(), cap, "relay credentials refused: daily cap reached");
-        }
+        let over = over_budget.or_else(|| {
+            let over = day.exhausted(cap, now);
+            if over.is_some() {
+                tracing::warn!(host = %host.short(), cap, "relay credentials refused: daily cap reached");
+            }
+            over
+        });
         let decided = self
             .mb
             .borrow_mut()
@@ -175,6 +188,47 @@ impl HostMailbox {
             tracing::info!(host = %host.short(), today = next.count, cap, "relay credentials counted");
         }
         Some(turn.mint(&host, now / 1000).await)
+    }
+
+    /// Why `host` gets no relay credentials for its relay egress, if
+    /// metering is on and it reached its budget. The figure is refreshed from
+    /// analytics when older than [`castcorder_mailbox::cf_usage::REFRESH_MS`];
+    /// any failure keeps the last known figure (fail open: metering never
+    /// takes the relay away on its own trouble).
+    async fn over_budget(&self, host: HostId, now: Millis) -> Option<String> {
+        let metering = relay::metering(&self.env)?;
+        let storage = self.state.storage();
+        let mut usage: Usage = storage
+            .get(RELAY_USAGE)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if !usage.fresh(now) {
+            match metering.egress(&host, now).await {
+                Ok(bytes) => {
+                    usage = Usage {
+                        bytes,
+                        checked_ms: now,
+                    };
+                    if let Err(e) = storage.put(RELAY_USAGE, usage).await {
+                        tracing::error!(error = %e, "relay usage not stored");
+                    }
+                    tracing::info!(host = %host.short(), bytes, budget = metering.budget, "relay usage read");
+                }
+                Err(e) => {
+                    tracing::error!(host = %host.short(), error = %e, "relay usage unreadable; keeping the last figure");
+                }
+            }
+        }
+        if metering.budget == 0 {
+            return None;
+        }
+        let why = usage.refusal(metering.budget);
+        if why.is_some() {
+            tracing::warn!(host = %host.short(), bytes = usage.bytes, budget = metering.budget, "relay credentials refused: relay budget reached");
+        }
+        why
     }
 
     async fn closed(&self, ws: &WebSocket) {

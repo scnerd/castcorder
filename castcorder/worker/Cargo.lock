@@ -78,6 +78,7 @@ dependencies = [
  "castcorder-link",
  "hmac",
  "serde",
+ "serde_json",
  "sha1",
  "tracing",
 ]

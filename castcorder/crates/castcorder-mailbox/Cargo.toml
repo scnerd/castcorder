@@ -21,6 +21,8 @@ castcorder-link.workspace = true
 hmac = "0.13"
 sha1 = { version = "0.11", default-features = false }
 serde = { workspace = true, features = ["std"] }
+# Cloudflare's Realtime TURN and GraphQL analytics speak JSON (cf_usage).
+serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

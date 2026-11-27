@@ -52,6 +52,42 @@ resource "cloudflare_account_token" "deploy" {
   }
 }
 
+data "cloudflare_account_api_token_permission_groups_list" "analytics" {
+  for_each   = toset(var.analytics_token_permission_groups)
+  account_id = local.account_id
+  name       = each.value
+}
+
+locals {
+  analytics_permission_group_ids = compact([
+    for name in var.analytics_token_permission_groups :
+    try(one([for g in data.cloudflare_account_api_token_permission_groups_list.analytics[name].result : g.id if g.name == name]), null)
+  ])
+}
+
+# The Worker's own token for relay metering (cast-lxt.10): it reads each host key's
+# Realtime TURN egress from the GraphQL analytics API, nothing else. Deployed as the
+# Worker secret CF_ANALYTICS_TOKEN by deploy.yml.
+resource "cloudflare_account_token" "analytics" {
+  account_id = local.account_id
+  name       = "castcorder worker (relay metering, analytics read)"
+
+  policies = [{
+    effect            = "allow"
+    permission_groups = [for id in local.analytics_permission_group_ids : { id = id }]
+    resources = jsonencode({
+      "com.cloudflare.api.account.${local.account_id}" = "*"
+    })
+  }]
+
+  lifecycle {
+    precondition {
+      condition     = length(local.analytics_permission_group_ids) == length(var.analytics_token_permission_groups)
+      error_message = "Every name in analytics_token_permission_groups must match exactly one Cloudflare permission group."
+    }
+  }
+}
+
 # The Realtime TURN key is not managed here: Cloudflare returns its API token only on
 # creation and cloudflare_calls_turn_app (5.29.0) does not keep it in state, so
 # `task deploy:turn-key` creates it and stores cf_turn_key_id and cf_turn_api_token in

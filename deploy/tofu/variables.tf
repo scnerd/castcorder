@@ -38,6 +38,12 @@ variable "deploy_token_permission_groups" {
   default     = ["Workers Scripts Write", "Account Settings Read"]
 }
 
+variable "analytics_token_permission_groups" {
+  description = "Account permission groups for the Worker's analytics token: relay metering reads each host key's Realtime TURN egress from the GraphQL analytics API (cast-lxt.10)."
+  type        = list(string)
+  default     = ["Account Analytics Read"]
+}
+
 variable "cf_turn_key_id" {
   description = "Realtime TURN key id (cf_turn_key_id in deploy/secrets.sops.yaml, written by `task deploy:turn-key`)."
   type        = string
