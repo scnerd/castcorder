@@ -104,6 +104,25 @@ tasks:
       - node setup.mjs
       - node system.mjs
 
+  test:journey:
+    desc: Two people on two home networks - contacts, shared rooms, a call between their installs (Linux, sudo)
+    summary: |
+      Builds castcorder-host, castcorder-rendezvous and the client (trunk), then
+      runs castcorder/crates/castcorder-client/browser-test/journey.mjs as root:
+      two installs on two computers behind their own masquerading routers
+      (Linux network namespaces, lib/netns.mjs), the rendezvous on the
+      "internet" between them, each person's browser inside their computer's
+      namespace. Skips without root unless CASTCORDER_CI is set.
+    dir: castcorder/crates/castcorder-client/browser-test
+    env:
+      CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/dist"
+    cmds:
+      - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
+      - cd .. && trunk build --release
+      - npm install --no-audit --no-fund
+      - node setup.mjs
+      - '{{if eq OS "linux"}}sudo -E env "PATH=$PATH" node journey.mjs{{else}}node journey.mjs{{end}}'
+
   test:system:worker:
     desc: Tier 3 system test against the Cloudflare Worker under wrangler dev instead of castcorder-rendezvous (no Cloudflare account needed)
     summary: |

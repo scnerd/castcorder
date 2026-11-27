@@ -228,6 +228,24 @@ fn smoke_dist(args: &mut AppArgs) {
 
 fn setup(app: &AppHandle, args: &AppArgs) {
     let shell = app.state::<Shell>();
+    // The recordings folder Settings moved the library to (cast-hs4), unless
+    // `--library` names one; and Settings may move it again.
+    if !args.smoke
+        && let Some(dir) = data_dir(app)
+    {
+        if args.config.library == castcorder_host::default_library()
+            && let Some(moved) = castcorder_app::host_control::moved_library(&dir)
+        {
+            shell.host.use_library(moved);
+        }
+        shell.host.allow_moving(move |library, result| match result {
+            Ok(how) => match castcorder_app::host_control::save_moved_library(&dir, library) {
+                Ok(()) => tracing::info!(library = %library.display(), ?how, "recordings folder saved"),
+                Err(e) => tracing::error!(error = %e, "where the recordings folder moved was not saved"),
+            },
+            Err(e) => tracing::warn!(error = %e, "recordings folder not moved"),
+        });
+    }
     let url = match shell.host.start() {
         Ok(status) => {
             tracing::info!(room = %status.room, producer = %status.producer_url, "app host running");

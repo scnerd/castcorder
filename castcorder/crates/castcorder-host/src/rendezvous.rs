@@ -187,6 +187,11 @@ pub struct Health {
     pub relay: String,
     /// Why the relay is unavailable (the rendezvous's reason).
     pub relay_detail: String,
+    /// The STUN server the rendezvous named: contact links learn their
+    /// server-reflexive address from it, so a contact behind another router
+    /// can reach them (or their relay can).
+    #[serde(skip)]
+    pub stun: Option<SocketAddr>,
 }
 
 /// [`Health`], shared by the rendezvous thread and the HTTP side.
@@ -567,6 +572,7 @@ fn session(
             });
         match server {
             Some(server) => {
+                set_health(&cfg.health, |h| h.stun = Some(server));
                 let _ = tx.send(Command::Stun { server });
             }
             None => warn!(host = %t.host, port, "cannot resolve the rendezvous STUN address"),
@@ -580,6 +586,7 @@ fn session(
         match stun_addr(url) {
             Some(server) => {
                 info!(url = %url, server = %server, "STUN server from the rendezvous's ice_servers");
+                set_health(&cfg.health, |h| h.stun = Some(server));
                 let _ = tx.send(Command::Stun { server });
             }
             None => warn!(url = %url, "cannot resolve the STUN server the rendezvous named"),

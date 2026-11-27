@@ -373,6 +373,12 @@ jobs:
       - name: System test (call link through the rendezvous)
         run: task test:system
 
+      # Two people on two home networks behind their own routers (network
+      # namespaces, so sudo): contacts, the rooms they share over a contact
+      # link, and a call between their installs.
+      - name: Journey test (two installs, two home networks)
+        run: task test:journey
+
       # The same system test against the Cloudflare Worker under `wrangler dev`
       # (ADR 0004): local only, no account. Builds worker-build and wrangler inside
       # castcorder/worker first. Also runs the Worker's relay path (RELAY=coturn)

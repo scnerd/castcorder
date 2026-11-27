@@ -5,10 +5,28 @@
 //! the producer page does the same through the host's `/native` endpoints).
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, Weak};
 
+use castcorder_host::library::{self, Moved, Relocate};
 use castcorder_host::{Config, LiveStatus, NativeInput, NativeState, Running};
+
+/// The file in the app's data folder that says where the library was moved
+/// (cast-hs4).
+const LIBRARY_FILE: &str = "library-folder.txt";
+
+/// Where the library was moved to, as saved in `data_dir`, if it was.
+pub fn moved_library(data_dir: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(data_dir.join(LIBRARY_FILE)).ok()?;
+    let path = PathBuf::from(text.trim());
+    path.is_absolute().then_some(path)
+}
+
+/// Save where the library now is in `data_dir`.
+pub fn save_moved_library(data_dir: &Path, library: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(data_dir.join(LIBRARY_FILE), library.display().to_string())
+}
 
 /// What the window and the tray show about the running host.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +74,7 @@ pub fn tray_room_of(id: &str) -> Option<&str> {
 
 /// Starts and stops the in-process host for one [`Config`].
 pub struct HostControl {
-    config: Config,
+    config: Mutex<Config>,
     running: Mutex<Option<Running>>,
 }
 
@@ -64,22 +82,91 @@ impl HostControl {
     /// A control for `config`'s host; nothing runs until [`HostControl::start`].
     pub fn new(config: Config) -> Self {
         HostControl {
-            config,
+            config: Mutex::new(config),
             running: Mutex::new(None),
         }
     }
 
     /// The config the host starts with.
-    pub fn config(&self) -> &Config {
-        &self.config
+    pub fn config(&self) -> Config {
+        self.config
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_else(|p| p.into_inner().clone())
+    }
+
+    /// Start the host on `library` from now on (before [`HostControl::start`]:
+    /// the folder the library was moved to).
+    pub fn use_library(&self, library: PathBuf) {
+        if let Ok(mut c) = self.config.lock() {
+            c.library = library;
+        }
+    }
+
+    /// Let Settings move the library (cast-hs4): the host's
+    /// `POST /settings/library` checks the folder and that no call is on,
+    /// then the move runs on a thread of its own and `done` hears where the
+    /// library is after it (the old place if it failed).
+    pub fn allow_moving(
+        self: &Arc<Self>,
+        done: impl Fn(&Path, Result<Moved, String>) + Send + Sync + 'static,
+    ) {
+        let me: Weak<Self> = Arc::downgrade(self);
+        let done = Arc::new(done);
+        let relocate = Relocate(Arc::new(move |to: PathBuf| {
+            let host = me.upgrade().ok_or("the app is stopping")?;
+            host.may_move(&to)?;
+            let done = done.clone();
+            std::thread::spawn(move || {
+                let result = host.relocate(&to);
+                done(&host.config().library, result);
+            });
+            Ok(())
+        }));
+        if let Ok(mut c) = self.config.lock() {
+            c.relocate = Some(relocate);
+        }
+    }
+
+    /// Why the library cannot move to `to` now, if it cannot.
+    fn may_move(&self, to: &Path) -> Result<(), String> {
+        if let Some(live) = self.live_status()
+            && (live.guests > 0 || live.recording.is_some())
+        {
+            return Err("a call is on: move the folder once everyone has left".into());
+        }
+        if self.native_state().is_some_and(|n| n.joined.is_some()) {
+            return Err("you are in a call: leave it, then move the folder".into());
+        }
+        library::check_target(&self.config().library, to)
+    }
+
+    /// Stop the host, move its library to `to` and start it again there (on
+    /// the old library if the move failed). The host is not running between.
+    pub fn relocate(&self, to: &Path) -> Result<Moved, String> {
+        self.may_move(to)?;
+        let from = self.config().library;
+        self.stop();
+        let moved =
+            library::move_library(&from, to).map_err(|e| format!("the folder did not move: {e}"));
+        if moved.is_ok() {
+            self.use_library(to.to_path_buf());
+            tracing::info!(from = %from.display(), to = %to.display(), how = ?moved, "recordings folder moved");
+        }
+        if let Err(e) = self.start() {
+            tracing::error!(error = %e, "the host did not start again after moving its folder");
+            return Err(format!("the host did not start again: {e}"));
+        }
+        moved
     }
 
     /// Start the host, or report the one already running.
     pub fn start(&self) -> Result<HostStatus, String> {
         let mut running = self.running.lock().map_err(|_| "host lock poisoned")?;
         if running.is_none() {
-            let room = self.config.room.clone();
-            let r = castcorder_host::start(self.config.clone(), move |link| {
+            let config = self.config();
+            let room = config.room.clone();
+            let r = castcorder_host::start(config, move |link| {
                 tracing::info!(room = %room, link = %link, "call link ready");
             })?;
             *running = Some(r);
@@ -161,7 +248,10 @@ impl HostControl {
             .lock()
             .ok()
             .and_then(|r| r.as_ref().map(|r| r.call_dir()))
-            .unwrap_or_else(|| self.config.library.join(&self.config.room));
+            .unwrap_or_else(|| {
+                let c = self.config();
+                c.library.join(&c.room)
+            });
         std::path::absolute(&dir).unwrap_or(dir)
     }
 

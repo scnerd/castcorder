@@ -17,6 +17,7 @@ pub mod contact_link;
 mod http;
 pub mod invite;
 pub mod joined;
+pub mod library;
 mod local;
 #[cfg(feature = "native-capture")]
 mod native;
@@ -101,6 +102,9 @@ pub struct Config {
     /// Install the process-wide log subscriber (console on stderr and the
     /// call's JSON-lines log). Only the first host in a process gets it.
     pub log: bool,
+    /// The app that embeds the host moves the library when Settings asks
+    /// (cast-hs4); `None`: the folder cannot be changed from the page.
+    pub relocate: Option<library::Relocate>,
 }
 
 impl Config {
@@ -133,6 +137,7 @@ impl Config {
             open: false,
             record_video: None,
             log: false,
+            relocate: None,
         }
     }
 }
@@ -1113,6 +1118,7 @@ pub fn start(
             base.clone(),
             args.bind,
             advertise_ips.clone(),
+            call_links.health.clone(),
             stop.clone(),
         );
         threads.push(handle);
@@ -1129,6 +1135,7 @@ pub fn start(
         persons: persons.clone(),
         contacts: contacts.clone(),
         contact_links: contact_links.clone(),
+        relocate: args.relocate.clone(),
     });
     threads.push(http::serve(
         https,
