@@ -122,6 +122,40 @@ talking, with a stretch where each speaks alone and a few seconds of silence at 
   becomes a device of the same person.
 - [ ] **Single use.** Open an already used link again. Expect: it is refused.
 
+## 9b. Contacts, presence, invites and revocation
+
+Needs two people (or two app installs with different persons), each with the installed app, on
+different networks. Call them Ann and Bob.
+
+- [ ] **Add a contact.** Ann: home, Contacts, Add contact, "Copy my contact link" (pick a
+  lifetime), send it to Bob. Bob: Add contact, paste it. Expect: "Added Ann as a contact" at
+  Bob, and Bob appears in Ann's Contacts with nothing for Ann to accept.
+- [ ] **Link lifetime and cancel.** Under "Your links that still work", cancel a link, then use
+  it from the other person. Expect: refused; the list no longer shows it. A single-use link
+  stops working after its first use.
+- [ ] **Presence.** Each sees the other's devices as "Online on ..." and "Offline" after the
+  other quits the app (within a minute or two). The checkbox "Appear offline to your contacts" at one side shows it offline
+  to contacts only.
+- [ ] **Nickname.** Give Bob a nickname at Ann. Expect: only Ann sees it, and it survives a
+  restart.
+- [ ] **Shared rooms.** Ann adds Bob as a trusted contact of a room. Bob's list of rooms shows
+  it with its live status; "Rooms you share" at Ann lists it. Expect: no timeout on "asking"
+  while both are online; "No rooms you share" when none.
+- [ ] **Invite.** Ann starts a call and uses "Invite to a call" for Bob. Expect: Bob gets the
+  invite with the call link and joins from it; one sent while Bob is offline arrives when Bob
+  comes back online ("Gets it when back online" first, then "Invited").
+- [ ] **Producer contact.** Ann makes Bob a producer of the room. Expect: Bob sees the
+  producer controls on every one of his devices that joins.
+- [ ] **Track delivery.** Record a take with Bob in the call, then Bob leaves. Expect: his
+  track reaches Ann's library over the contact link even though he is not in the call.
+- [ ] **Remove a contact.** Ann removes Bob. Expect: Ann no longer sees Bob's presence or
+  shared rooms; Bob's list drops Ann once he is online (no stale entry after a restart).
+- [ ] **Revoke a device.** On a person with two linked devices, remove one ("Remove for
+  good?"). Expect: that device is refused from then on (rooms, contact links), the other
+  keeps working, and contacts see the revoked device gone.
+- [ ] **Two installs of one person.** Add a contact on one install. Expect: the person's other
+  install learns it, and a removal or nickname travels the same way.
+
 ## 10. Phone browser
 
 - [ ] **Join from a phone** (Chrome on Android, Safari on iPhone) over mobile data. Expect: the
