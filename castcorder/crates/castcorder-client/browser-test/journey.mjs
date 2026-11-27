@@ -68,7 +68,10 @@ const line = (st, re, what, timeout = 30000) => waitFor(() => {
 const browsers = [];
 const logs = { D: [], E: [], DC: [], EC: [] };
 const ARGS = ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
-  '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--mute-audio'];
+  '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--mute-audio',
+  // The rendezvous serves plain http here (https in production): the call
+  // page needs a secure context for WebCrypto.
+  '--unsafely-treat-insecure-origin-as-secure=http://' + net.INET_IP + ':8080', '--no-proxy-server'];
 async function person(ns, who) {
   const browser = await chromium.launch({ headless: true, args: ARGS, executablePath: net.browser(ns, chromium.executablePath()) });
   browsers.push(browser);
@@ -143,6 +146,80 @@ try {
     return /Show|No rooms|not|fail|time/i.test(t) && !/asking/i.test(t) ? t : null;
   }, 'Eli hears which rooms he shares with Dana', 40000, 500).catch(() => null);
   check(shared && shared.includes('Show'), 'Eli asked Dana\'s install over a contact link and hears they share Show: ' + shared);
+
+  // Eli's home lists Show under "Shared with you", with Join: no need to
+  // look under the contact.
+  await E.click('#nav-rooms');
+  const sharedCard = E.locator('#shared-rooms li.shared-room[data-room="Show"]');
+  await waitFor(async () => (await sharedCard.count()) === 1 && await sharedCard.isVisible(), 'Show under Shared with you', 45000, 500).catch(() => null);
+  check(await sharedCard.count() === 1 && (await sharedCard.textContent()).includes("Dana's room"),
+    'Eli\'s home lists Show under "Shared with you" as Dana\'s room');
+  const sharedHref = (await sharedCard.count()) ? await sharedCard.locator('.join-shared').getAttribute('href') : '';
+  check(sharedHref.startsWith('castcorder://'), 'its Join opens the room in the app: ' + sharedHref.replace(/#.*/, '#...'));
+
+  // 3. Dana invites Eli to the call from her room card; the invite reaches
+  // his home over a contact link.
+  await D.click('#nav-rooms');
+  const card = D.locator('#rooms li[data-room="Show"]');
+  await card.locator('.room-menu summary').click();
+  await card.locator('.invite-toggle').click();
+  await card.locator('.invite-contact .send-invite').first().click();
+  await waitFor(async () => (await text(D, '#rooms li[data-room="Show"] .invite-state')) === 'Invited', 'the invite reaches Eli', 30000, 500);
+  await E.click('#nav-rooms');
+  const invite = E.locator('#invites li.invite');
+  await waitFor(async () => (await invite.count()) === 1, 'Eli\'s home shows the invite', 15000, 500);
+  check((await invite.textContent()).includes('Dana invites you to Show'), 'Eli\'s home says Dana invites him to Show');
+  // In the app Join opens castcorder://, which the app maps back to the link.
+  const href = await invite.locator('.join-invite').getAttribute('href');
+  const callLink = href.replace(/^castcorder:\/\//, 'http://');
+  check(callLink.startsWith(RV + '/v/'), 'the invite carries Dana\'s call link: ' + callLink.replace(/#.*/, '#...'));
+
+  // Both join: Dana from her room card, Eli from the invite.
+  const DC = await page(dctx, 'DC');
+  await DC.goto(HD + '/?room=Show&name=Dana');
+  const EC = await page(ectx, 'EC');
+  await EC.goto(callLink.replace('/#', '/?name=Eli#'));
+  const state = (p) => text(p, '#state');
+  await DC.waitForSelector('#join');
+  await DC.click('#join');
+  await waitFor(async () => (await state(DC)) === 'connected', 'Dana in the call', 40000);
+  await EC.waitForSelector('#join');
+  await EC.click('#join');
+  await waitFor(async () => (await state(EC)) === 'connected', 'Eli in the call (across both routers)', 60000);
+  check(true, 'Dana and Eli are both in the call, each from their own home network');
+  check(EC.url().startsWith(RV), 'Eli joined on the call link from the invite');
+
+  // 4. Dana records a take; Eli's track reaches Dana's install.
+  await waitFor(async () => DC.isEnabled('#take-start'), 'Dana can start a take', 20000);
+  await DC.click('#take-start');
+  await waitFor(async () => (await text(DC, '#take-status')).startsWith('recording'), 'take 1 recording', 15000);
+  await sleep(4000);
+  await DC.click('#take-stop');
+  await waitFor(async () => (await text(DC, '#take-status')).startsWith('idle'), 'take 1 stopped', 15000);
+  const lib = join(RESULTS, 'library-D', 'Show');
+  const eliTrack = await waitFor(() => {
+    for (const call of existsSync(lib) ? readdirSync(lib) : []) {
+      const take = join(lib, call, 'take01');
+      if (!existsSync(take)) continue;
+      const f = readdirSync(take).find((n) => n.startsWith('take01_Eli') && n.endsWith('_mic.wav'));
+      if (f) return join(call, 'take01', f);
+    }
+    return null;
+  }, 'Eli\'s take 1 track on Dana\'s install', 60000, 1000).catch(() => null);
+  check(eliTrack !== null, 'Eli\'s recording of take 1 reached Dana\'s install: ' + eliTrack);
+
+  // 5. Both leave and go home.
+  for (const [p, who] of [[EC, 'Eli'], [DC, 'Dana']]) {
+    await p.click('#leave');
+    await waitFor(async () => (await state(p)) === 'left', who + ' left', 15000);
+  }
+  check(true, 'both left the call');
+  await DC.goto(HD + '/');
+  await waitFor(async () => (await DC.locator('#rooms li[data-room="Show"]').count()) === 1, 'Dana back home with Show', 15000);
+  await EC.goto(HE + '/');
+  await EC.click('#nav-contacts');
+  await waitFor(async () => (await text(EC, '#contact-list')).includes('Dana'), 'Eli back home with Dana', 15000);
+  check(true, 'both are back on their homes');
 } catch (e) {
   failed = e;
   console.log('FAIL test did not complete: ' + String(e && e.stack || e));

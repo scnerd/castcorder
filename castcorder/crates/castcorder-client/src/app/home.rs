@@ -133,6 +133,46 @@ struct Invites {
     invited: Vec<InviteOut>,
 }
 
+/// One room a contact's install shares with this person (`GET
+/// /contacts/rooms`), for "Shared with you" (cast-journey).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct SharedIn {
+    room: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    live: bool,
+    #[serde(default)]
+    in_call: Vec<String>,
+    #[serde(default)]
+    link: Option<String>,
+}
+
+/// One install's answer (`GET /contacts/rooms`).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct SharedInstall {
+    #[serde(default)]
+    rooms: Vec<SharedIn>,
+}
+
+/// `GET /contacts/rooms`.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct SharedAnswer {
+    #[serde(default)]
+    installs: Vec<SharedInstall>,
+}
+
+/// A room shared with this person, with whose it is.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SharedRoomCard {
+    owner: String,
+    room: SharedIn,
+}
+
+/// How often "Shared with you" asks contacts again (each ask opens a contact
+/// link, so not every refresh).
+const SHARED_EVERY_MS: i32 = 20_000;
+
 /// The app's own link for a call link: `castcorder://` in place of the
 /// scheme, which opens the app's call window on that room's lobby.
 pub(super) fn app_link(link: &str) -> String {
@@ -246,6 +286,9 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let who = RwSignal::new(Who::default());
     let place = RwSignal::new(Place::Rooms);
     let invites = RwSignal::new(Invites::default());
+    // Rooms contacts share with this person and can let them into (they hold
+    // its call link), asked of their installs online (cast-journey).
+    let shared = RwSignal::new(Vec::<SharedRoomCard>::new());
     // The rooms the app's call window joined on other hosts, as it last saved
     // them (cast-n56.9); empty in a plain browser.
     let joined = RwSignal::new(Vec::<super::rejoin::Room>::new());
@@ -293,9 +336,52 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     };
     refresh();
     let timer = every(2000, refresh);
+    let ask_shared = move || {
+        spawn_local(async move {
+            // Contacts online now, once /contacts has been read.
+            let online: Vec<(String, String)> = invites.with_untracked(|v| {
+                v.contacts
+                    .iter()
+                    .filter(|c| !c.online.is_empty())
+                    .map(|c| (c.id.clone(), c.label()))
+                    .collect()
+            });
+            let mut cards = Vec::new();
+            for (id, owner) in online {
+                let path = format!(
+                    "/contacts/rooms?person={}",
+                    String::from(js_sys::encode_uri_component(&id))
+                );
+                if let Ok(t) = home_request("GET", &path, None).await
+                    && let Ok(a) = serde_json::from_str::<SharedAnswer>(&t)
+                {
+                    for room in a.installs.into_iter().flat_map(|i| i.rooms) {
+                        if room.link.is_some() {
+                            cards.push(SharedRoomCard {
+                                owner: owner.clone(),
+                                room,
+                            });
+                        }
+                    }
+                }
+            }
+            if shared.get_untracked() != cards {
+                shared.set(cards);
+            }
+        })
+    };
+    // The first ask once /contacts has answered, then every 20 s.
+    let first_ask = window().set_timeout_with_callback_and_timeout_and_arguments_0(
+        &wasm_bindgen::closure::Closure::once_into_js(ask_shared).into(),
+        1500,
+    );
+    let shared_timer = every(SHARED_EVERY_MS, ask_shared);
     on_cleanup(move || {
-        if let Some(t) = timer {
+        for t in [timer, shared_timer].into_iter().flatten() {
             window().clear_interval_with_handle(t);
+        }
+        if let Ok(t) = first_ask {
+            window().clear_timeout_with_handle(t);
         }
     });
     // Run a request, say what happened, then show the rooms afresh.
@@ -441,6 +527,35 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             }
                         </For>
                     </ul>
+                    <section id="shared-rooms" class="home-place" hidden=move || place.get() != Place::Rooms || shared.with(|s| s.is_empty())>
+                        <div class="home-head">
+                            <h2>"Shared with you"</h2>
+                        </div>
+                        <ul class="list">
+                            <For each=move || shared.get() key=|c| format!("{c:?}") let:c>
+                                {
+                                    let shown = c.room.title.clone().unwrap_or_else(|| c.room.room.clone());
+                                    let link = c.room.link.clone().unwrap_or_default();
+                                    let live = c.room.live;
+                                    let line = if live { in_call_line(&c.room.in_call) } else { String::new() };
+                                    view! {
+                                        <li class="room-card shared-room" class:live=live data-room=c.room.room.clone() data-owner=c.owner.clone()>
+                                            <div class="room-head">
+                                                <div class="room-title">
+                                                    <h2>{shown}</h2>
+                                                    <Show when=move || live><span class="chip ok">"Live"</span></Show>
+                                                </div>
+                                                <span class="small muted room-line">{format!("{}'s room", c.owner)}{if line.is_empty() { String::new() } else { format!(" \u{b7} {line}") }}</span>
+                                                <span class="room-actions">
+                                                    <a class="btn primary join-shared" href=app_link(&link)>"Join"</a>
+                                                </span>
+                                            </div>
+                                        </li>
+                                    }
+                                }
+                            </For>
+                        </ul>
+                    </section>
                     <section id="home-rooms" class="home-place" hidden=move || place.get() != Place::Rooms>
                         <div class="home-head">
                             <h1>"Rooms"</h1>
