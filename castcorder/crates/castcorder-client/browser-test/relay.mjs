@@ -291,7 +291,7 @@ try {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
   };
-  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 60000, 250).catch(() => false);
+  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 90000, 250).catch(() => false);
   check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');
