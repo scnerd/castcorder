@@ -272,13 +272,16 @@ try {
   check(after !== null, 'B still hears A once the old allocation is gone'
     + (after ? ' (' + Math.round((after.y.packets - after.x.packets) / 2) + ' pkt/s)' : ''));
   // cast-um1: each guest's own credentials share the host's lifetime and were
-  // minted moments later, so their renewal is near: the guest renews them in
-  // its answer to the host's restart instead of asking for a second restart
-  // seconds later (which, on a lossy network, could leave it with no path).
-  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart')));
-  const second = (host.err.slice(at).match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
-  check(early.length === 2 && second === 0, 'each guest renewed its own relay credentials within the host\'s ICE restart, and none asked for a second restart'
-    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')');
+  // minted moments later, so their renewal is near the host's: one ICE
+  // restart carries both. A guest renews inside the host's restart (it came
+  // first) or renewed just before and lets the host's restart carry them; it
+  // never asks for a second restart seconds later (which, on a lossy network,
+  // could leave it with no path).
+  const RENEWED = /relay credentials renewed with the host's ICE restart|relay credentials renewed before the host's ICE restart; it carries them/;
+  const joined = ['A', 'B'].filter((n) => logs[n].some((l) => RENEWED.test(l)));
+  const second = (host.err.match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
+  check(joined.length === 2 && second === 0, 'the guests\' relay credential renewals rode the host\'s ICE restart, and none asked for a second restart'
+    + ' (rode it: ' + (joined.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')');
   const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
   const same = [];
   for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);

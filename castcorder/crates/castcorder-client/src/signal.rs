@@ -93,6 +93,16 @@ pub fn renew_early(due_ms: f64, expires_ms: f64, now_ms: f64) -> bool {
     due_ms - now_ms <= (expires_ms - now_ms) / 2.0
 }
 
+/// When a guest whose relay credentials were renewed at `now_ms` asks for an
+/// ICE restart itself if the host has offered none (unix ms): half way
+/// through the old credentials' remaining life (they expire at
+/// `old_expires_ms`), so the new ones take effect well before the old ones
+/// lapse, while the host's own renewal, at the same point of the same
+/// lifetime, usually comes first.
+pub fn restart_deadline_ms(old_expires_ms: f64, now_ms: f64) -> f64 {
+    now_ms + ((old_expires_ms - now_ms) / 2.0).max(0.0)
+}
+
 /// The ICE username fragment of an SDP (the first `a=ice-ufrag:`): an offer
 /// whose fragment differs from the current remote description's restarts
 /// ICE.
@@ -240,6 +250,14 @@ mod tests {
         // The host renews its own (minted a few seconds earlier) at 45 s.
         assert!(renew_early(due, expires, 45_000.0));
         assert!(renew_early(due, expires, 50_000.0));
+    }
+
+    #[test]
+    fn a_renewed_guest_waits_half_the_old_life_for_the_host_restart() {
+        // Renewed at 48 s, old credentials expire at 60 s: ask by 54 s.
+        assert_eq!(restart_deadline_ms(60_000.0, 48_000.0), 54_000.0);
+        // Old ones already expired: ask at once.
+        assert_eq!(restart_deadline_ms(60_000.0, 61_000.0), 61_000.0);
     }
 
     #[test]

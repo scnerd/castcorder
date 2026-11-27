@@ -430,6 +430,10 @@ pub(super) struct RelayRenew {
     expires: u64,
     /// When to renew them (unix ms).
     due_ms: f64,
+    /// Renewed credentials wait for an ICE restart to take effect: the
+    /// host's own (it renews at the same point of the same lifetime), or
+    /// failing that, one this guest asks for by then (unix ms).
+    restart_by: Option<f64>,
     /// A renewal is asking the rendezvous now.
     busy: bool,
 }
@@ -449,16 +453,19 @@ enum Renewal {
 /// Renew this connection's relay (TURN) credentials before they expire
 /// (cast-lxt.11), for as long as the connection is current: at 80% of their
 /// remaining life, a fresh hello from the rendezvous (naming the host, so
-/// counted against its key's daily relay cap), `setConfiguration` with its
-/// ICE servers, and a `restart` signal, so the host offers an ICE restart and
-/// the answer ([`super::rpc::answer_one`]) gathers a relay candidate with the
-/// new credentials. The call (or sync-only connection) carries on over the
-/// new allocation without a reconnect. A failed renewal (rendezvous
-/// unreachable, the daily cap reached) keeps the old configuration and
-/// tries again, until the connection ends. When the host offers an ICE
-/// restart of its own near the renewal (it renews its credentials too),
-/// the answer renews first ([`renew_with_host_restart`]) and this loop has
-/// nothing left to do until the next one.
+/// counted against its key's daily relay cap) and `setConfiguration` with
+/// its ICE servers. They take effect at the next ICE restart, whose answer
+/// ([`super::rpc::answer_one`]) gathers a relay candidate with them: the
+/// host's own, since it renews at the same point of the same lifetime, or,
+/// if none comes by half the old credentials' remaining life, one this guest
+/// asks for with a `restart` signal. The call (or sync-only connection)
+/// carries on over the new allocation without a reconnect. A failed renewal
+/// (rendezvous unreachable, the daily cap reached) keeps the old
+/// configuration and tries again, until the connection ends. A host restart
+/// that comes shortly before the renewal is due renews first
+/// ([`renew_with_host_restart`]). Either way there is one ICE restart per
+/// renewal, not the host's and then the guest's a few seconds apart, which
+/// on a lossy network could leave a guest with no working path (cast-um1).
 async fn renew_relay(
     pc: RtcPeerConnection,
     url: String,
@@ -476,6 +483,7 @@ async fn renew_relay(
             link,
             expires,
             due_ms: now + wait,
+            restart_by: None,
             busy: false,
         })
     });
@@ -485,18 +493,33 @@ async fn renew_relay(
         "relay credentials will be renewed"
     );
     loop {
-        let Some(due) = with_engine(|e| renewal_of(e, &pc).map(|r| r.due_ms)) else {
+        let Some((due, restart_by, old_expires)) =
+            with_engine(|e| renewal_of(e, &pc).map(|r| (r.due_ms, r.restart_by, r.expires)))
+        else {
             return;
         };
-        let wait = due - js_sys::Date::now();
+        let now = js_sys::Date::now();
+        let wait = due.min(restart_by.unwrap_or(f64::INFINITY)) - now;
         if wait > 0.0 {
-            // The due time may move (renewed with a host restart): look again.
+            // The times may move (a host restart came): look again.
             crate::mailbox::sleep_ms(wait.min(i32::MAX as f64) as i32).await;
             continue;
         }
         let closed = pc.connection_state() == web_sys::RtcPeerConnectionState::Closed;
         if !current() || closed {
             return;
+        }
+        if restart_by.is_some_and(|t| now >= t) {
+            with_engine(|e| {
+                if let Some(r) = renewal_mut(e, &pc) {
+                    r.restart_by = None;
+                }
+            });
+            send_signal(&Signal::Restart);
+            info!(
+                "no ICE restart from the host since the relay credentials were renewed; asked for one"
+            );
+            continue;
         }
         // A direct connection needs no relay: renewing would cost a credential
         // (against the host key's cap) and an ICE restart for nothing
@@ -508,13 +531,19 @@ async fn renew_relay(
         }
         match renew_credentials(&pc).await {
             Renewal::Renewed if current() => {
-                send_signal(&Signal::Restart);
-                let (expires, due) =
-                    with_engine(|e| renewal_of(e, &pc).map_or((0, 0.0), |r| (r.expires, r.due_ms)));
+                let now = js_sys::Date::now();
+                let by = crate::signal::restart_deadline_ms(old_expires as f64 * 1000.0, now);
+                let (expires, due) = with_engine(|e| {
+                    renewal_mut(e, &pc).map_or((0, 0.0), |r| {
+                        r.restart_by = Some(by);
+                        (r.expires, r.due_ms)
+                    })
+                });
                 info!(
                     expires,
-                    renew_in_s = ((due - js_sys::Date::now()) / 1000.0).round(),
-                    "relay credentials renewed; asked the host to restart ICE"
+                    renew_in_s = ((due - now) / 1000.0).round(),
+                    restart_by_s = ((by - now) / 1000.0).round(),
+                    "relay credentials renewed; they take effect at the next ICE restart"
                 );
             }
             Renewal::Renewed | Renewal::Stop => return,
@@ -598,11 +627,13 @@ async fn renew_credentials(pc: &RtcPeerConnection) -> Renewal {
     Renewal::Renewed
 }
 
-/// Before answering a host offer: if it restarts ICE and this connection's
-/// relay credentials are near their renewal, renew them now, so the answer
-/// gathers its relay candidate with the new ones and no second ICE restart
-/// follows a few seconds later (cast-um1). The host restarts ICE when it
-/// renews its own credentials, which share the guests' lifetime.
+/// Before answering a host offer that restarts ICE: if this connection's
+/// relay credentials were renewed and wait for a restart, this one carries
+/// them; if they are being renewed, wait for that; if their renewal is near,
+/// renew them now. The answer then gathers its relay candidate with the new
+/// ones and no second ICE restart follows a few seconds later (cast-um1).
+/// The host restarts ICE when it renews its own credentials, which share the
+/// guests' lifetime.
 pub(super) async fn renew_with_host_restart(pc: &RtcPeerConnection, offer: &str) {
     use crate::signal::{ice_ufrag, renew_early};
     let restart = pc
@@ -610,6 +641,23 @@ pub(super) async fn renew_with_host_restart(pc: &RtcPeerConnection, offer: &str)
         .map(|d| d.sdp())
         .is_some_and(|cur| ice_ufrag(&cur).is_some() && ice_ufrag(&cur) != ice_ufrag(offer));
     if !restart {
+        return;
+    }
+    // A renewal asking the rendezvous now: its credentials should go into
+    // this answer (bounded, so a stuck request never holds the answer long).
+    let start = js_sys::Date::now();
+    while with_engine(|e| renewal_of(e, pc).is_some_and(|r| r.busy))
+        && js_sys::Date::now() - start < 5000.0
+    {
+        crate::mailbox::sleep_ms(50).await;
+    }
+    let carried = with_engine(|e| {
+        renewal_mut(e, pc)
+            .and_then(|r| r.restart_by.take())
+            .is_some()
+    });
+    if carried {
+        info!("relay credentials renewed before the host's ICE restart; it carries them");
         return;
     }
     let near = with_engine(|e| {
