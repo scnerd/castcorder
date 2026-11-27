@@ -174,6 +174,26 @@ pub fn code_links(
     out
 }
 
+/// A contact code's links: the public one alone once there is one. A contact
+/// is someone elsewhere, for whom a LAN address (`10.0.0.x`) never works and
+/// only confuses; with no rendezvous the LAN links are all there is, so they
+/// stay (cast-6no).
+pub fn contact_links(
+    app_links: &crate::rendezvous::Links,
+    lan: &[String],
+    fragment: &str,
+) -> Vec<String> {
+    let mut links = code_links(app_links, lan, fragment);
+    let public = app_links.base.is_some()
+        && app_links
+            .registered
+            .load(std::sync::atomic::Ordering::SeqCst);
+    if public {
+        links.truncate(1);
+    }
+    links
+}
+
 /// `GET /contacts`: the contacts as the home shows them.
 fn contacts_json(app: &App) -> String {
     serde_json::to_string(&app.contacts.view(crate::wall_ms())).unwrap_or_default()
@@ -226,7 +246,7 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
             Ok(code) => json(
                 200,
                 serde_json::json!({
-                    "links": code_links(&app.call_links, &app.lan_links, &code.fragment()),
+                    "links": contact_links(&app.call_links, &app.lan_links, &code.fragment()),
                     "code": code.fragment(),
                 })
                 .to_string(),
@@ -1173,6 +1193,24 @@ mod tests {
         }
     }
     use castcorder_link::identity;
+
+    #[test]
+    fn a_contact_code_links_the_public_address_alone_and_the_lan_only_without_one() {
+        let lan = vec!["http://10.0.0.7:7000".to_string()];
+        let links = test_links();
+        let all = code_links(&links, &lan, "FRAG");
+        assert_eq!(all.len(), 2, "{all:?}");
+        let contact = contact_links(&links, &lan, "FRAG");
+        assert_eq!(contact, vec!["https://rv/v/1/#FRAG".to_string()]);
+        // Not registered (or no rendezvous): the LAN link is all there is.
+        links
+            .registered
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            contact_links(&links, &lan, "FRAG"),
+            vec!["http://10.0.0.7:7000/#FRAG".to_string()]
+        );
+    }
 
     #[test]
     fn offer_query_names_are_percent_decoded_display_names() {
