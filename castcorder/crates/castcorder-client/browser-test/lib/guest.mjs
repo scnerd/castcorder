@@ -12,8 +12,10 @@ const FIREFOX_PREFS = {
 };
 
 // `display`: the display name joined with (default `name`); the host's
-// stream ids carry it with only letters and digits kept.
-export async function openGuest(name, extraArgs, base, setup, display = name, query = '') {
+// stream ids carry it with only letters and digits kept. `device`: Playwright
+// context options for a phone (user agent, viewport, isMobile, hasTouch;
+// Chromium only, see lib/mobile.mjs).
+export async function openGuest(name, extraArgs, base, setup, display = name, query = '', device = {}) {
   const { MODE, BASE_ARGS, host, logs, browsers, chromium, firefox } = run;
   logs[name] = logs[name] || [];
   let browser, ctx;
@@ -27,7 +29,7 @@ export async function openGuest(name, extraArgs, base, setup, display = name, qu
     ctx = await browser.newContext({ ignoreHTTPSErrors: true });
   } else {
     browser = await chromium.launch({ headless: true, args: [...BASE_ARGS, ...extraArgs] });
-    ctx = await browser.newContext({ permissions: ['microphone', 'camera', 'clipboard-read', 'clipboard-write'], ignoreHTTPSErrors: true });
+    ctx = await browser.newContext({ ...device, permissions: ['microphone', 'camera', 'clipboard-read', 'clipboard-write'], ignoreHTTPSErrors: true });
   }
   browsers.push(browser);
   if (MODE === 'fallback') {

@@ -125,6 +125,8 @@ input[type="text"], input[type="password"], input:not([type]), select {
 .check input { width: 18px; height: 18px; }
 .notice { display: flex; gap: 10px; padding: 12px; border-radius: 10px; background: var(--surface);
   border: 1px solid var(--border); font-size: 13px; line-height: 1.45; }
+.notice.warn { background: var(--warn-bg); border-color: var(--warn-line); }
+.notice.warn .info { font-style: normal; font-family: inherit; color: var(--warn); border-color: var(--warn-line); }
 .notice .info { width: 18px; height: 18px; border-radius: 50%; flex: none; display: inline-flex;
   align-items: center; justify-content: center; font: italic 700 12px Georgia, serif;
   background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
@@ -341,6 +343,10 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .more-sheet { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
 .more-sheet .btn { justify-content: flex-start; width: 100%; padding-left: 10px; color: var(--text); }
 @media (max-width: 760px) {
+  /* Name and Join first on a phone: the preview and pickers follow below. */
+  .lobby-form { order: -1; }
+  /* iOS Safari zooms the page into any field under 16px when it gets focus. */
+  input[type="text"], input[type="password"], input:not([type]), select { font-size: 16px; }
   /* Stacked tiles; with anyone else in, the own tile is a small inset. */
   .stage { grid-template-columns: minmax(0, 1fr); position: relative; }
   .stage:has(#remote .tile) > .tile:first-child { position: absolute; right: 12px; bottom: 12px; width: 96px;
@@ -353,7 +359,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
   .stage:has(#remote .tile) > .tile:first-child .tile-avatar::before { width: 48px; height: 48px; }
   .stage:has(#remote .tile) > .tile:first-child .tile-avatar span { font-size: 18px; }
   /* A labelled dock of five: Mute, Camera, People, More, Leave (cast-abe: always leavable). */
-  .dock { position: relative; z-index: 11; padding: 8px; justify-content: center; }
+  /* The bottom padding clears the iPhone's home bar (viewport-fit=cover). */
+  .dock { position: relative; z-index: 11; padding: 8px 8px max(8px, env(safe-area-inset-bottom));
+    justify-content: center; }
   .dock-side:not(.end), .dock-sep { display: none; }
   .dock-item.phone-only { display: flex; }
   .dock-item.desk-only { display: contents; }

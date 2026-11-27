@@ -283,6 +283,7 @@ pub(super) fn check_media(ui: Ui, epoch: u32) {
 }
 
 pub(super) async fn restart_media(ui: Ui, epoch: u32) {
+    let ended_at = js_sys::Date::now();
     let (ctx, take, raw, live, sources, audio, worklet) = with_engine(|e| {
         e.restarting = true;
         e.last_restart = js_sys::Date::now();
@@ -314,6 +315,12 @@ pub(super) async fn restart_media(ui: Ui, epoch: u32) {
     }
     match open_media().await {
         Ok((raw, live)) if !stale(epoch) => {
+            phone::watch(ui, &raw, epoch);
+            if take.is_some() {
+                let secs = ((js_sys::Date::now() - ended_at) / 1000.0).round().max(0.0) as u64;
+                ui.notes
+                    .update(|v| v.push(crate::mobile::reopened_note(secs)));
+            }
             with_engine(|e| {
                 e.raw = Some(handle(&raw));
                 e.live = Some(live);
