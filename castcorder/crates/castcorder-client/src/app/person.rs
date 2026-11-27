@@ -477,6 +477,7 @@ pub(super) fn ContactsCard(
     let links = RwSignal::new(Vec::<String>::new());
     let code = RwSignal::new(String::new());
     let adding_open = RwSignal::new(false);
+    super::popups::register_flag("add-contact", ".add-contact-wrap", adding_open);
     let selected = RwSignal::new(None::<String>);
     let nick = RwSignal::new(String::new());
     let shared = RwSignal::new(None::<(String, Shared)>);
