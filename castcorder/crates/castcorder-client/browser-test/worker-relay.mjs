@@ -172,8 +172,11 @@ try {
   const H = await hostId(h);
   const granted = await waitFor(() => h.err.match(/relay \(TURN\) server from the rendezvous.*expires=Some\((\d+)\)/),
     'host relay credentials', 30000);
-  check(Math.abs(Number(granted[1]) - (Date.now() / 1000 + TTL)) < 60,
-    'the host got coturn credentials on registering, expiring in TURN_TTL (' + granted[1] + ')');
+  // coturn expiries are rounded up to a step of half the TTL (cast-gln): one
+  // to one and a half TTLs away, on the step.
+  const left = Number(granted[1]) - Date.now() / 1000;
+  check(left > TTL - 60 && left < TTL * 1.5 + 60 && Number(granted[1]) % (TTL / 2) === 0,
+    'the host got coturn credentials on registering, expiring in one to one and a half TURN_TTL, on the step (' + granted[1] + ')');
   for (const n of [2, 3]) {
     const hello = await guestHello(port, H);
     const s = (hello.ice_servers || []).find((x) => x.username);
