@@ -10,8 +10,10 @@
 //! and the clock only through the ports. The application's ends of the two
 //! channels are [`GuestChannel`]s (the same queues the host hands out).
 //! It never renegotiates (a sync-only connection is never offered media) and
-//! gathers no relay candidate of its own: it relies on the answering host's
-//! (cost: no TURN credentials are minted for a contact link).
+//! gathers no relay candidate of its own: it offers its host candidates and,
+//! when its caller learned one, its server-reflexive address, and relies on
+//! the answering host's relay (cost: no TURN credentials are minted for a
+//! contact link).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -62,6 +64,9 @@ pub struct Dialer<S, C> {
     control: Shared,
     data: Shared,
     created: Duration,
+    /// The addresses offered as host candidates: what a datagram arrived on
+    /// is one of them (the socket may be bound to a wildcard address).
+    addrs: Vec<std::net::SocketAddr>,
     last_seen: Option<Duration>,
     next_heartbeat: Duration,
     gone: Option<GoneReason>,
@@ -76,6 +81,19 @@ impl<S: DatagramSocket, C: Clock> Dialer<S, C> {
         socket: S,
         clock: C,
         advertise: &[std::net::SocketAddr],
+        timing: DialTiming,
+    ) -> Result<(Self, String), String> {
+        Self::with_reflexive(socket, clock, advertise, None, timing)
+    }
+
+    /// [`Dialer::new`], also offering `reflexive`, the socket's
+    /// server-reflexive address (learned from a STUN server), as a srflx
+    /// candidate: what a peer behind another router can reach.
+    pub fn with_reflexive(
+        socket: S,
+        clock: C,
+        advertise: &[std::net::SocketAddr],
+        reflexive: Option<std::net::SocketAddr>,
         timing: DialTiming,
     ) -> Result<(Self, String), String> {
         let base = Instant::now();
@@ -94,6 +112,16 @@ impl<S: DatagramSocket, C: Clock> Dialer<S, C> {
             let c = Candidate::host(*a, "udp").map_err(|e| format!("host candidate: {e:?}"))?;
             rtc.add_local_candidate(c);
         }
+        if let Some(r) = reflexive.filter(|r| !addrs.contains(r)) {
+            // Its base is a host candidate's address, never the wildcard.
+            let base = crate::local_for(addrs, r, own[0]);
+            match Candidate::server_reflexive(r, base, "udp") {
+                Ok(c) => {
+                    rtc.add_local_candidate(c);
+                }
+                Err(e) => debug!(reflexive = %r, error = ?e, "srflx candidate refused"),
+            }
+        }
         let mut api = rtc.sdp_api();
         api.add_channel(ChannelKind::Control.label().into());
         api.add_channel(ChannelKind::Data.label().into());
@@ -111,6 +139,7 @@ impl<S: DatagramSocket, C: Clock> Dialer<S, C> {
                 control: Shared::default(),
                 data: Shared::default(),
                 created,
+                addrs: addrs.to_vec(),
                 last_seen: None,
                 next_heartbeat: created,
                 gone: None,
@@ -177,7 +206,11 @@ impl<S: DatagramSocket, C: Clock> Dialer<S, C> {
                         Receive {
                             proto: Protocol::Udp,
                             source,
-                            destination: self.socket.local_addr(),
+                            destination: crate::local_for(
+                                &self.addrs,
+                                source,
+                                self.socket.local_addr(),
+                            ),
                             contents,
                         },
                     );

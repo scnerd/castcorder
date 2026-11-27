@@ -1066,32 +1066,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
     /// arrived on (str0m's ICE agent drops requests not addressed to one of its
     /// host candidates).
     fn destination_for(&self, source: SocketAddr) -> SocketAddr {
-        if let [only] = self.advertise.as_slice() {
-            return *only;
-        }
-        let score = |a: &SocketAddr| -> Option<u32> {
-            let (same_loop, common) = match (a.ip(), source.ip()) {
-                (IpAddr::V4(l), IpAddr::V4(r)) => (
-                    l.is_loopback() == r.is_loopback(),
-                    (u32::from(l) ^ u32::from(r)).leading_zeros(),
-                ),
-                (IpAddr::V6(l), IpAddr::V6(r)) => (
-                    l.is_loopback() == r.is_loopback(),
-                    (u128::from(l) ^ u128::from(r)).leading_zeros(),
-                ),
-                _ => return None,
-            };
-            Some((u32::from(same_loop) << 8) + common)
-        };
-        let mut best: Option<(u32, SocketAddr)> = None;
-        for a in &self.advertise {
-            if let Some(s) = score(a)
-                && best.is_none_or(|(b, _)| s > b)
-            {
-                best = Some((s, *a));
-            }
-        }
-        best.map(|(_, a)| a).unwrap_or(self.local)
+        local_for(&self.advertise, source, self.local)
     }
 
     fn remove_gone(&mut self) {
@@ -1252,6 +1227,43 @@ pub(crate) fn relay_candidates(sdp: &str) -> Vec<SocketAddr> {
             Some(SocketAddr::new(ip, port))
         })
         .collect()
+}
+
+/// Which of the `advertise`d addresses a datagram from `source` most likely
+/// arrived on (a socket bound to a wildcard address cannot say): the only
+/// one, else the one sharing loopback-ness and the longest prefix with
+/// `source`; `fallback` when none is of its family.
+pub(crate) fn local_for(
+    advertise: &[SocketAddr],
+    source: SocketAddr,
+    fallback: SocketAddr,
+) -> SocketAddr {
+    if let [only] = advertise {
+        return *only;
+    }
+    let score = |a: &SocketAddr| -> Option<u32> {
+        let (same_loop, common) = match (a.ip(), source.ip()) {
+            (IpAddr::V4(l), IpAddr::V4(r)) => (
+                l.is_loopback() == r.is_loopback(),
+                (u32::from(l) ^ u32::from(r)).leading_zeros(),
+            ),
+            (IpAddr::V6(l), IpAddr::V6(r)) => (
+                l.is_loopback() == r.is_loopback(),
+                (u128::from(l) ^ u128::from(r)).leading_zeros(),
+            ),
+            _ => return None,
+        };
+        Some((u32::from(same_loop) << 8) + common)
+    };
+    let mut best: Option<(u32, SocketAddr)> = None;
+    for a in advertise {
+        if let Some(s) = score(a)
+            && best.is_none_or(|(b, _)| s > b)
+        {
+            best = Some((s, *a));
+        }
+    }
+    best.map(|(_, a)| a).unwrap_or(fallback)
 }
 
 #[cfg(test)]

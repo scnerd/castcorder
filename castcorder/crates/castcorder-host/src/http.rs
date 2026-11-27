@@ -1364,6 +1364,7 @@ mod tests {
             connected: true,
             relay: "unavailable".into(),
             relay_detail: "relay_quota: over budget".into(),
+            stun: None,
         };
         let library = std::env::temp_dir();
         let app = Arc::new(App {

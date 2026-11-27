@@ -1090,6 +1090,7 @@ pub fn start(
             base.clone(),
             args.bind,
             advertise_ips.clone(),
+            call_links.health.clone(),
             stop.clone(),
         );
         threads.push(handle);
