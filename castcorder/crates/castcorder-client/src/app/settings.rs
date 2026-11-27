@@ -25,6 +25,9 @@ struct Health {
 struct SettingsView {
     #[serde(default)]
     library: String,
+    /// The app can move the folder (cast-hs4).
+    #[serde(default)]
+    library_movable: bool,
     free_bytes: Option<u64>,
     total_bytes: Option<u64>,
     audio_secs_left: Option<u64>,
@@ -91,17 +94,38 @@ fn span(secs: u64) -> String {
 pub(super) fn SettingsPage(ui: Ui) -> impl IntoView {
     let data = RwSignal::new(SettingsView::default());
     let message = RwSignal::new(String::new());
+    // Moving the recordings folder (cast-hs4): where to, and how many answers
+    // since still named the old one.
+    let moving = RwSignal::new(None::<(String, u32)>);
+    let changing = RwSignal::new(false);
+    let new_place = RwSignal::new(String::new());
     let refresh = move || {
         spawn_local(async move {
             match home_request("GET", "/settings", None).await {
                 Ok(t) => match serde_json::from_str::<SettingsView>(&t) {
                     Ok(v) => {
+                        match moving.get_untracked() {
+                            Some((to, _)) if to == v.library => {
+                                moving.set(None);
+                                changing.set(false);
+                                message.set("Recordings folder moved.".into());
+                            }
+                            // The host came back on the old folder: the move failed.
+                            Some((_, n)) if n >= 3 => {
+                                moving.set(None);
+                                message.set("The folder did not move; everything is still in the old one. The log says why.".into());
+                            }
+                            Some((to, n)) => moving.set(Some((to, n + 1))),
+                            None => {}
+                        }
                         if data.get_untracked() != v {
                             data.set(v);
                         }
                     }
                     Err(e) => message.set(format!("settings not readable: {e}")),
                 },
+                // While the folder moves the host is away for a moment.
+                Err(_) if moving.get_untracked().is_some() => {}
                 Err(e) => message.set(e),
             }
         })
@@ -113,6 +137,22 @@ pub(super) fn SettingsPage(ui: Ui) -> impl IntoView {
             window().clear_interval_with_handle(t);
         }
     });
+    let move_folder = move || {
+        let to = new_place.get_untracked().trim().to_string();
+        if to.is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let body = serde_json::json!({ "path": to.clone() }).to_string();
+            match home_request("POST", "/settings/library", Some(body)).await {
+                Ok(_) => {
+                    moving.set(Some((to, 0)));
+                    message.set("Moving the recordings folder. Castcorder pauses for a moment and comes back on the new folder.".into());
+                }
+                Err(e) => message.set(e),
+            }
+        })
+    };
     let open_folder = move |_| {
         spawn_local(async move {
             match home_request("POST", "/folder/open", Some(r#"{"library":true}"#.into())).await {
@@ -224,7 +264,27 @@ pub(super) fn SettingsPage(ui: Ui) -> impl IntoView {
                 <div class="settings-line">
                     <code id="library-path" class="settings-path">{move || data.get().library}</code>
                     <button id="open-library" class="btn tiny" on:click=open_folder>"Open"</button>
+                    <Show when=move || data.get().library_movable>
+                        <button id="change-library" class="btn tiny outline" on:click=move |_| {
+                            if !changing.get_untracked() {
+                                new_place.set(data.get_untracked().library);
+                            }
+                            changing.update(|c| *c = !*c);
+                        }>"Change..."</button>
+                    </Show>
                 </div>
+                <form id="move-library" class="settings-move" hidden=move || !changing.get()
+                    on:submit=move |ev: web_sys::SubmitEvent| { ev.prevent_default(); move_folder(); }>
+                    <label class="small muted" for="library-new">"Move everything (your rooms, recordings and contacts) to a new or empty folder. Give its whole path. On another drive this copies, and the old folder stays until you delete it."</label>
+                    <input id="library-new" class="settings-path-input" prop:value=move || new_place.get()
+                        on:input=move |ev| new_place.set(event_target_value(&ev))/>
+                    <span class="row">
+                        <button type="button" class="btn tiny" on:click=move |_| changing.set(false)>"Cancel"</button>
+                        <button id="move-library-go" type="submit" class="btn tiny primary" disabled=move || moving.get().is_some()>
+                            {move || if moving.get().is_some() { "Moving..." } else { "Move here" }}
+                        </button>
+                    </span>
+                </form>
                 <Show when=move || used().is_some()>
                     <div class="disk-bar" role="img" aria-label=move || format!("{}% of the disk used", used().unwrap_or(0))>
                         <span style=move || format!("width: {}%", used().unwrap_or(0))></span>
