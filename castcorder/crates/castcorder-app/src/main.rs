@@ -102,7 +102,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             contact_code,
             contact_add,
-            joined_rooms_save
+            joined_rooms_save,
+            show_home
         ])
         .setup(move |app| {
             if !args.smoke {
@@ -621,7 +622,8 @@ fn bridge(app: &AppHandle, host: &HostControl) {
         .remote(format!("{origin}/*"))
         .permission("allow-contact-code")
         .permission("allow-contact-add")
-        .permission("allow-joined-rooms-save");
+        .permission("allow-joined-rooms-save")
+        .permission("allow-show-home");
     match app.add_capability(capability) {
         Ok(()) => tracing::info!(%origin, "the call window may reach the contacts"),
         Err(e) => tracing::warn!(error = %e, "the call window cannot reach the contacts"),
@@ -664,6 +666,21 @@ fn joined_rooms_save(
     rooms: String,
 ) -> Result<(), String> {
     bridged(&webview, &shell)?.save_joined_rooms(&rooms)
+}
+
+/// The call window's "Back to your rooms" once its person left the call
+/// (cast-n56.12 for a call joined from a link): hide the call window, which
+/// goes on delivering the recordings as closing it does, and bring the home
+/// to the front.
+#[tauri::command]
+fn show_home(webview: Webview, shell: State<'_, Shell>) -> Result<(), String> {
+    bridged(&webview, &shell)?;
+    let app = webview.app_handle();
+    if let Some(w) = app.get_webview_window(CALL) {
+        let _ = w.hide();
+    }
+    show(app, MAIN);
+    Ok(())
 }
 
 /// Percent-encode everything but unreserved characters.
