@@ -134,7 +134,7 @@ different networks. Call them Ann and Bob.
   it from the other person. Expect: refused; the list no longer shows it. A single-use link
   stops working after its first use.
 - [ ] **Presence.** Each sees the other's devices as "Online on ..." and "Offline" after the
-  other quits the app (within a minute or two). "Appear offline" at one side shows it offline
+  other quits the app (within a minute or two). The checkbox "Appear offline to your contacts" at one side shows it offline
   to contacts only.
 - [ ] **Nickname.** Give Bob a nickname at Ann. Expect: only Ann sees it, and it survives a
   restart.
