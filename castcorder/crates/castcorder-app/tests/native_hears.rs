@@ -191,8 +191,16 @@ fn a_guest_hears_the_host_machines_native_participant() {
     // counts; a live microphone paces itself.
     println!("the guest heard {} samples", decoded.len());
     // The generator's tone is 16384 of 32768 at peak: far above silence even
-    // after the downmix and Opus.
-    let level = rms(&decoded[960..]);
+    // after the downmix and Opus. Judge the loudest 20 ms frame: the burst
+    // that arrives may be mostly the source's end (Opus's ramp-out and the
+    // padded last frame), so an average over all of it can sit near silence
+    // even though the tone came through (seen on Windows: rms 0.0498).
+    let level = decoded
+        .as_chunks::<960>()
+        .0
+        .iter()
+        .map(|f| rms(f))
+        .fold(0f32, f32::max);
     assert!(
         level > 0.05,
         "the host participant sounds silent: rms {level}"
