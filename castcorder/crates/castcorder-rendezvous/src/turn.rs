@@ -2,7 +2,10 @@
 //! "TURN REST API"): the username is `<expiry unix seconds>:<host id>` and the
 //! password is the base64 HMAC-SHA1 of the username under a secret shared with
 //! the TURN server (coturn `static-auth-secret`). The TURN server checks the
-//! HMAC and the expiry itself; the rendezvous stores nothing.
+//! HMAC and the expiry itself; the rendezvous stores nothing. Expiries are
+//! rounded so a host key's credentials share a few usernames, which makes
+//! coturn's `user-quota` a per-host-key cap
+//! ([`castcorder_mailbox::turn::coturn_expiry`]).
 
 use std::time::Duration;
 
@@ -34,8 +37,8 @@ impl std::fmt::Debug for TurnConfig {
 /// The password for `username` under `secret`.
 pub use castcorder_mailbox::turn::password;
 
-/// An ICE server entry with credentials for `host`, valid until `now_unix`
-/// plus the TTL (the scheme is shared with the Worker:
+/// An ICE server entry with credentials for `host`, valid for the TTL to one
+/// and a half times it (the scheme is shared with the Worker:
 /// [`castcorder_mailbox::turn::coturn_rest`]).
 pub fn mint(cfg: &TurnConfig, host: &HostId, now_unix: u64) -> IceServer {
     castcorder_mailbox::turn::coturn_rest(&cfg.urls, &cfg.secret, host, now_unix, cfg.ttl.as_secs())
@@ -61,7 +64,7 @@ mod tests {
         };
         let s = mint(&cfg, &id, 1_000);
         let user = s.username.clone().unwrap();
-        assert_eq!(user, format!("1600:{}", id.encode()));
+        assert_eq!(user, format!("1800:{}", id.encode()));
         assert_eq!(s.credential.unwrap(), password("s", &user));
         assert_eq!(s.urls, cfg.urls);
         assert!(
