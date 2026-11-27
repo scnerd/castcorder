@@ -90,12 +90,18 @@ from `main` only):
 | `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare account id                                      |
 | `CF_TURN_KEY_ID`        | the Realtime TURN key `castcorder-production`'s Turn Token ID  |
 | `CF_TURN_API_TOKEN`     | that TURN key's API token                                      |
+| `CF_ANALYTICS_TOKEN`    | account-owned token `castcorder worker (relay metering, ...)`  |
 
 `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` are also repository secrets, so CI's
 `test:worker:relay` exercises real Cloudflare TURN. The deploy token holds Workers Scripts
 Write (creating the Worker on its first deploy needs account-wide Workers Admin) and
 Account Settings Read, for this account only (`deploy_token_permission_groups` in
-[tofu/variables.tf](tofu/variables.tf)).
+[tofu/variables.tf](tofu/variables.tf)). The analytics token holds only Account Analytics
+Read: the Worker uses it to read each host key's relay egress from Cloudflare's GraphQL
+analytics and refuses new relay credentials past `RELAY_BUDGET_BYTES` per 30 days
+(cast-lxt.10; `worker/src/relay.rs`). deploy.yml hands it to the Worker as the secret
+`CF_ANALYTICS_TOKEN`, with `CF_ACCOUNT_ID`; without it the deploy warns and nothing is
+metered.
 
 The inputs OpenTofu needs live in `deploy/secrets.sops.yaml`, committed and encrypted
 with [SOPS](https://github.com/getsops/sops) to the maintainer's age key
@@ -166,11 +172,14 @@ apps' default `PROJECT_RENDEZVOUS`) and the bootstrap token above.
      prints `CALL_LINK https://castcorder.jexmax.workers.dev/v/0.0.0/#...`; open that
      link in a browser on another network and join the call;
    - in the dashboard, **Workers & Pages** > **castcorder** > **Settings** lists
-     `CF_TURN_KEY_ID` and `CF_TURN_API_TOKEN` as secrets, and **Logs** shows requests.
+     `CF_TURN_KEY_ID`, `CF_TURN_API_TOKEN`, `CF_ANALYTICS_TOKEN` and `CF_ACCOUNT_ID` as
+     secrets, and **Logs** shows requests (a host's first relay credentials log
+     `relay usage read` with its bytes).
 
 **Changing it later.** Edit `deploy/tofu`, then `task deploy:infra` and commit the
 state. To rotate a credential, replace its resource and rerun the workflow:
-`sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`.
+`sops exec-env deploy/secrets.sops.yaml "task deploy:infra:tofu -- apply -replace=cloudflare_account_token.deploy"`
+(or `.analytics`).
 For the TURN key, `task deploy:turn-key FORCE=1` then `task deploy:infra`. Cloudflare
 returns token and key values only when it creates them, so tofu refuses to write an empty GitHub secret rather than
 overwrite a good one. `task deploy:infra:validate` (fmt and validate, no secrets) runs in

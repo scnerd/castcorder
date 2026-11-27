@@ -9,8 +9,10 @@ name: Deploy
 #
 # Secrets live in the `production` GitHub environment (deploy/README.md):
 # CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID deploy; CF_TURN_KEY_ID and
-# CF_TURN_API_TOKEN become the Worker's secrets of the same names. Until the first two
-# exist the deploy job skips with a notice, so main stays green.
+# CF_TURN_API_TOKEN become the Worker's secrets of the same names, and with
+# CF_ANALYTICS_TOKEN (relay metering, cast-lxt.10) so do it and CF_ACCOUNT_ID.
+# Until CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID exist the deploy job
+# skips with a notice, so main stays green.
 on:
   push:
     branches: [main]
@@ -177,12 +179,19 @@ jobs:
         env:
           CF_TURN_KEY_ID: ${{ secrets.CF_TURN_KEY_ID }}
           CF_TURN_API_TOKEN: ${{ secrets.CF_TURN_API_TOKEN }}
+          CF_ANALYTICS_TOKEN: ${{ secrets.CF_ANALYTICS_TOKEN }}
         run: |
           args=(deploy --message "${GITHUB_SHA::12} (run $GITHUB_RUN_ID)")
           if [ -n "$CF_TURN_KEY_ID" ] && [ -n "$CF_TURN_API_TOKEN" ]; then
             secrets="$RUNNER_TEMP/worker-secrets.json"
             (umask 077 && jq -n --arg id "$CF_TURN_KEY_ID" --arg token "$CF_TURN_API_TOKEN" \
-              '{CF_TURN_KEY_ID: $id, CF_TURN_API_TOKEN: $token}' > "$secrets")
+              --arg analytics "$CF_ANALYTICS_TOKEN" --arg account "$CLOUDFLARE_ACCOUNT_ID" \
+              '{CF_TURN_KEY_ID: $id, CF_TURN_API_TOKEN: $token}
+               + (if $analytics != "" then {CF_ANALYTICS_TOKEN: $analytics, CF_ACCOUNT_ID: $account} else {} end)' \
+              > "$secrets")
+            if [ -z "$CF_ANALYTICS_TOKEN" ]; then
+              echo "::warning::No CF_ANALYTICS_TOKEN in the production environment: relay use is not metered per host key (run task deploy:infra)."
+            fi
             args+=(--secrets-file "$secrets")
           else
             echo "::warning::No CF_TURN_KEY_ID/CF_TURN_API_TOKEN in the production environment: deploying with RELAY=none (no relay for calls that need one)."

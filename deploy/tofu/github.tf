@@ -9,6 +9,7 @@ locals {
     CLOUDFLARE_ACCOUNT_ID = local.account_id
     CF_TURN_KEY_ID        = var.cf_turn_key_id
     CF_TURN_API_TOKEN     = var.cf_turn_api_token
+    CF_ANALYTICS_TOKEN    = cloudflare_account_token.analytics.value
   }
   repository_secrets = {
     CF_TURN_KEY_ID    = var.cf_turn_key_id
@@ -39,7 +40,7 @@ resource "github_repository_environment_deployment_policy" "main" {
 }
 
 resource "github_actions_environment_secret" "production" {
-  for_each = toset(["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CF_TURN_KEY_ID", "CF_TURN_API_TOKEN"])
+  for_each = toset(["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "CF_TURN_KEY_ID", "CF_TURN_API_TOKEN", "CF_ANALYTICS_TOKEN"])
 
   repository  = var.github_repository
   environment = github_repository_environment.production.environment
@@ -49,7 +50,7 @@ resource "github_actions_environment_secret" "production" {
   lifecycle {
     precondition {
       condition     = try(length(local.environment_secrets[each.value]) > 0, false)
-      error_message = "No value for this secret: Cloudflare returns token and key values only on creation. For CF_TURN_*, run `task deploy:turn-key`; for the deploy token, replace it (tofu apply -replace=cloudflare_account_token.deploy)."
+      error_message = "No value for this secret: Cloudflare returns token and key values only on creation. For CF_TURN_*, run `task deploy:turn-key`; for a token, replace it (tofu apply -replace=cloudflare_account_token.deploy or .analytics)."
     }
   }
 }

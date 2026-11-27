@@ -38,7 +38,11 @@
     // Relay credential lifetime in seconds; the host renews at 80%.
     "TURN_TTL": "86400",
     // Relay credentials one host key may mint per UTC day.
-    "RELAY_DAILY_CAP": "300"
+    "RELAY_DAILY_CAP": "300",
+    // Relay egress one host key may use per 30 days before it is refused new
+    // relay credentials (0: measure only). Needs the secrets CF_ACCOUNT_ID and
+    // CF_ANALYTICS_TOKEN (deploy.yml); without them nothing is metered.
+    "RELAY_BUDGET_BYTES": "20000000000"
   },
   "observability": { "enabled": true }
 }

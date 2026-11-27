@@ -19,6 +19,15 @@
 //    work (cast-lxt.4) adds them. The key and token go to wrangler in an env
 //    file, never on a command line, and are never printed.
 //
+// 4. Relay metering (cast-lxt.10), against a local stand-in for Cloudflare's
+//    Realtime TURN and GraphQL analytics APIs (CF_TURN_API_URL,
+//    CF_GRAPHQL_URL) with RELAY_BUDGET_BYTES=1000: credentials are requested
+//    tagged with the host id; an analytics failure refuses nothing; a failed
+//    tagged request falls back to untagged credentials; a host key at its
+//    budget is refused with relay_quota; and the figure is kept 15 minutes
+//    (the stand-in's next answer is not asked for). Part 3 also checks the
+//    real API took the tagged request.
+//
 // Every port is picked by the OS. CARGO_TARGET_DIR selects other build dirs.
 // Run from the repo root with: task test:worker:relay
 // Everything printed is ASCII. Logs go to browser-test/test-results/worker-relay-*.
@@ -26,6 +35,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHmac, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -203,6 +213,70 @@ try {
     killTree(n.p);
   }
 
+  // 4. Relay metering against a stand-in for Cloudflare's APIs.
+  {
+    const cf = { generate: [], untagged: 0, queries: [], egress: null, failGenerate: false, auth: [] };
+    const fake = createHttpServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        cf.auth.push(req.headers.authorization || '');
+        const json = (code, v) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)); };
+        const server = { urls: ['turn:127.0.0.1:9?transport=udp', 'turns:127.0.0.1:443?transport=tcp'], username: 'u', credential: 'c' };
+        if (req.url === '/turn/key1/credentials/generate') {
+          cf.generate.push(JSON.parse(body));
+          if (cf.failGenerate) return json(500, { errors: ['down'] });
+          return json(201, { iceServers: server });
+        }
+        if (req.url === '/turn/key1/credentials/generate-ice-servers') { cf.untagged++; return json(201, { iceServers: [server] }); }
+        if (req.url === '/graphql') {
+          cf.queries.push(JSON.parse(body).variables);
+          if (cf.egress === null) return json(200, { data: null, errors: [{ message: 'not authorized' }] });
+          return json(200, { data: { viewer: { accounts: [{ callsTurnUsageAdaptiveGroups: [{ sum: { egressBytes: cf.egress } }] }] } }, errors: null });
+        }
+        json(404, {});
+      });
+    });
+    await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+    const base = 'http://127.0.0.1:' + fake.address().port;
+    const p4 = await freePort();
+    const st4 = join(tmpdir(), 'castcorder-worker-metered-' + process.pid);
+    rmSync(st4, { recursive: true, force: true });
+    const w4 = await startWorker('worker-metered', p4, st4,
+      { STUN_URLS: '', RELAY: 'cloudflare', TURN_TTL: String(TTL), RELAY_BUDGET_BYTES: '1000',
+        CF_TURN_API_URL: base + '/turn', CF_GRAPHQL_URL: base + '/graphql' },
+      { CF_TURN_KEY_ID: 'key1', CF_TURN_API_TOKEN: 'turn-token', CF_ACCOUNT_ID: 'acct1', CF_ANALYTICS_TOKEN: 'analytics-token' });
+    const m = startHost('host-metered', p4);
+    const M = await hostId(m);
+    await waitFor(() => /relay \(TURN\) server from the rendezvous/.test(m.err), 'metered host relay credentials', 30000);
+    check(cf.generate.length >= 1 && cf.generate.every((b) => b.customIdentifier === M && b.ttl === TTL),
+      'credentials are requested tagged with the host id: ' + JSON.stringify(cf.generate));
+    check(cf.queries.length >= 1 && cf.queries.every((v) => v.id === M && v.account === 'acct1')
+      && cf.auth.includes('Bearer analytics-token') && cf.auth.includes('Bearer turn-token'),
+    'analytics are asked about that host id on that account: ' + JSON.stringify(cf.queries));
+    check(true, 'an analytics error refuses nothing: the host got credentials');
+    cf.failGenerate = true;
+    const g1 = await guestHello(p4, M);
+    check(!g1.relay_error && (g1.ice_servers || []).some((x) => x.username) && cf.untagged === 1,
+      'a failed tagged request falls back to untagged credentials: ' + (g1.relay_error || 'credentials'));
+    cf.failGenerate = false;
+    cf.egress = 5000;
+    const g2 = await guestHello(p4, M);
+    check((g2.relay_error || '').startsWith('relay_quota') && (g2.relay_error || '').includes('5000 of 1000 bytes')
+      && !(g2.ice_servers || []).some((x) => x.username),
+    'a host key at its relay budget is refused: ' + g2.relay_error);
+    const asked = cf.queries.length;
+    cf.egress = 0;
+    const g3 = await guestHello(p4, M);
+    check((g3.relay_error || '').startsWith('relay_quota') && cf.queries.length === asked,
+      'the figure is kept for 15 minutes (' + asked + ' queries): ' + g3.relay_error);
+    check(!(w4.out + w4.err).includes('analytics-token') && !(w4.out + w4.err).includes('turn-token'),
+      'no log holds the analytics or TURN token');
+    killTree(m.p);
+    killTree(w4.p);
+    fake.close();
+  }
+
   // 3. Cloudflare Realtime TURN, for real, when a TURN key is given.
   if (!CF) {
     console.log('SKIP Cloudflare Realtime TURN: CF_TURN_KEY_ID and CF_TURN_API_TOKEN are not set '
@@ -211,7 +285,7 @@ try {
     const cfPort = await freePort();
     const cfState = join(tmpdir(), 'castcorder-worker-cf-' + process.pid);
     rmSync(cfState, { recursive: true, force: true });
-    await startWorker('worker-cloudflare', cfPort, cfState,
+    const wcf = await startWorker('worker-cloudflare', cfPort, cfState,
       { STUN_URLS: 'stun:stun.cloudflare.com:3478', RELAY: 'cloudflare', TURN_TTL: String(TTL) },
       { CF_TURN_KEY_ID: CF.id, CF_TURN_API_TOKEN: CF.token });
     console.log('worker (wrangler dev, RELAY=cloudflare) at 127.0.0.1:' + cfPort);
@@ -238,6 +312,8 @@ try {
       && Number(s.expires) > Date.now() / 1000,
     'a guest hello carries Cloudflare TURN credentials: ' + (s ? s.urls.join(' ') : hello.relay_error));
     check((hello.ice_servers || []).some((x) => x.urls.includes('stun:stun.cloudflare.com:3478')), 'and stun.cloudflare.com');
+    check(!/minting untagged/.test(wcf.out + wcf.err),
+      'Cloudflare took the tagged credential request (customIdentifier, for metering)');
     killTree(c.p);
   }
   check(!secretsSeen(), 'no log holds the TURN secret or the Cloudflare API token');

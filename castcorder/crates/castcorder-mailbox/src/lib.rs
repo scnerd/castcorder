@@ -20,6 +20,7 @@
 //! The Worker needs the scope to pick the Durable Object before the first
 //! frame; the rendezvous enforces it the same way so the two agree.
 
+pub mod cf_usage;
 pub mod turn;
 
 use std::collections::HashMap;
