@@ -278,7 +278,9 @@ try {
   // flicker through "disconnected" and recover by itself; it must still not rejoin.
   const degraded = !!process.env.DEGRADED;
   check((lost.length === 0 || degraded) && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
-    + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : ''));
+    + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : '')
+    + (same.length === 2 ? '' : ' (rejoined: ' + ['A', 'B'].filter((n) => !same.includes(n)).join(', ') + ')'));
+  for (const n of lost) console.log('guest ' + n + ': ' + logs[n].filter((l) => /connection to the host lost|connection state|relay credentials|answered host renegotiation|joined/.test(l)).map((l) => l.replaceAll('\n', ' ')).join(' | '));
   const started2 = await post('/take/start');
   check(started2[0] === 200, 'take 2 started after the renewal: ' + started2.join(' '));
   await sleep(4000);

@@ -264,6 +264,13 @@ jobs:
           DEGRADED: "1"
         run: task test:relay
 
+      - name: Upload relay logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: degraded-relay-logs
+          path: castcorder/crates/castcorder-client/browser-test/test-results/relay-*
+
   # A failing scheduled run files an issue pointing at it.
   report:
     name: report
