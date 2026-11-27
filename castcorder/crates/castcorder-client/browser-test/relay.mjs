@@ -275,7 +275,7 @@ try {
   // minted moments later, so their renewal is near: the guest renews them in
   // its answer to the host's restart instead of asking for a second restart
   // seconds later (which, on a lossy network, could leave it with no path).
-  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart') || l.includes('renewal under way carried into the host\'s ICE restart')));
+  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart') || l.includes('renewed while the host restarted ICE')));
   const second = (host.err.slice(at).match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
   // Over TCP the host's restart can come a moment after a guest's own renewal
   // (its reconnect to the rendezvous is slower), and the order is a matter of
