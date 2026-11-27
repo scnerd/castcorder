@@ -113,6 +113,8 @@ pub struct App {
     pub contact_links: Option<crate::contact_link::Links>,
     /// Moves the library for the app embedding the host (cast-hs4).
     pub relocate: Option<crate::library::Relocate>,
+    /// The embedding app's update (cast-b3k).
+    pub update: Option<crate::appupdate::AppUpdate>,
 }
 
 /// `GET /person`: the person as the home shows it (never the key).
@@ -135,6 +137,7 @@ fn settings_json(app: &App) -> String {
     serde_json::json!({
         "library": std::path::absolute(&app.library).unwrap_or_else(|_| app.library.clone()).display().to_string(),
         "library_movable": app.relocate.is_some(),
+        "update_ready": app.update.as_ref().and_then(|u| (u.ready)()),
         "free_bytes": free,
         "total_bytes": total,
         "audio_secs_left": free.map(|f| diskspace::seconds_left(f, false)),
@@ -943,7 +946,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             }
         }
         ("GET", "/native" | "/rooms" | "/person" | "/settings" | "/joined-rooms")
-        | ("POST", "/settings/library")
+        | ("POST", "/settings/library" | "/settings/update")
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
@@ -975,6 +978,15 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         }
         ("GET", "/person") => json(200, person_json(app)),
         ("GET", "/settings") => json(200, settings_json(app)),
+        // The app's update (cast-b3k): install the one downloaded; the app
+        // restarts right after this answer.
+        ("POST", "/settings/update") => match &app.update {
+            None => text(409, "this host's app does not update itself".to_string()),
+            Some(u) => match (u.install)() {
+                Ok(()) => json(200, "{\"installing\":true}".into()),
+                Err(e) => text(409, e),
+            },
+        },
         ("POST", "/settings/library") => {
             #[derive(serde::Deserialize)]
             struct Move {
@@ -1353,6 +1365,7 @@ mod tests {
             contacts: test_contacts(),
             contact_links: None,
             relocate: None,
+            update: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1432,6 +1445,7 @@ mod tests {
             contacts: test_contacts(),
             contact_links: None,
             relocate: None,
+            update: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = local.local_addr().unwrap();
@@ -1484,6 +1498,7 @@ mod tests {
             contacts: test_contacts(),
             contact_links: None,
             relocate: None,
+            update: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = local.local_addr().unwrap();
@@ -1516,6 +1531,7 @@ mod tests {
             contacts: test_contacts(),
             contact_links: None,
             relocate: None,
+            update: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1558,6 +1574,7 @@ mod tests {
             contacts: test_contacts(),
             contact_links: None,
             relocate: None,
+            update: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

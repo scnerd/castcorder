@@ -69,6 +69,11 @@ const HOST_EXE = bin('castcorder-host');
 const RV_EXE = bin('castcorder-rendezvous');
 const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
 const WORKER = process.env.CASTCORDER_RENDEZVOUS === 'worker';
+// Every browser here shares 127.0.0.1, so the per-address rate limit meant for
+// one person's devices (120/min, burst 60) would be spent by the whole cast:
+// a page reloaded late in the run was refused ("rate limited") and never got
+// its lobby. The rate limit itself has unit tests in castcorder-mailbox.
+const IP_RATE = '6000/600';
 const WORKER_DIR = join(WORKSPACE, 'worker');
 const WRANGLER = join(WORKER_DIR, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
 const needed = WORKER ? [join(WORKER_DIR, 'build', 'index.js'), WRANGLER] : [RV_EXE];
@@ -176,7 +181,7 @@ async function startWorker(turn, { name = 'worker', ttl } = {}) {
     if (ttl) relay.push('--var', 'TURN_TTL:' + ttl);
   }
   const st = start(process.execPath, [WRANGLER, 'dev', '--ip', '127.0.0.1', '--port', String(port),
-    '--inspector-port', String(inspector), '--persist-to', state, ...relay],
+    '--inspector-port', String(inspector), '--persist-to', state, '--var', 'IP_RATE:' + IP_RATE, ...relay],
   name, { cwd: WORKER_DIR, env: { ...process.env, WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
   const http = '127.0.0.1:' + port;
   await waitFor(async () => {
@@ -285,7 +290,7 @@ try {
     [rv, RV_HTTP] = await startWorker(turn);
     console.log('worker (wrangler dev) at ' + RV_HTTP + (turn ? ', RELAY=coturn' : ', no relay'));
   } else {
-    rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--client', VERSION + '=' + dist], 'rendezvous');
+    rv = start(RV_EXE, ['--listen', '127.0.0.1:0', '--stun', '127.0.0.1:0', '--ip-rate', IP_RATE, '--client', VERSION + '=' + dist], 'rendezvous');
     let RV_STUN;
     [, RV_HTTP, RV_STUN] = await line(rv, /RENDEZVOUS_READY http=(\S+) stun=(\S+)/, 'RENDEZVOUS_READY');
     console.log('rendezvous at ' + RV_HTTP + ', stun ' + RV_STUN);

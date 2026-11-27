@@ -10,6 +10,7 @@
 //! into the library: `<library>/<room>/<call>/takeNN/...` and
 //! `<library>/<room>/<call>/logs/...` (crate::rooms).
 
+pub mod appupdate;
 mod args;
 mod call;
 pub mod contact;
@@ -105,6 +106,9 @@ pub struct Config {
     /// The app that embeds the host moves the library when Settings asks
     /// (cast-hs4); `None`: the folder cannot be changed from the page.
     pub relocate: Option<library::Relocate>,
+    /// The embedding app's update, for the home (cast-b3k); `None`: the home
+    /// never offers one.
+    pub update: Option<appupdate::AppUpdate>,
 }
 
 impl Config {
@@ -138,6 +142,7 @@ impl Config {
             record_video: None,
             log: false,
             relocate: None,
+            update: None,
         }
     }
 }
@@ -1136,6 +1141,7 @@ pub fn start(
         contacts: contacts.clone(),
         contact_links: contact_links.clone(),
         relocate: args.relocate.clone(),
+        update: args.update.clone(),
     });
     threads.push(http::serve(
         https,

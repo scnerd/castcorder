@@ -247,6 +247,14 @@ fn setup(app: &AppHandle, args: &AppArgs) {
             Err(e) => tracing::warn!(error = %e, "recordings folder not moved"),
         });
     }
+    // The home offers a downloaded update (cast-b3k).
+    if updates::configured(app) {
+        let (a, b) = (app.clone(), app.clone());
+        shell.host.allow_updating(
+            move || updates::ready(&a),
+            move || updates::restart_into_update(&b),
+        );
+    }
     let url = match shell.host.start() {
         Ok(status) => {
             tracing::info!(room = %status.room, producer = %status.producer_url, "app host running");
@@ -565,6 +573,7 @@ fn quit(app: &AppHandle) {
     // Stopping waits for the take to finish; not on the event loop.
     std::thread::spawn(move || {
         app.state::<Shell>().host.stop();
+        updates::install_on_quit(&app);
         app.exit(0);
     });
 }

@@ -53,7 +53,13 @@ export async function rejoinChecks({ rendezvous } = {}) {
   const connected = (p, who) => waitFor(async () => (await state(p)) === 'connected', who + ' connected', 40000);
   const card = (p) => p.locator('#my-rooms li[data-room="rejoin-show"]');
   const chip = async (p) => (await card(p).locator('[data-status]').getAttribute('data-status')) || '';
-  const leave = async (p) => { await p.click('#leave'); await waitFor(async () => (await state(p)) === 'left', 'left', 15000); };
+  // The host machine's own page (P) goes home by itself 20 s after leaving
+  // (#160); these checks rejoin from the You left page, so P stays there.
+  const leave = async (p) => {
+    await p.click('#leave');
+    await waitFor(async () => (await state(p)) === 'left', 'left', 15000);
+    if (await p.locator('#left-stay').isVisible()) await p.click('#left-stay');
+  };
 
   // The producer at the host machine opens the room; two guests join by link.
   const P = await openGuest('RP', [], HTTP, undefined, 'Pat', '&room=rejoin-show');
