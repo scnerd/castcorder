@@ -51,6 +51,16 @@ struct SimTurn {
     expired_refusals: usize,
     /// (userhash, expiry unix seconds) of every minted user.
     expiries: Vec<(Vec<u8>, u64)>,
+    /// cast-9tr: a path that forgets a client flow left idle this long (a
+    /// home router's UDP mapping, an anycast edge's flow table): every later
+    /// datagram of that flow is dropped unanswered, as Cloudflare's Refresh
+    /// went unanswered after 29 idle minutes.
+    forget_idle: Option<Duration>,
+    /// (client address, last datagram time) per flow, and the flows forgotten.
+    last_seen: Vec<(SocketAddr, Duration)>,
+    forgotten: Vec<SocketAddr>,
+    /// Datagrams dropped because their flow was forgotten.
+    dropped_idle: usize,
 }
 
 impl SimTurn {
@@ -74,6 +84,10 @@ impl SimTurn {
             relayed_datagrams: 0,
             expired_refusals: 0,
             expiries: vec![],
+            forget_idle: None,
+            last_seen: vec![],
+            forgotten: vec![],
+            dropped_idle: 0,
         }
     }
 
@@ -138,6 +152,30 @@ impl SimTurn {
         let now = self.now();
         let listen = self.listen.local_addr();
         while let Ok(Some((p, from))) = self.listen.try_recv_from() {
+            if let Some(idle) = self.forget_idle {
+                let t = self.time.now();
+                match self.last_seen.iter_mut().find(|(a, _)| *a == from) {
+                    Some((_, last)) => {
+                        if t - *last > idle && !self.forgotten.contains(&from) {
+                            self.forgotten.push(from);
+                        }
+                        *last = t;
+                    }
+                    None => self.last_seen.push((from, t)),
+                }
+                if self.forgotten.contains(&from) {
+                    self.dropped_idle += 1;
+                    continue;
+                }
+            }
+            // Binding requests are answered, as coturn and Cloudflare's TURN
+            // answer them (RFC 8656 keeps STUN's Binding on a TURN server).
+            if let Some(txid) = castcorder_link::stun::parse_binding_request(&p) {
+                let _ = self
+                    .listen
+                    .send_to(&castcorder_link::stun::binding_success(txid, from), from);
+                continue;
+            }
             if self.expired(&p) {
                 self.expired_refusals += 1;
                 continue;
@@ -816,5 +854,30 @@ fn without_renewal_the_relay_is_lost_at_expiry() {
     assert!(
         heard * 100 < sent * 60,
         "the call is lost after the allocation lapses: heard {heard} of {sent}"
+    );
+}
+
+#[test]
+fn an_idle_allocation_keeps_its_flow_alive_and_is_refreshed() {
+    // cast-9tr: a host with an allocation and no call sends nothing on the
+    // flow but the Refresh, 29 minutes in. On a path that forgets a flow idle
+    // for 2 minutes, that Refresh went unanswered and the allocation closed
+    // (Cloudflare, every 30 minutes). The relay's keepalives keep the flow
+    // busy: 70 idle minutes cross two Refreshes and the allocation holds.
+    let mut w = World::new();
+    w.turn.forget_idle = Some(Duration::from_secs(120));
+    w.step = Duration::from_millis(50);
+    w.run_until(Duration::from_secs(5), |w| w.host.relayed().is_some());
+    let relayed = w.host.relayed();
+    w.run_for(Duration::from_secs(70 * 60));
+    let stats = w.host.relay_stats();
+    assert_eq!(w.turn.dropped_idle, 0, "no flow went idle: {stats:?}");
+    assert!(w.turn.refreshes >= 2, "refreshed: {}", w.turn.refreshes);
+    assert_eq!(stats.failures, 0, "{stats:?}");
+    assert_eq!(stats.allocations, 1, "{stats:?}");
+    assert_eq!(w.host.relayed(), relayed, "the same allocation throughout");
+    assert!(
+        stats.keepalives >= 70 * 60 / 15 - 2 && stats.keepalives_answered >= stats.keepalives - 1,
+        "keepalives sent and answered: {stats:?}"
     );
 }
