@@ -55,7 +55,25 @@ export async function personLinkChecks({ HTTP, rendezvous }) {
   check((await person(HTTP)).devices.some((d) => d.name === 'Lab browser'), 'the host machine lists the linked browser');
   check(!logs.L.some((l) => l.startsWith('[pageerror]')), 'the link page raised no page errors');
 
-  // A second host install, linking itself through the same mailbox.
+  // A link works once (docs/v1-manual-test.md, Linking): the same link opened again
+  // in another profile is refused, and nothing waits for approval on the host machine.
+  const again = await (await browser.newContext()).newPage();
+  await again.goto(link);
+  await again.waitForSelector('#link-this:not([disabled])');
+  await again.fill('#link-name', 'Second try');
+  await again.click('#link-this');
+  const refused = await waitFor(async () => { const t = await text(again, '#link-state'); return t.startsWith('Not linked') ? t : null; },
+    'the used link is refused', 30000, 500).catch(() => null);
+  check(refused !== null, 'a used link is refused the second time: ' + (refused || (await text(again, '#link-state'))));
+  check(!(await person(HTTP)).requests.some((r) => r.name === 'Second try'), 'the host machine lists no request from the used link');
+  await again.context().close();
+
+  // Removing a linked device takes it off the person's list (the app's "Remove for good?").
+  const added = (await person(HTTP)).devices.find((d) => d.name === 'Lab browser');
+  await person(HTTP, '/revoke', { device: added.id });
+  check(!(await person(HTTP)).devices.some((d) => d.name === 'Lab browser'), 'a revoked device is gone from the person\x27s devices');
+
+
   const LIB = join(RESULTS, 'library-person-2');
   rmSync(LIB, { recursive: true, force: true });
   ctx.host9 = spawn(exe, ['--dist', dist, '--library', LIB, '--room', 'person-2', '--bind', '127.0.0.1',
