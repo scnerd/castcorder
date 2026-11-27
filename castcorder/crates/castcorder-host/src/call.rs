@@ -2168,14 +2168,22 @@ impl Call {
                     .rooms
                     .persons
                     .person_of(cert.as_ref(), routing::proof_key(proof.as_ref()).as_ref());
-                let _ = reply.send(self.host_status(
-                    &device,
-                    proof.as_ref(),
-                    &nonce,
-                    &audience,
-                    owner,
-                    person,
-                ));
+                // The call folders are read off the call thread (cast-0af).
+                match self.host_status(&device, proof.as_ref(), &nonce, &audience, owner, person) {
+                    Err(e) => {
+                        let _ = reply.send(Err(e));
+                    }
+                    Ok(plan) => {
+                        let spawned = std::thread::Builder::new()
+                            .name("host-status".into())
+                            .spawn(move || {
+                                let _ = reply.send(Ok(plan.finish()));
+                            });
+                        if let Err(e) = spawned {
+                            warn!(error = %e, "status query not answered: no thread");
+                        }
+                    }
+                }
             }
             Command::Live { reply } => {
                 let _ = reply.send(self.live());
@@ -2185,7 +2193,17 @@ impl Call {
                 let _ = reply.send(self.regenerate_link(&room));
             }
             Command::Rooms { reply } => {
-                let _ = reply.send(self.rooms_view());
+                // The call folders are read off the call thread (cast-0af).
+                let plan = self.rooms_view();
+                let spawned =
+                    std::thread::Builder::new()
+                        .name("host-rooms".into())
+                        .spawn(move || {
+                            let _ = reply.send(plan.finish());
+                        });
+                if let Err(e) = spawned {
+                    warn!(error = %e, "rooms not listed: no thread");
+                }
             }
             Command::CreateRoom { name, reply } => {
                 let _ = reply.send(self.rooms.create_room(&name));
