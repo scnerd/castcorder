@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something Castcorder should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Please do not include passwords, call links or anything private.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation or problem, before any solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like Castcorder to do?
+      description: Your idea, and any alternative you considered.
+    validations:
+      required: false
+  - type: dropdown
+    id: role
+    attributes:
+      label: Who is it for?
+      options:
+        - Hosts and producers
+        - Guests
+        - Both
+        - Not sure
+    validations:
+      required: false
