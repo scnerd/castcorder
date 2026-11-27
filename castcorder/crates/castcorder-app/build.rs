@@ -22,6 +22,7 @@ fn main() {
             "contact_code",
             "contact_add",
             "joined_rooms_save",
+            "show_home",
         ]),
     ))
     .expect("tauri build step");

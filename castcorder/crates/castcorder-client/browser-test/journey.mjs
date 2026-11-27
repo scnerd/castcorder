@@ -5,15 +5,15 @@
 // runs as root; CI uses sudo). Their browsers run inside their computers'
 // namespaces, so each home is that computer's own localhost page.
 //
-//  1. Dana (D) makes a contact link on her home; Eli (E) pastes it on his.
+//  1. Dana (D) makes a contact link on Dana's home; Eli (E) pastes it on Eli's.
 //     Each lists the other, online.
-//  2. Dana adds Eli to her room "Show" as a producer. Eli sees "Show" on his
-//     home, shared with him by Dana, and asks Dana's install for the rooms
+//  2. Dana adds Eli to Dana's room "Show" as a producer. Eli sees "Show" on Eli's
+//     home, shared by Dana, and asks Dana's install for the rooms
 //     they share over a contact link (it crosses both routers).
-//  3. Dana invites Eli to the call; the invite shows on his home. Both join:
-//     Dana from her room card, Eli from the invite.
+//  3. Dana invites Eli to the call; the invite shows on Eli's home. Both join:
+//     Dana from the room card, Eli from the invite.
 //  4. Dana records a take, stops it; Eli's track reaches Dana's install.
-//  5. Both leave and get back to their homes.
+//  5. Both leave and press "Back to your rooms" to get home.
 //
 // Needs: target/release/castcorder-host and castcorder-rendezvous, the
 // client's trunk build in ../dist. Everything printed is ASCII.
@@ -144,7 +144,7 @@ try {
   const shared = await waitFor(async () => {
     const t = await text(E, '#contact-detail .contact-shared');
     return /Show|No rooms|not|fail|time/i.test(t) && !/asking/i.test(t) ? t : null;
-  }, 'Eli hears which rooms he shares with Dana', 40000, 500).catch(() => null);
+  }, 'Eli hears which rooms Eli shares with Dana', 40000, 500).catch(() => null);
   check(shared && shared.includes('Show'), 'Eli asked Dana\'s install over a contact link and hears they share Show: ' + shared);
 
   // Eli's home lists Show under "Shared with you", with Join: no need to
@@ -157,8 +157,8 @@ try {
   const sharedHref = (await sharedCard.count()) ? await sharedCard.locator('.join-shared').getAttribute('href') : '';
   check(sharedHref.startsWith('castcorder://'), 'its Join opens the room in the app: ' + sharedHref.replace(/#.*/, '#...'));
 
-  // 3. Dana invites Eli to the call from her room card; the invite reaches
-  // his home over a contact link.
+  // 3. Dana invites Eli to the call from the room card; the invite reaches
+  // Eli's home over a contact link.
   await D.click('#nav-rooms');
   const card = D.locator('#rooms li[data-room="Show"]');
   await card.locator('.room-menu summary').click();
@@ -168,13 +168,13 @@ try {
   await E.click('#nav-rooms');
   const invite = E.locator('#invites li.invite');
   await waitFor(async () => (await invite.count()) === 1, 'Eli\'s home shows the invite', 15000, 500);
-  check((await invite.textContent()).includes('Dana invites you to Show'), 'Eli\'s home says Dana invites him to Show');
+  check((await invite.textContent()).includes('Dana invites you to Show'), 'Eli\'s home says Dana invites Eli to Show');
   // In the app Join opens castcorder://, which the app maps back to the link.
   const href = await invite.locator('.join-invite').getAttribute('href');
   const callLink = href.replace(/^castcorder:\/\//, 'http://');
   check(callLink.startsWith(RV + '/v/'), 'the invite carries Dana\'s call link: ' + callLink.replace(/#.*/, '#...'));
 
-  // Both join: Dana from her room card, Eli from the invite.
+  // Both join: Dana from the room card, Eli from the invite.
   const DC = await page(dctx, 'DC');
   await DC.goto(HD + '/?room=Show&name=Dana');
   const EC = await page(ectx, 'EC');
@@ -214,9 +214,17 @@ try {
     await waitFor(async () => (await state(p)) === 'left', who + ' left', 15000);
   }
   check(true, 'both left the call');
-  await DC.goto(HD + '/');
-  await waitFor(async () => (await DC.locator('#rooms li[data-room="Show"]').count()) === 1, 'Dana back home with Show', 15000);
+  // The way back is on the screen (#160): "Back to your rooms" on the host
+  // machine's own page, which also goes there by itself after 20 s. Eli's
+  // browser here stands in for the app's call window, whose button calls the
+  // app (show_home) to bring its home window forward; a plain browser has no
+  // home to go back to, so Eli opens Eli's install's home page as the app would.
+  const shown = await waitFor(async () => (await DC.locator('#left-home').count()) === 1, 'Dana sees Back to your rooms', 10000).then(() => true, () => false);
+  check(shown, 'Dana sees "Back to your rooms" after leaving');
+  if (shown) await DC.click('#left-home');
+  await waitFor(async () => (await DC.locator('#nav-rooms').count()) === 1, 'Dana on the home', 15000);
   await EC.goto(HE + '/');
+  await waitFor(async () => (await DC.locator('#rooms li[data-room="Show"]').count()) === 1, 'Dana back home with Show', 15000);
   await EC.click('#nav-contacts');
   await waitFor(async () => (await text(EC, '#contact-list')).includes('Dana'), 'Eli back home with Dana', 15000);
   check(true, 'both are back on their homes');
