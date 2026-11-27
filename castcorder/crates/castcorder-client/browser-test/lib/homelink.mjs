@@ -133,4 +133,25 @@ export async function homeLinkChecks() {
   await P.click('#create-room');
   await waitFor(async () => (await text(P, '#rooms')).includes('after-the-link'),
     'the home still takes clicks after "Rooms you joined"', 10000);
+
+  // cast-66n: rename a room, then archive it and bring it back.
+  const junk = P.locator('#rooms li[data-room="after-the-link"]');
+  const linkBefore = await junk.locator('.room-link').textContent();
+  await junk.locator('.room-menu summary').click();
+  await junk.locator('.rename-room').click();
+  await junk.locator('.rename-input').fill('Old test room');
+  await junk.locator('.save-rename').click();
+  await waitFor(async () => (await junk.locator('h2').textContent()) === 'Old test room', 'Rename shows the new name', 10000);
+  check((await junk.locator('.room-link').textContent()) === linkBefore, 'a renamed room keeps its call link');
+  await junk.locator('.room-menu summary').click();
+  await junk.locator('.archive-room').click();
+  await waitFor(async () => !(await junk.isVisible()), 'an archived room leaves the Rooms list', 10000);
+  check((await P.locator('#toggle-archived-rooms').textContent()).includes('Show archived rooms (1)'), 'the list offers its archived room');
+  await P.click('#toggle-archived-rooms');
+  await waitFor(async () => await junk.isVisible(), 'Show archived rooms lists it again', 5000);
+  check((await junk.locator('.room-title').textContent()).includes('Archived'), 'an archived room says so');
+  await junk.locator('.room-menu summary').click();
+  await junk.locator('.archive-room').click();
+  await waitFor(async () => (await P.locator('#toggle-archived-rooms').count()) === 0 && await junk.isVisible(),
+    'Unarchive puts the room back', 10000);
 }

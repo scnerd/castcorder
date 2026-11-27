@@ -31,6 +31,12 @@ struct HomeCall {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct HomeRoom {
     name: String,
+    /// The name it shows (cast-66n); older hosts: none, so `name`.
+    #[serde(default)]
+    title: String,
+    /// Hidden until "Show archived rooms" (cast-66n).
+    #[serde(default)]
+    archived: bool,
     link: Option<String>,
     open: bool,
     locked: bool,
@@ -257,6 +263,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
         invite: RwSignal::new(Default::default()),
         replace: RwSignal::new(Default::default()),
         archived: RwSignal::new(Default::default()),
+        rename: RwSignal::new(Default::default()),
+        archived_rooms: RwSignal::new(false),
     };
     let refresh = move || {
         spawn_local(async move {
@@ -485,6 +493,14 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 {room_card(r, data, contacts, invites, open, copied, copy, act)}
                             </For>
                         </ul>
+                        {move || {
+                            let hidden = data.with(|d| d.rooms.iter().filter(|r| r.archived).count());
+                            (hidden != 0).then(|| view! {
+                                <button id="toggle-archived-rooms" class="btn tiny outline" on:click=move |_| open.archived_rooms.update(|v| *v = !*v)>
+                                    {move || if open.archived_rooms.get() { format!("Hide archived rooms ({hidden})") } else { format!("Show archived rooms ({hidden})") }}
+                                </button>
+                            })
+                        }}
                         <div class="home-head joined">
                             <h2>"Rooms you joined"</h2>
                             // The rooms this app joined on other hosts live in its
@@ -563,6 +579,10 @@ struct Opened {
     replace: RwSignal<std::collections::BTreeSet<String>>,
     /// Rooms showing their archived calls too (cast-bc4).
     archived: RwSignal<std::collections::BTreeSet<String>>,
+    /// Rooms being renamed (cast-66n).
+    rename: RwSignal<std::collections::BTreeSet<String>>,
+    /// The Rooms list shows archived rooms too (cast-66n).
+    archived_rooms: RwSignal<bool>,
 }
 
 /// Show or hide `room` in `set`.
@@ -591,6 +611,12 @@ fn room_card(
     act: impl Fn(&'static str, serde_json::Value, &'static str) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let name = r.name.clone();
+    let title = if r.title.is_empty() {
+        name.clone()
+    } else {
+        r.title.clone()
+    };
+    let room_archived = r.archived;
     let link = room_link(&r, &data.get_untracked().lan);
     let (n1, n2, n3, n4, l1) = (
         name.clone(),
@@ -624,6 +650,9 @@ fn room_card(
     let (r1, r2, r3) = (name.clone(), name.clone(), name.clone());
     let replacing = move || open.replace.with(|s| s.contains(&r1));
     let people = move || open.people.with(|s| s.contains(&p1));
+    let (e1, e2, e3, e4) = (name.clone(), name.clone(), name.clone(), name.clone());
+    let renaming = move || open.rename.with(|s| s.contains(&e1));
+    let new_title = RwSignal::new(title.clone());
     let menu = NodeRef::<leptos::html::Details>::new();
     let close_menu = move || {
         if let Some(d) = menu.get_untracked() {
@@ -631,11 +660,13 @@ fn room_card(
         }
     };
     view! {
-        <li class="room-card" data-room=name.clone() class:live=live>
+        <li class="room-card" data-room=name.clone() class:live=live class:archived=room_archived
+            hidden=move || room_archived && !open.archived_rooms.get()>
             <div class="room-head">
                 <div class="room-title">
-                    <h2>{name.clone()}</h2>
+                    <h2>{title.clone()}</h2>
                     <Show when=move || live><span class="chip ok">"Live"</span></Show>
+                    <Show when=move || room_archived><span class="chip">"Archived"</span></Show>
                 </div>
                 <span class="small muted room-line">{line}</span>
                 {crate::waiting::line(&r.waiting).map(|w| view! {
@@ -656,6 +687,14 @@ fn room_card(
                             <button class="menu-item open-room-folder" on:click=move |_| { close_menu(); act("/folder/open", serde_json::json!({ "room": n3.clone() }), "Folder opened."); }>"Open recordings folder"</button>
                             <button class="menu-item regen-room-link" title="The old link stops working; people in the call stay"
                                 on:click=move |_| { close_menu(); flip(open.replace, &r2, true); }>"Replace link..."</button>
+                            <button class="menu-item rename-room" on:click=move |_| { close_menu(); flip(open.rename, &e2, true); }>"Rename..."</button>
+                            <button class="menu-item archive-room"
+                                title=if room_archived { "Show this room in the list again" } else { "Hide this room from the list; its link and recordings stay" }
+                                on:click=move |_| {
+                                    close_menu();
+                                    act("/rooms/archive", serde_json::json!({ "room": e3.clone(), "archived": !room_archived }),
+                                        if room_archived { "Room back in the list." } else { "Room archived: \"Show archived rooms\" brings it back." });
+                                }>{if room_archived { "Unarchive room" } else { "Archive room" }}</button>
                         </div>
                     </details>
                 </span>
@@ -665,6 +704,20 @@ fn room_card(
                 Some(c) => format!("Joining continues the call of {c}"),
                 None => "Joining starts a new call".to_string(),
             }}</span>
+            <form class="room-people room-rename" hidden=move || !renaming()
+                on:submit=move |ev: web_sys::SubmitEvent| {
+                    ev.prevent_default();
+                    flip(open.rename, &e4, false);
+                    act("/rooms/rename", serde_json::json!({ "room": e4.clone(), "title": new_title.get_untracked() }), "Room renamed.");
+                }>
+                <label class="small muted" for=format!("rename-{name}")>"Room name (its link and folder stay the same)"</label>
+                <input class="rename-input" id=format!("rename-{name}") maxlength="80" prop:value=move || new_title.get()
+                    on:input=move |ev| new_title.set(event_target_value(&ev))/>
+                <span class="room-actions">
+                    <button type="button" class="btn cancel-rename" on:click={let n = name.clone(); move |_| flip(open.rename, &n, false)}>"Cancel"</button>
+                    <button type="submit" class="btn primary save-rename">"Save"</button>
+                </span>
+            </form>
             <div class="room-people room-replace" role="alertdialog" hidden=move || !replacing()>
                 <span class="small">"Replace this room's call link? The old link stops working for everyone, including copies pasted into invites or calendars. People already in the call stay."</span>
                 <span class="room-actions">

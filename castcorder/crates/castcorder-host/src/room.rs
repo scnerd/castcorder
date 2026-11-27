@@ -148,7 +148,18 @@ struct Saved {
     /// devices joins as a producer.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     producer_persons: BTreeSet<String>,
+    /// The name the host machine gave the room; `None`: its folder name
+    /// (cast-66n). The folder never changes, so links and records keep
+    /// working.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    /// Hidden from the home's Rooms list until shown (cast-66n).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    archived: bool,
 }
+
+/// The longest room name, in characters.
+pub const MAX_TITLE: usize = 80;
 
 #[derive(Clone, Debug)]
 struct Conn {
@@ -428,6 +439,44 @@ impl Room {
     /// Whether the recording profile records video.
     pub fn record_video(&self) -> bool {
         self.saved.record_video
+    }
+
+    /// The name the host machine gave the room, if any (cast-66n).
+    pub fn title(&self) -> Option<&str> {
+        self.saved.title.as_deref()
+    }
+
+    /// Name the room; blank goes back to its folder name. Whether it changed.
+    pub fn set_title(&mut self, title: &str) -> Result<bool, String> {
+        let t = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t.chars().count() > MAX_TITLE {
+            return Err(format!("a room name has at most {MAX_TITLE} characters"));
+        }
+        if t.chars().any(char::is_control) {
+            return Err("a room name cannot hold control characters".into());
+        }
+        let t = (!t.is_empty()).then_some(t);
+        if self.saved.title == t {
+            return Ok(false);
+        }
+        self.saved.title = t;
+        self.dirty = true;
+        Ok(true)
+    }
+
+    /// Hidden from the home's Rooms list (cast-66n).
+    pub fn archived(&self) -> bool {
+        self.saved.archived
+    }
+
+    /// Hide the room from the Rooms list, or bring it back. Whether it changed.
+    pub fn set_archived(&mut self, archived: bool) -> bool {
+        if self.saved.archived == archived {
+            return false;
+        }
+        self.saved.archived = archived;
+        self.dirty = true;
+        true
     }
 
     /// Trust (or stop trusting) the person `id` in this room: each of their
