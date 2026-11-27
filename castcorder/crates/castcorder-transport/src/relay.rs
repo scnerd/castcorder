@@ -211,11 +211,14 @@ impl Relay {
         // An allocation's username cannot change (RFC 8656), so new
         // credentials mean a new allocation. The host makes it on its second
         // relay before dropping the first; here the old one is deleted.
-        if let Some(c) = self.client.as_mut()
-            && c.delete(instant(now)).is_ok()
-        {
-            while let Some(t) = c.poll_transmit(instant(now)) {
-                let _ = socket.send_to(t.data.as_ref(), t.to);
+        if let Some(c) = self.client.as_mut() {
+            match c.delete(instant(now)) {
+                Ok(()) => {
+                    while let Some(t) = c.poll_transmit(instant(now)) {
+                        let _ = socket.send_to(t.data.as_ref(), t.to);
+                    }
+                }
+                Err(e) => info!(error = ?e, "turn allocation not deleted"),
             }
         }
         info!(server = ?server.as_ref().map(|s| s.addr.to_string()), "turn server set");
