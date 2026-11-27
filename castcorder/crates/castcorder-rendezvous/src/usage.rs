@@ -15,7 +15,12 @@
 //! down because coturn restarted). Usage is the sum of the last
 //! [`WINDOW_DAYS`] days. The ledger is one small JSON file in the data dir,
 //! written atomically, so a restarted rendezvous neither forgets nor
-//! re-counts.
+//! re-counts. Without that file (a first start, no data dir, or the file was
+//! lost) the ledger is [`Ledger::fresh`]: its first scrape only notes the
+//! counters, since what coturn counted before cannot be told apart from what
+//! a lost ledger already counted, and counting it again would put it all on
+//! today and could refuse a host key that is within its budget (cast-gln).
+//! Usage then under-counts what was relayed before, never over-counts it.
 //!
 //! Pure functions of their inputs and `now`; the scraping loop is in
 //! [`crate::server`].
@@ -94,6 +99,10 @@ pub struct Ledger {
     hosts: BTreeMap<String, BTreeMap<u64, u64>>,
     /// coturn username to the counter value at the last scrape.
     seen: BTreeMap<String, u64>,
+    /// Made without a ledger on disk and not scraped yet: the first scrape
+    /// only notes the counters ([`Ledger::fresh`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    fresh: bool,
 }
 
 /// One host key's usage, as reported to the operator.
@@ -120,6 +129,16 @@ pub struct UsageReport {
 }
 
 impl Ledger {
+    /// A ledger made without one on disk: its first [`Ledger::observe`]
+    /// takes coturn's counters as they are and adds nothing (see the module
+    /// docs).
+    pub fn fresh() -> Ledger {
+        Ledger {
+            fresh: true,
+            ..Ledger::default()
+        }
+    }
+
     /// The operator's view at `now_unix`.
     pub fn usage_report(&self, budget: Option<u64>, now_unix: u64) -> UsageReport {
         UsageReport {
@@ -132,6 +151,14 @@ impl Ledger {
     /// Account one scrape (`parse_metrics`) at `now_unix`. Returns the bytes
     /// added.
     pub fn observe(&mut self, counters: &BTreeMap<String, u64>, now_unix: u64) -> u64 {
+        if std::mem::take(&mut self.fresh) {
+            self.seen = counters
+                .iter()
+                .filter(|(u, _)| host_of_username(u).is_some())
+                .map(|(u, &v)| (u.clone(), v))
+                .collect();
+            return 0;
+        }
         let mut added = 0;
         for (user, &v) in counters {
             let Some(host) = host_of_username(user) else {
@@ -219,11 +246,11 @@ impl Ledger {
         serde_json::to_string(self).expect("a ledger serializes")
     }
 
-    /// Read the ledger at `path`; empty if there is none yet.
+    /// Read the ledger at `path`; [`Ledger::fresh`] if there is none.
     pub fn load(path: &Path) -> io::Result<Ledger> {
         match std::fs::read(path) {
             Ok(b) => serde_json::from_slice(&b).map_err(io::Error::other),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Ledger::default()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Ledger::fresh()),
             Err(e) => Err(e),
         }
     }
@@ -327,6 +354,34 @@ mod tests {
     }
 
     #[test]
+    fn a_ledger_made_afresh_does_not_count_coturns_counters_again() {
+        // The ledger was lost (or this is a first start) while coturn kept
+        // its counters: they were counted before, so the first scrape only
+        // notes them; growth after it counts as usual.
+        let a = id(1);
+        let dir = std::env::temp_dir().join(format!("cc-ledger-lost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(LEDGER_FILE);
+        let mut l = Ledger::load(&path).unwrap();
+        let mut c = BTreeMap::new();
+        c.insert(user(T0, &a), 5_000_000);
+        assert_eq!(l.observe(&c, T0), 0);
+        assert_eq!(l.used(&a, T0), 0);
+        c.insert(user(T0, &a), 5_000_100);
+        c.insert(user(T0 + 300, &a), 40);
+        assert_eq!(l.observe(&c, T0 + 30), 140);
+        assert_eq!(l.used(&a, T0 + 30), 140);
+        // Saved and loaded again it is no longer fresh: nothing is skipped.
+        save(&path, &l.to_json()).unwrap();
+        let mut again = Ledger::load(&path).unwrap();
+        c.insert(user(T0 + 300, &a), 60);
+        assert_eq!(again.observe(&c, T0 + 60), 20);
+        assert_eq!(again.used(&a, T0 + 60), 160);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn usage_rolls_off_after_the_window() {
         let a = id(1);
         let mut l = Ledger::default();
@@ -375,7 +430,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(LEDGER_FILE);
         let _ = std::fs::remove_file(&path);
-        assert_eq!(Ledger::load(&path).unwrap(), Ledger::default());
+        assert_eq!(Ledger::load(&path).unwrap(), Ledger::fresh());
         let a = id(3);
         let mut l = Ledger::default();
         let mut c = BTreeMap::new();

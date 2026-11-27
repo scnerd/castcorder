@@ -147,7 +147,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
             let ledger = match &path {
                 Some(p) => Ledger::load(p)
                     .map_err(|e| io::Error::other(format!("{}: {e}", p.display())))?,
-                None => Ledger::default(),
+                None => Ledger::fresh(),
             };
             let meter = Arc::new(Meter {
                 ledger: Mutex::new(ledger),
