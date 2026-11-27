@@ -22,11 +22,26 @@ use castcorder_port_net::UdpDatagramSocket;
 use support::TestGuest;
 
 fn request(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+    request_with(addr, method, path, body, "")
+}
+
+/// A request from the host machine's own page (its home and Settings).
+fn home(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+    request_with(addr, method, path, body, "X-Castcorder-Native: 1\r\n")
+}
+
+fn request_with(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: &str,
+    extra: &str,
+) -> (u16, String) {
     let mut s = TcpStream::connect(addr).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
     write!(
         s,
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
     .unwrap();
@@ -250,5 +265,108 @@ fn the_call_window_bridge_makes_and_uses_contact_codes() {
     b.add_contact(&code).unwrap();
     a.stop();
     b.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Settings moves the recordings folder (cast-hs4): refused during a call and
+/// for a folder that has files; otherwise the host stops, the whole library
+/// (rooms and the person beside them) moves, and the host starts again on
+/// it as the same person with the same rooms.
+#[test]
+fn settings_moves_the_whole_library_and_the_host_comes_back_on_it() {
+    let root = scratch("move-library");
+    let control = std::sync::Arc::new(HostControl::new(config(&root)));
+    let (tx, rx) = std::sync::mpsc::channel();
+    control.allow_moving(move |library, result| {
+        let _ = tx.send((library.to_path_buf(), result));
+    });
+    let status = control.start().unwrap();
+    let person = {
+        let (_, p) = home(status.http_addr, "GET", "/person", "");
+        serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let (code, _) = home(status.http_addr, "POST", "/rooms", r#"{"name":"keep-me"}"#);
+    assert_eq!(code, 200);
+    let to = std::path::absolute(root.join("elsewhere")).unwrap();
+    let ask = |addr, to: &std::path::Path| {
+        home(
+            addr,
+            "POST",
+            "/settings/library",
+            &serde_json::json!({ "path": to }).to_string(),
+        )
+    };
+
+    // A folder with files in it is refused.
+    std::fs::create_dir_all(root.join("full")).unwrap();
+    std::fs::write(root.join("full/x"), b"x").unwrap();
+    let (code, why) = ask(
+        status.http_addr,
+        &std::path::absolute(root.join("full")).unwrap(),
+    );
+    assert_eq!(code, 409, "{why}");
+
+    // So is a move while a guest is in the call.
+    let (_, role) = request(status.http_addr, "GET", "/role", "");
+    let host_id = serde_json::from_str::<serde_json::Value>(&role).unwrap()["host"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (mut guest, offer) = TestGuest::new(
+        UdpDatagramSocket::bind_loopback().unwrap(),
+        SystemClock::new(),
+    );
+    let proof = identity::sign_offer(&[7; 32], &host_id, None, now_ms(), &offer);
+    let body = serde_json::json!({
+        "type": "offer",
+        "sdp": offer,
+        "proof": serde_json::from_str::<serde_json::Value>(
+            &castcorder_link::wire::to_json(&proof)
+        ).unwrap(),
+    })
+    .to_string();
+    let (code, answer) = request(status.http_addr, "POST", "/offer?name=guest", &body);
+    assert_eq!(code, 200, "{answer}");
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    guest.accept_answer(answer["sdp"].as_str().unwrap());
+    let end = Instant::now() + Duration::from_secs(15);
+    while !(guest.connected && guest.channels_open()) {
+        assert!(Instant::now() < end, "the guest did not connect");
+        guest.step();
+        sleep(Duration::from_millis(1));
+    }
+    let (code, why) = ask(status.http_addr, &to);
+    assert_eq!(code, 409);
+    assert!(why.contains("call"), "{why}");
+    drop(guest);
+    let end = Instant::now() + Duration::from_secs(30);
+    while control.live_status().unwrap().guests > 0 {
+        assert!(Instant::now() < end, "the guest did not leave");
+        sleep(Duration::from_millis(50));
+    }
+
+    // Now it moves.
+    let (code, why) = ask(status.http_addr, &to);
+    assert_eq!(code, 200, "{why}");
+    let (library, result) = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(library, to);
+    assert!(!root.join("library").exists(), "renamed on one volume");
+    let moved = control.status().expect("the host started again");
+    let (_, settings) = home(moved.http_addr, "GET", "/settings", "");
+    let settings: serde_json::Value = serde_json::from_str(&settings).unwrap();
+    assert_eq!(settings["library"].as_str(), Some(to.to_str().unwrap()));
+    let (_, p) = home(moved.http_addr, "GET", "/person", "");
+    let again = serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(again, person, "the same person");
+    let (_, rooms) = home(moved.http_addr, "GET", "/rooms", "");
+    assert!(rooms.contains("keep-me"), "the same rooms: {rooms}");
+    control.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
