@@ -275,13 +275,14 @@ try {
   // minted moments later, so their renewal is near: the guest renews them in
   // its answer to the host's restart instead of asking for a second restart
   // seconds later (which, on a lossy network, could leave it with no path).
-  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart')));
+  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart') || l.includes('renewed while the host restarted ICE')));
   const second = (host.err.slice(at).match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
   // Over TCP the host's restart can come a moment after a guest's own renewal
   // (its reconnect to the rendezvous is slower), and the order is a matter of
   // timing (cast-ej4 tracks the TCP drops); over UDP it reliably comes first.
   check((early.length === 2 && second === 0) || TURN_TRANSPORT === 'tcp', 'each guest renewed its own relay credentials within the host\'s ICE restart, and none asked for a second restart'
-    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')');
+    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')'
+    + (early.length === 2 && second === 0 ? '' : ' | ' + ['A', 'B'].map((n) => n + ': ' + logs[n].filter((l) => /relay credentials|ICE restart|renew/i.test(l)).slice(-5).join(' / ').slice(0, 700)).join(' | ')));
   const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
   const same = [];
   for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);
