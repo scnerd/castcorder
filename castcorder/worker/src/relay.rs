@@ -21,7 +21,10 @@
 //!     which exercises this relay path against a real coturn.
 //!   - empty or `none`: no relay; hellos carry STUN only.
 //! - `TURN_TTL`: how long minted credentials last, in seconds (default
-//!   [`DEFAULT_TTL`]). The host renews at 80% of it.
+//!   [`DEFAULT_TTL`]); coturn ones up to half as long again, since their
+//!   expiry is rounded so a host key's credentials share usernames
+//!   ([`castcorder_mailbox::turn::coturn_expiry`]). The host renews at 80% of
+//!   what is left.
 //! - `RELAY_DAILY_CAP`: how many credentials one host key may mint per UTC
 //!   day (default [`DEFAULT_DAILY_CAP`]); counted in the host key's Durable
 //!   Object storage ([`crate::mailbox`]), so hibernation does not reset it.

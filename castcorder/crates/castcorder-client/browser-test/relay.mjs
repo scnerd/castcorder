@@ -24,6 +24,8 @@
 // (--prometheus-username-labels, published on a Docker-picked TCP port) and,
 // once the guests leave and their sessions end, its admin /usage (and the
 // `usage` subcommand on its data dir) shows bytes relayed for the host key.
+// Every username coturn reports for the host key expires on a step of half
+// the TTL, so a host key's credentials share usernames (cast-gln).
 // Restarted on the same port and data dir with --relay-budget 1, it refuses
 // relay credentials with relay_quota: the reconnecting host logs it, and a
 // guest's hello for that host carries it with no turn: server, and a guest
@@ -399,6 +401,17 @@ try {
   const cli = JSON.parse(execFileSync(RV_EXE, ['usage', '--data-dir', RV_DATA, '--json'], { encoding: 'utf8' }));
   const stored = cli.hosts.find((h) => h.host === HOST_ID);
   check(!!stored && stored.bytes > 0, 'the usage subcommand reads it from the data dir: ' + (stored ? stored.bytes : 'none'));
+  // A host key's credentials share usernames (cast-gln): the rendezvous
+  // rounds each expiry up to a step of half the TTL, so coturn, which counts
+  // user-quota and its exporter series per username, sees a few usernames per
+  // host key rather than one per credential minted.
+  const users = [...new Set(((await fetch(METRICS_URL).then((r) => r.text()).catch(() => '')).match(/user="[^"]+"/g) || [])
+    .map((u) => u.slice(6, -1)).filter((u) => u.endsWith(':' + HOST_ID)))];
+  const STEP = Math.max(1, Math.floor(TTL / 2));
+  const credentials = (rv.err.match(/relay credentials (minted|reused)/g) || []).length;
+  check(users.length > 0 && users.every((u) => Number(u.split(':')[0]) % STEP === 0),
+    'every coturn username of the host key expires on a ' + STEP + ' s step: ' + users.map((u) => u.split(':')[0]).join(' '));
+  console.log('info the host key relayed under ' + users.length + ' coturn usernames for ' + credentials + ' guest credentials handed out, plus the host\'s own');
   // Restart with a tiny budget on the same port and data dir.
   rv.p.kill();
   await waitFor(() => rv.exited !== undefined || rv.p.signalCode, 'rendezvous stopped', 10000);

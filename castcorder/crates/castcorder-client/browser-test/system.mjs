@@ -232,7 +232,12 @@ async function relayPhase() {
   const participant = await text(D, '#participant');
   const planned = await waitFor(() => logs.D.find((l) => l.includes('relay credentials will be renewed')), 'D plans a renewal', 10000);
   const exp0 = Number((planned.match(/expires = (\d+)/) || [])[1]);
-  check(exp0 > 0 && exp0 - Date.now() / 1000 <= RELAY_TTL + 5, 'D got relay credentials from the Worker lasting about ' + RELAY_TTL + ' s (expires ' + exp0 + ')');
+  // coturn credentials last one to one and a half TTLs: the expiry is rounded
+  // up to a step of half the TTL, so a host key's credentials share a coturn
+  // username (cast-gln).
+  const left0 = exp0 - Date.now() / 1000;
+  check(exp0 > 0 && left0 <= RELAY_TTL * 1.5 + 5 && exp0 % Math.max(1, Math.floor(RELAY_TTL / 2)) === 0,
+    'D got relay credentials from the Worker lasting ' + RELAY_TTL + ' to ' + RELAY_TTL * 1.5 + ' s, on the step (expires ' + exp0 + ', ' + Math.round(left0) + ' s left)');
   const before = counted();
   // D renews on its own schedule and asks for an ICE restart, or, when the
   // host's own renewal restart comes near (or during) D's renewal, renews

@@ -8,6 +8,15 @@
 //! HMAC-SHA1 of the username under a secret shared with the TURN server
 //! (coturn `static-auth-secret`). The TURN server checks the HMAC and the
 //! expiry itself; nothing is stored.
+//!
+//! The expiry is rounded up to a step of half the TTL ([`coturn_expiry`]), so
+//! every credential minted for one host key within a step has the same
+//! username, and at most three of a host key's usernames are live at once.
+//! coturn counts `user-quota` (concurrent allocations) and its per-username
+//! exporter series by username, so that makes `user-quota` a per-host-key cap
+//! of three times its value, and bounds the exporter's series to one per host
+//! key per step (cast-gln). A credential lasts between the TTL and one and a
+//! half times it.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -25,8 +34,17 @@ pub fn password(secret: &str, username: &str) -> String {
     STANDARD.encode(mac.finalize().into_bytes())
 }
 
+/// When a coturn credential minted at `now_unix` with `ttl_secs` expires:
+/// `now_unix + ttl_secs` rounded up to a multiple of half the TTL (at least
+/// a second), so the credentials of one host key minted within that step
+/// share one username (see the module docs).
+pub fn coturn_expiry(now_unix: u64, ttl_secs: u64) -> u64 {
+    let step = (ttl_secs / 2).max(1);
+    (now_unix + ttl_secs).div_ceil(step) * step
+}
+
 /// An ICE server entry with coturn REST credentials for `host` on `urls`,
-/// valid until `now_unix + ttl_secs`.
+/// valid until [`coturn_expiry`].
 pub fn coturn_rest(
     urls: &[String],
     secret: &str,
@@ -34,7 +52,7 @@ pub fn coturn_rest(
     now_unix: u64,
     ttl_secs: u64,
 ) -> IceServer {
-    let expires = now_unix + ttl_secs;
+    let expires = coturn_expiry(now_unix, ttl_secs);
     let username = format!("{expires}:{}", host.encode());
     IceServer {
         urls: urls.to_vec(),
@@ -121,10 +139,40 @@ mod tests {
         let urls = vec!["turn:t.example:3478?transport=udp".to_string()];
         let s = coturn_rest(&urls, "s", &id, 1_000, 600);
         let user = s.username.clone().unwrap();
-        assert_eq!(user, format!("1600:{}", id.encode()));
+        // 1600 rounded up to a multiple of 300.
+        assert_eq!(user, format!("1800:{}", id.encode()));
         assert_eq!(s.credential.unwrap(), password("s", &user));
         assert_eq!(s.urls, urls);
-        assert_eq!(s.expires, Some(1600));
+        assert_eq!(s.expires, Some(1800));
+    }
+
+    #[test]
+    fn a_host_keys_credentials_share_a_few_usernames() {
+        // coturn's user-quota counts allocations per username: a host key's
+        // credentials share usernames, so it caps the host key.
+        let id = HostKey::from_secret([4; 32]).id();
+        let other = HostKey::from_secret([5; 32]).id();
+        let urls = vec!["turn:t.example:3478?transport=udp".to_string()];
+        let user = |h: &HostId, now| coturn_rest(&urls, "s", h, now, 600).username.unwrap();
+        // Minted for the host and two guests over a few minutes: one username.
+        assert_eq!(user(&id, 1_201), user(&id, 1_350));
+        assert_eq!(user(&id, 1_201), user(&id, 1_500));
+        assert_ne!(user(&id, 1_201), user(&other, 1_201));
+        for ttl in [1, 2, 7, 30, 60, 600, 86_400] {
+            let mut live: Vec<u64> = Vec::new();
+            for now in 1_000_000..1_000_000 + 3 * ttl {
+                let e = coturn_expiry(now, ttl);
+                assert!(
+                    e >= now + ttl && e <= now + ttl + (ttl / 2).max(1),
+                    "ttl {ttl}, now {now}: {e}"
+                );
+                live.retain(|&x| x > now);
+                if !live.contains(&e) {
+                    live.push(e);
+                }
+                assert!(live.len() <= 3, "ttl {ttl}, now {now}: {live:?} live");
+            }
+        }
     }
 
     #[test]
