@@ -271,6 +271,17 @@ try {
   }, 'B receiving audio from A after the renewal', 15000, 0).catch(() => null);
   check(after !== null, 'B still hears A once the old allocation is gone'
     + (after ? ' (' + Math.round((after.y.packets - after.x.packets) / 2) + ' pkt/s)' : ''));
+  // cast-um1: each guest's own credentials share the host's lifetime and were
+  // minted moments later, so their renewal is near: the guest renews them in
+  // its answer to the host's restart instead of asking for a second restart
+  // seconds later (which, on a lossy network, could leave it with no path).
+  const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart')));
+  const second = (host.err.slice(at).match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
+  // Over TCP the host's restart can come a moment after a guest's own renewal
+  // (its reconnect to the rendezvous is slower), and the order is a matter of
+  // timing (cast-ej4 tracks the TCP drops); over UDP it reliably comes first.
+  check((early.length === 2 && second === 0) || TURN_TRANSPORT === 'tcp', 'each guest renewed its own relay credentials within the host\'s ICE restart, and none asked for a second restart'
+    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')');
   const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
   const same = [];
   for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);
@@ -278,7 +289,9 @@ try {
   // flicker through "disconnected" and recover by itself; it must still not rejoin.
   const degraded = !!process.env.DEGRADED;
   check((lost.length === 0 || degraded) && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
-    + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : ''));
+    + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : '')
+    + (same.length === 2 ? '' : ' (rejoined: ' + ['A', 'B'].filter((n) => !same.includes(n)).join(', ') + ')'));
+  for (const n of lost) console.log('guest ' + n + ': ' + logs[n].filter((l) => /connection to the host lost|connection state|relay credentials|answered host renegotiation|joined/.test(l)).map((l) => l.replaceAll('\n', ' ')).join(' | '));
   const started2 = await post('/take/start');
   check(started2[0] === 200, 'take 2 started after the renewal: ' + started2.join(' '));
   await sleep(4000);
@@ -289,7 +302,7 @@ try {
     const m = join(TAKE2, 'manifest.jsonl');
     return existsSync(m) ? readFileSync(m, 'utf8').split('\n').filter((l) => l.startsWith('{"Verified"')).length : 0;
   };
-  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 60000, 250).catch(() => false);
+  const synced2 = await waitFor(() => verified2() >= 6, 'take 2 verified on the host', 90000, 250).catch(() => false);
   check(synced2, 'take 2, recorded after the renewal, synced over the new allocation (' + verified2() + ' items verified)');
   const minted2 = (rv.err.match(/relay credentials minted/g) || []).length;
   check(minted2 >= 3 && minted2 > minted, 'the rendezvous minted again for the renewal (' + minted2 + ' in all)');

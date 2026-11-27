@@ -264,6 +264,13 @@ jobs:
           DEGRADED: "1"
         run: task test:relay
 
+      - name: Upload relay logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: degraded-relay-logs
+          path: castcorder/crates/castcorder-client/browser-test/test-results/relay-*
+
   # The release workflow, run by hand on this commit: it verifies the version, then builds the
   # installers on Windows, macOS and Linux and smoke-starts each one (no release is made). Run
   # here so a change that breaks an installer build shows up in the nightly, not at a tag

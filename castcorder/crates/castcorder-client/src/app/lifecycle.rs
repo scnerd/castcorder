@@ -227,6 +227,7 @@ pub(super) fn disconnect() {
         e.participant = None;
         e.offers.clear();
         e.answering = false;
+        e.relay_renew = None;
         e.mid_origin.clear();
         e.last_rx = 0.0;
         e.video_sender = None;

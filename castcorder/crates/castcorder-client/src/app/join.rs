@@ -420,6 +420,36 @@ fn rtc_config(ice_servers: &JsValue, log: bool) -> RtcConfiguration {
     cfg
 }
 
+/// The relay (TURN) credential renewal of the current call connection.
+pub(super) struct RelayRenew {
+    /// The connection the credentials are for.
+    pc: RtcPeerConnection,
+    url: String,
+    link: castcorder_link::CallLink,
+    /// When the credentials expire (unix seconds).
+    expires: u64,
+    /// When to renew them (unix ms).
+    due_ms: f64,
+    /// A renewal is asking the rendezvous now.
+    busy: bool,
+    /// A host ICE restart was answered while that renewal asked, after it:
+    /// that restart carries the new credentials, so asking for one more is
+    /// not needed.
+    carried: bool,
+}
+
+/// How a renewal went.
+enum Renewal {
+    /// New credentials are applied to the connection.
+    Renewed,
+    /// None this time; try again shortly.
+    Retry(String),
+    /// Another renewal of this connection is asking the rendezvous now.
+    Busy,
+    /// The relay budget is spent, or the connection is gone: stop renewing.
+    Stop,
+}
+
 /// Renew this connection's relay (TURN) credentials before they expire
 /// (cast-lxt.11), for as long as the connection is current: at 80% of their
 /// remaining life, a fresh hello from the rendezvous (naming the host, so
@@ -429,23 +459,46 @@ fn rtc_config(ice_servers: &JsValue, log: bool) -> RtcConfiguration {
 /// new credentials. The call (or sync-only connection) carries on over the
 /// new allocation without a reconnect. A failed renewal (rendezvous
 /// unreachable, the daily cap reached) keeps the old configuration and
-/// tries again, until the connection ends.
+/// tries again, until the connection ends. When the host offers an ICE
+/// restart of its own near the renewal (it renews its credentials too),
+/// the answer renews first ([`renew_with_host_restart`]) and this loop has
+/// nothing left to do until the next one.
 async fn renew_relay(
     pc: RtcPeerConnection,
     url: String,
     link: castcorder_link::CallLink,
-    mut expires: u64,
+    expires: u64,
     current: impl Fn() -> bool + 'static,
 ) {
     use crate::signal::{RENEW_RETRY_MS, renew_after_ms};
-    let mut wait = renew_after_ms(expires, js_sys::Date::now());
+    let now = js_sys::Date::now();
+    let wait = renew_after_ms(expires, now);
+    with_engine(|e| {
+        e.relay_renew = Some(RelayRenew {
+            pc: pc.clone(),
+            url,
+            link,
+            expires,
+            due_ms: now + wait,
+            busy: false,
+            carried: false,
+        })
+    });
     info!(
         expires,
         renew_in_s = (wait / 1000.0).round(),
         "relay credentials will be renewed"
     );
     loop {
-        crate::mailbox::sleep_ms(wait.min(i32::MAX as f64) as i32).await;
+        let Some(due) = with_engine(|e| renewal_of(e, &pc).map(|r| r.due_ms)) else {
+            return;
+        };
+        let wait = due - js_sys::Date::now();
+        if wait > 0.0 {
+            // The due time may move (renewed with a host restart): look again.
+            crate::mailbox::sleep_ms(wait.min(i32::MAX as f64) as i32).await;
+            continue;
+        }
         let closed = pc.connection_state() == web_sys::RtcPeerConnectionState::Closed;
         if !current() || closed {
             return;
@@ -458,47 +511,162 @@ async fn renew_relay(
             info!("connection is direct; relay credentials are not renewed");
             return;
         }
-        let fresh = match crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, &link)).await {
-            Ok(mb) => match mb.relay_expires {
-                Some(e) => Ok((e, mb.ice_servers.clone())),
-                None if crate::signal::relay_quota_spent(mb.relay_error.as_deref()) => {
-                    // The budget is spent for the period: asking again every
-                    // few seconds only adds load (cast-lxt.12). Keep the old
-                    // credentials; a dropped call reconnects as usual.
-                    warn!("relay budget spent; relay credentials are not renewed");
-                    return;
+        match renew_credentials(&pc).await {
+            Renewal::Renewed if current() => {
+                let (expires, due, carried) = with_engine(|e| {
+                    renewal_mut(e, &pc).map_or((0, 0.0, false), |r| {
+                        (r.expires, r.due_ms, std::mem::take(&mut r.carried))
+                    })
+                });
+                let renew_in_s = ((due - js_sys::Date::now()) / 1000.0).round();
+                if carried {
+                    info!(
+                        expires,
+                        renew_in_s,
+                        "relay credentials renewed while the host restarted ICE; its restart carries them"
+                    );
+                } else {
+                    send_signal(&Signal::Restart);
+                    info!(
+                        expires,
+                        renew_in_s, "relay credentials renewed; asked the host to restart ICE"
+                    );
                 }
-                None => Err("the rendezvous gave no relay credentials".to_string()),
-            },
-            Err(e) => Err(describe(&e)),
-        };
-        if !current() {
-            return;
-        }
-        match fresh {
-            Ok((e, servers)) => {
-                if let Err(err) = call(&pc, "setConfiguration", &[&rtc_config(&servers, false)]) {
-                    warn!(error = %describe(&err), "relay credentials not applied; trying again");
-                    wait = RENEW_RETRY_MS;
-                    continue;
-                }
-                expires = e;
-                send_signal(&Signal::Restart);
-                wait = renew_after_ms(expires, js_sys::Date::now());
-                info!(
-                    expires,
-                    renew_in_s = (wait / 1000.0).round(),
-                    "relay credentials renewed; asked the host to restart ICE"
-                );
             }
-            Err(why) => {
+            Renewal::Renewed | Renewal::Stop => return,
+            // The answer to a host restart is renewing; it moves the due time.
+            Renewal::Busy => crate::mailbox::sleep_ms(250).await,
+            Renewal::Retry(why) => {
                 // Keep the old ones; they may still have life left. The host
                 // renews its own at the same point of the same TTL by
                 // reconnecting, so "host offline" here is usually brief.
-                warn!(reason = %why, expires, "relay credentials not renewed; trying again");
-                wait = RENEW_RETRY_MS;
+                warn!(reason = %why, "relay credentials not renewed; trying again");
+                with_engine(|e| {
+                    if let Some(r) = renewal_mut(e, &pc) {
+                        r.due_ms = js_sys::Date::now() + RENEW_RETRY_MS;
+                        // A restart answered meanwhile had the old ones.
+                        r.carried = false;
+                    }
+                });
             }
         }
+    }
+}
+
+/// The renewal of `pc`, if it is still the current connection's.
+fn renewal_of<'a>(e: &'a Engine, pc: &RtcPeerConnection) -> Option<&'a RelayRenew> {
+    e.relay_renew.as_ref().filter(|r| &r.pc == pc)
+}
+
+fn renewal_mut<'a>(e: &'a mut Engine, pc: &RtcPeerConnection) -> Option<&'a mut RelayRenew> {
+    e.relay_renew.as_mut().filter(|r| &r.pc == pc)
+}
+
+/// Fetch fresh relay credentials from the rendezvous and apply them to `pc`
+/// (`setConfiguration`: they take effect at the next ICE restart), moving
+/// the next renewal on. Nothing is sent to the host.
+async fn renew_credentials(pc: &RtcPeerConnection) -> Renewal {
+    use crate::signal::renew_after_ms;
+    let Some(claim) = with_engine(|e| {
+        let r = renewal_mut(e, pc)?;
+        if r.busy {
+            return Some(None);
+        }
+        r.busy = true;
+        Some(Some((r.url.clone(), r.link.clone())))
+    }) else {
+        return Renewal::Stop;
+    };
+    let Some((url, link)) = claim else {
+        return Renewal::Busy;
+    };
+    let fresh = match crate::mailbox::Mailbox::open(&relay_mailbox_url(&url, &link)).await {
+        Ok(mb) => match mb.relay_expires {
+            Some(e) => Ok((e, mb.ice_servers.clone())),
+            None if crate::signal::relay_quota_spent(mb.relay_error.as_deref()) => {
+                // The budget is spent for the period: asking again every
+                // few seconds only adds load (cast-lxt.12). Keep the old
+                // credentials; a dropped call reconnects as usual.
+                warn!("relay budget spent; relay credentials are not renewed");
+                Err(None)
+            }
+            None => Err(Some("the rendezvous gave no relay credentials".to_string())),
+        },
+        Err(e) => Err(Some(describe(&e))),
+    };
+    let still = with_engine(|e| renewal_mut(e, pc).map(|r| r.busy = false).is_some());
+    if !still || pc.connection_state() == web_sys::RtcPeerConnectionState::Closed {
+        return Renewal::Stop;
+    }
+    let (expires, servers) = match fresh {
+        Ok(f) => f,
+        Err(None) => return Renewal::Stop,
+        Err(Some(why)) => return Renewal::Retry(why),
+    };
+    if let Err(err) = call(pc, "setConfiguration", &[&rtc_config(&servers, false)]) {
+        return Renewal::Retry(format!("relay credentials not applied: {}", describe(&err)));
+    }
+    let now = js_sys::Date::now();
+    with_engine(|e| {
+        if let Some(r) = renewal_mut(e, pc) {
+            r.expires = expires;
+            r.due_ms = now + renew_after_ms(expires, now);
+        }
+    });
+    Renewal::Renewed
+}
+
+/// Before answering a host offer: if it restarts ICE and this connection's
+/// relay credentials are near their renewal, renew them now, so the answer
+/// gathers its relay candidate with the new ones and no second ICE restart
+/// follows a few seconds later (cast-um1). The host restarts ICE when it
+/// renews its own credentials, which share the guests' lifetime.
+pub(super) async fn renew_with_host_restart(pc: &RtcPeerConnection, offer: &str) {
+    use crate::signal::{ice_ufrag, renew_early};
+    let restart = pc
+        .remote_description()
+        .map(|d| d.sdp())
+        .is_some_and(|cur| ice_ufrag(&cur).is_some() && ice_ufrag(&cur) != ice_ufrag(offer));
+    if !restart {
+        return;
+    }
+    // A renewal asking the rendezvous now: wait for it (bounded), so its
+    // credentials go into this answer and it asks for no restart of its own.
+    let busy = with_engine(|e| {
+        renewal_mut(e, pc)
+            .filter(|r| r.busy)
+            .map(|r| r.carried = true)
+            .is_some()
+    });
+    if busy {
+        let start = js_sys::Date::now();
+        while with_engine(|e| renewal_of(e, pc).is_some_and(|r| r.busy))
+            && js_sys::Date::now() - start < 5000.0
+        {
+            crate::mailbox::sleep_ms(50).await;
+        }
+        return;
+    }
+    let near = with_engine(|e| {
+        renewal_of(e, pc).is_some_and(|r| {
+            !r.busy && renew_early(r.due_ms, r.expires as f64 * 1000.0, js_sys::Date::now())
+        })
+    });
+    if !near {
+        return;
+    }
+    match renew_credentials(pc).await {
+        Renewal::Renewed => {
+            let expires = with_engine(|e| renewal_of(e, pc).map_or(0, |r| r.expires));
+            info!(
+                expires,
+                "relay credentials renewed with the host's ICE restart"
+            );
+        }
+        Renewal::Retry(why) => {
+            warn!(reason = %why, "relay credentials not renewed with the host's ICE restart; renewing on schedule")
+        }
+        Renewal::Stop | Renewal::Busy => {}
     }
 }
 
