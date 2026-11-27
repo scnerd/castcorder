@@ -466,6 +466,9 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .add-contact-panel[hidden] { display: none; }
 .add-contact-panel .row input { flex: 1; min-width: 0; }
 .add-contact-panel code { word-break: break-all; }
+.contact-link-terms { align-items: center; flex-wrap: wrap; gap: 8px; }
+.add-contact-panel .contact-link-terms .check input { flex: none; }
+.contact-link-row { justify-content: space-between; align-items: center; gap: 8px; }
 .or-rule { display: flex; align-items: center; gap: 10px; }
 .or-rule::before, .or-rule::after { content: ""; flex: 1; height: 1px; background: var(--border); }
 .field { font-size: 13px; font-weight: 600; }

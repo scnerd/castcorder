@@ -134,7 +134,7 @@ fn two_persons_become_contacts_as_soon_as_the_code_is_used() {
     );
 
     // Past its lifetime even Bob is refused.
-    let late = crate::wall_ms() + CODE_TTL_MS + 1;
+    let late = crate::wall_ms() + DEFAULT_CODE_TTL_MS + 1;
     let again = a
         .contacts
         .answer(&ask(&code, &b.host, Some(b.persons.cert()), late), late);
@@ -170,12 +170,128 @@ fn only_the_first_app_to_use_a_code_may_and_codes_expire() {
     assert_eq!(a.contacts.view(now + 2).contacts.len(), 1);
     // An unused code past its lifetime adds nobody.
     let unused = a.contacts.new_code(now).unwrap();
-    let late = now + CODE_TTL_MS + 1;
+    let late = now + DEFAULT_CODE_TTL_MS + 1;
     let after = a
         .contacts
         .answer(&ask(&unused, &c.host, Some(c.persons.cert()), late), late);
     assert!(matches!(after, ContactAnswer::Refused(w) if w.contains("expired")));
     assert!(a.contacts.get(&c.persons.id()).is_none());
+}
+
+/// The maker picks how long a code lasts and whether more than one person
+/// may use it (cast-ek4); codes outlive a restart and can be cancelled.
+#[test]
+fn a_code_lasts_as_long_as_its_maker_chose_and_can_admit_several() {
+    let (a, b, c, d) = (
+        install("Ann", 60),
+        install("Bob", 61),
+        install("Cy", 62),
+        install("Di", 63),
+    );
+    let now = crate::wall_ms();
+    let ask_as = |who: &Install, code: &ContactCode, at: u64| {
+        a.contacts
+            .answer(&ask(code, &who.host, Some(who.persons.cert()), at), at)
+    };
+    // Unless picked: a day, single use.
+    let plain = a.contacts.new_code(now).unwrap();
+    let view = a.contacts.view(now);
+    let made = view.links.iter().find(|l| l.made_ms == now).unwrap();
+    assert_eq!(
+        (made.expires_ms, made.once, made.used),
+        (now + DEFAULT_CODE_TTL_MS, true, 0)
+    );
+    // Three days, anyone with it: Bob and Cy both added, each once.
+    let three_days = 3 * 24 * 60 * 60 * 1000;
+    let open = a
+        .contacts
+        .new_code_with(
+            Terms {
+                ttl_ms: three_days,
+                once: false,
+            },
+            now,
+        )
+        .unwrap();
+    let late = now + three_days - 1;
+    assert!(matches!(
+        ask_as(&b, &open, late),
+        ContactAnswer::Accepted(_)
+    ));
+    assert!(matches!(
+        ask_as(&c, &open, late),
+        ContactAnswer::Accepted(_)
+    ));
+    assert!(matches!(
+        ask_as(&b, &open, late),
+        ContactAnswer::Accepted(_)
+    ));
+    assert!(a.contacts.get(&b.persons.id()).is_some());
+    assert!(a.contacts.get(&c.persons.id()).is_some());
+    let open_view = a.contacts.view(late);
+    let l = open_view.links.iter().find(|l| !l.once).unwrap();
+    assert_eq!(l.used, 2, "Bob and Cy, Bob counted once");
+    // Past three days it is gone; the plain one went after a day.
+    let after = now + three_days + 1;
+    assert!(matches!(ask_as(&d, &open, after), ContactAnswer::Refused(w) if w.contains("expired")));
+    assert!(matches!(
+        ask_as(&d, &plain, after),
+        ContactAnswer::Refused(_)
+    ));
+    assert!(a.contacts.view(after).links.is_empty());
+    // Lifetimes are clamped: ten minutes to thirty days.
+    a.contacts
+        .new_code_with(
+            Terms {
+                ttl_ms: 1,
+                once: true,
+            },
+            now,
+        )
+        .unwrap();
+    a.contacts
+        .new_code_with(
+            Terms {
+                ttl_ms: u64::MAX / 2,
+                once: true,
+            },
+            now,
+        )
+        .unwrap();
+    let mut lives: Vec<u64> = a
+        .contacts
+        .view(now)
+        .links
+        .iter()
+        .map(|l| l.expires_ms - l.made_ms)
+        .collect();
+    lives.sort();
+    assert_eq!(lives.first(), Some(&MIN_CODE_TTL_MS));
+    assert_eq!(lives.last(), Some(&MAX_CODE_TTL_MS));
+    // A week's code survives a restart, and cancelled it admits nobody.
+    let week = a
+        .contacts
+        .new_code_with(
+            Terms {
+                ttl_ms: 7 * 24 * 60 * 60 * 1000,
+                once: true,
+            },
+            now,
+        )
+        .unwrap();
+    let back = Contacts::load(&a.dir, &a.host, a.persons.clone(), now).unwrap();
+    let id = back
+        .view(now)
+        .links
+        .iter()
+        .find(|l| l.expires_ms - l.made_ms == 7 * 24 * 60 * 60 * 1000)
+        .unwrap()
+        .id;
+    back.cancel_code(id).unwrap();
+    assert!(back.cancel_code(id).is_err());
+    let r = back.answer(&ask(&week, &d.host, Some(d.persons.cert()), now), now);
+    assert!(matches!(r, ContactAnswer::Refused(w) if w.contains("unknown")));
+    assert!(back.get(&d.persons.id()).is_none());
 }
 
 #[test]

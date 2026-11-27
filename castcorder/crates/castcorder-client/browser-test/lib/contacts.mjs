@@ -56,14 +56,21 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   // Contacts is a place of the home's left nav (cast-n56.1).
   await page.click('#nav-contacts');
   await page.waitForSelector('#add-contact');
-  // Add contact opens a panel: copy my contact link (cast-40e.13).
+  // Add contact opens a panel: copy my contact link (cast-40e.13), for
+  // how long the maker picks and for one person or anyone (cast-ek4).
   await page.click('#add-contact');
+  check(await page.locator('#contact-link-life').inputValue() === '1440' && await page.locator('#contact-link-once').isChecked(),
+    'contacts: a new contact link lasts a day, for one person, unless picked');
+  await page.selectOption('#contact-link-life', '4320');
   await page.click('#copy-contact-link');
   const link = await waitFor(async () => {
     const all = await page.locator('#contact-codes code').allTextContents();
     return all.find((l) => l.startsWith('http://' + rendezvous + '/'));
   }, 'contacts: the home shows a contact code naming the rendezvous', 15000, 250);
   check(link.includes('#contact.'), 'contacts: the home made a contact code: ' + link);
+  const mine = (await call(HTTP, '/contacts')).links;
+  check(mine.length === 1 && mine[0].once && mine[0].expires_ms - mine[0].made_ms === 3 * 86400000,
+    'contacts: the link lasts the 3 days picked, for one person: ' + JSON.stringify(mine));
 
   // Bob's install asks with it, through the mailbox.
   await call(HTTP2, '/contacts/add', { code: link });
@@ -78,6 +85,15 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   check(await page.locator('#add-contact-panel').isHidden(), 'contacts: the new contact closed Add contact, so it shows');
   check(await page.getByRole('button', { name: 'Accept' }).count() === 0, 'contacts: nobody at Ann was asked to accept');
   check((await call(HTTP, '/contacts')).contacts.some((c) => c.id === bob.id), 'contacts: Ann lists Bob');
+  // Her links that still work, with Cancel: the used one says so.
+  await page.click('#add-contact');
+  const row = await waitFor(async () => (await text(page, '#contact-links li')) || null, 'contacts: the home lists its links', 10000);
+  check(row.includes('Works until') && row.includes('for one person, used'), 'contacts: the home lists the used link: ' + row);
+  await page.click('#contact-links li .cancel-contact-link');
+  await waitFor(async () => (await call(HTTP, '/contacts')).links.length === 0
+    && await page.locator('#contact-links li').count() === 0, 'contacts: the cancelled link is gone', 10000);
+  check(true, 'contacts: Cancel stops a link');
+  await page.click('#add-contact');
 
   // Presence (cast-40e.3): sealed pings through the mailbox, sent once they
   // pair, show each online to the other; the home says so on Bob's row.
