@@ -572,7 +572,7 @@ fn LeftPage(
             el.scroll_into_view();
         }
     };
-    // On the host machine the page returns to the rooms by itself (cast-n56.12):
+    // On the host machine the page returns to the rooms by itself (cast-afu):
     // after AUTO_HOME_SECS, counted only while no recordings are on their way
     // and until the person stays.
     let local = home::is_local_page();

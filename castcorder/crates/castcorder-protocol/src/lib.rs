@@ -333,6 +333,9 @@ pub struct SharedRoom {
     /// The room's call link, when the asking contact is trusted in it (its
     /// install, or its whole person) and the install is reachable.
     pub link: Option<String>,
+    /// The name the host machine gave the room, if any (cast-66n); else
+    /// [`Self::room`] is what it shows.
+    pub title: Option<String>,
 }
 
 /// One recorded source's state on its device, as the device reports it.
@@ -1257,6 +1260,7 @@ mod tests {
                     busy: false,
                     in_call: vec!["Ann".into()],
                     link: Some("https://example.test/v/1.2.3/#k".into()),
+                    title: Some("The Show".into()),
                 }]),
             },
         ]

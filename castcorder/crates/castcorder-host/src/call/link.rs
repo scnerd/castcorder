@@ -152,10 +152,11 @@ impl Call {
             if !self.rooms.exists(&name) {
                 continue;
             }
-            let (m, person_trusted) = self.judge(&name, |r| {
+            let (m, person_trusted, title) = self.judge(&name, |r| {
                 (
                     r.membership(device, None),
                     r.trusted_persons().iter().any(|p| p == person),
+                    r.title().map(str::to_string),
                 )
             });
             let trusted = match m {
@@ -187,6 +188,7 @@ impl Call {
                 busy: live && !room_live,
                 in_call,
                 room: name,
+                title,
             });
         }
         out

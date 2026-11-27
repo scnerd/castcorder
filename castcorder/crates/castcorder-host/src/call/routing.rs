@@ -191,8 +191,13 @@ pub struct JoinedDevice {
 /// One room, for the host machine's home.
 #[derive(Clone, Debug, Serialize)]
 pub struct RoomView {
-    /// Its name (folder).
+    /// Its folder name: what every request names it by.
     pub name: String,
+    /// The name it shows: the one the host machine gave it, else its folder
+    /// name (cast-66n).
+    pub title: String,
+    /// Hidden from the Rooms list until shown (cast-66n).
+    pub archived: bool,
     /// Its call link through the rendezvous, if any.
     pub link: Option<String>,
     /// Always open (else producer-gated).
@@ -621,19 +626,30 @@ impl Call {
         trust: bool,
         producer: Option<bool>,
     ) -> Result<(), String> {
-        if !self.rooms.exists(room) {
-            return Err(format!("unknown_room: no room named {room} on this host"));
-        }
-        let apply = |r: &mut Room| -> Result<bool, String> {
+        self.edit_room(room, |r| {
             let mut changed = r.trust_person(person, trust)?;
             if let Some(p) = producer {
                 changed |= r.set_person_producer(person, p && trust)?;
             }
             Ok(changed)
-        };
+        })
+    }
+
+    /// Change `room`'s saved settings with `apply` (which says whether it
+    /// changed anything): the loaded room if it is the call's, else its
+    /// `room.json`, which is left as it is if it does not read.
+    fn edit_room(
+        &mut self,
+        room: &str,
+        apply: impl FnOnce(&mut Room) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        if !self.rooms.exists(room) {
+            return Err(format!("unknown_room: no room named {room} on this host"));
+        }
         if room == self.room_name {
             apply(&mut self.room)?;
             self.save_room();
+            self.calls_dirty = true;
             return Ok(());
         }
         let path = self.rooms.room_dir(room).join("room.json");
@@ -643,7 +659,28 @@ impl Call {
         };
         if apply(&mut r)? {
             std::fs::write(&path, r.to_json()).map_err(|e| e.to_string())?;
+            self.calls_dirty = true;
         }
+        Ok(())
+    }
+
+    /// The home's Rename of a room (cast-66n): the name it shows; blank goes
+    /// back to its folder name. The folder stays, so links keep working.
+    pub(super) fn rename_room(&mut self, room: &str, title: &str) -> Result<(), String> {
+        self.edit_room(room, |r| r.set_title(title))?;
+        info!(room = %room, title = %title, "room renamed");
+        Ok(())
+    }
+
+    /// The home's Archive / Unarchive of a room (cast-66n): hides it from the
+    /// Rooms list, or brings it back. Nothing is deleted and its link still
+    /// works. A room someone is in cannot be archived.
+    pub(super) fn archive_room(&mut self, room: &str, archived: bool) -> Result<(), String> {
+        if archived && self.is_live() && room == self.room_name {
+            return Err("this room is live: it cannot be archived while someone is in it".into());
+        }
+        self.edit_room(room, |r| Ok(r.set_archived(archived)))?;
+        info!(room = %room, archived, "room archived or restored");
         Ok(())
     }
 
@@ -684,11 +721,15 @@ impl Call {
                         devices,
                     )
                 };
-                let (state, persons, producers, devices) = if name == self.room_name {
-                    people(&self.room)
+                let read;
+                let r = if name == self.room_name {
+                    &self.room
                 } else {
-                    people(&read_room(&dir))
+                    read = read_room(&dir);
+                    &read
                 };
+                let (state, persons, producers, devices) = people(r);
+                let (title, archived) = (r.title().unwrap_or(&name).to_string(), r.archived());
                 let room_live = live && name == self.room_name;
                 let current = if room_live {
                     self.call_id.clone()
@@ -696,6 +737,8 @@ impl Call {
                     None
                 };
                 let view = RoomView {
+                    title,
+                    archived,
                     link: self.rooms.link(&name),
                     open: state.open,
                     locked: state.locked,
