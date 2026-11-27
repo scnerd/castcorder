@@ -199,3 +199,96 @@ fn a_person_s_installs_share_contacts_through_the_rendezvous() {
     a2.stop();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Removing a device from a person (cast-cs9): Ann has three app installs,
+/// Desk linking the other two. Tablet lists Desk and Phone by name though it
+/// linked neither, and removes Phone (lost): Desk learns it and drops Phone.
+/// Then Tablet leaves Ann's person (it changed hands): it tells Desk, which
+/// drops it, and starts over as a new person with no contacts; Bob, Ann's
+/// contact, stops seeing Tablet online.
+#[test]
+fn any_install_removes_a_device_and_a_device_can_leave_its_person() {
+    let root = std::env::temp_dir().join(format!("castcorder-app-leave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let rv = rendezvous();
+    let a = start(&root, "a", rv);
+    let b = start(&root, "b", rv);
+    let a2 = start(&root, "a2", rv);
+    let a3 = start(&root, "a3", rv);
+    a.set_person_names(Some("Ann"), Some("Desk")).unwrap();
+    b.set_person_names(Some("Bob"), Some("Laptop")).unwrap();
+    a2.set_person_names(None, Some("Tablet")).unwrap();
+    a3.set_person_names(None, Some("Phone")).unwrap();
+    let (ann, bob) = (a.person().id, b.person().id);
+    wait("Ann's rendezvous link", || {
+        a.contact_code().unwrap().len() == 2
+    });
+    let links = a.contact_code().unwrap();
+    b.add_contact(links.iter().find(|l| !l.contains("/v/")).unwrap())
+        .unwrap();
+    wait("Bob to be added", || b.contacts().contacts.len() == 1);
+    for other in [&a2, &a3] {
+        let link = a.link_code().unwrap();
+        other
+            .join_person(link.iter().find(|l| !l.contains("/v/")).unwrap())
+            .unwrap();
+        wait("the link request at Desk", || {
+            a.person().requests.len() == 1
+        });
+        a.decide_link(&a.person().requests[0].device.clone(), true)
+            .unwrap();
+        wait("the install to join Ann", || other.person().id == ann);
+    }
+    let (desk, tablet, phone) = (a.person().device, a2.person().device, a3.person().device);
+
+    // Tablet linked nobody, yet lists Desk and Phone by their names.
+    wait("Tablet to list Desk and Phone by name", || {
+        let mut v: Vec<(String, String)> = a2
+            .person()
+            .installs
+            .iter()
+            .map(|i| (i.id.clone(), i.name.clone()))
+            .collect();
+        v.sort();
+        let mut want = vec![
+            (desk.clone(), "Desk".to_string()),
+            (phone.clone(), "Phone".to_string()),
+        ];
+        want.sort();
+        v == want
+    });
+    // Phone is lost: Tablet removes it, and Desk learns it.
+    a2.revoke_device(&phone).unwrap();
+    assert!(a2.person().installs.iter().all(|i| i.id != phone));
+    wait("Desk to drop Phone", || {
+        a.person().devices.iter().all(|d| d.id != phone)
+    });
+    wait("Bob to see Tablet online", || {
+        online(&b).contains(&"Tablet".to_string())
+    });
+
+    // Tablet changed hands: it leaves Ann's person.
+    a2.leave_person().unwrap();
+    let left = a2.person();
+    assert_ne!(left.id, ann, "a new person");
+    assert!(left.name.is_empty() && left.devices.is_empty() && left.installs.is_empty());
+    assert_eq!(left.device_name, "Tablet");
+    assert!(
+        a2.contacts().contacts.is_empty(),
+        "Ann's contacts stay with Ann"
+    );
+    wait("Desk to drop Tablet", || {
+        a.person().devices.iter().all(|d| d.id != tablet)
+    });
+    wait("Bob to stop seeing Tablet", || {
+        !online(&b).contains(&"Tablet".to_string())
+    });
+    assert!(
+        b.contact(&ann).is_some() && a.contact(&bob).is_some(),
+        "Ann and Bob stay contacts"
+    );
+    for r in [a, b, a2, a3] {
+        r.stop();
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

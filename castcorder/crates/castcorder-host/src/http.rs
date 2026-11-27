@@ -46,7 +46,9 @@
 //!   `POST /person/code` answers `{"links":[...],"code":FRAGMENT}`, a new
 //!   one-time link; `POST /person/decide` `{"device":ID,"approve":B}`;
 //!   `POST /person/join` `{"code":LINK}` links this install to another
-//!   person in the background. Each answers the view, or 409 with why.
+//!   person in the background; `POST /person/revoke` `{"device":ID}` removes
+//!   one of the person's devices; `POST /person/leave` takes this install
+//!   out of its person (it starts over as a new one, cast-cs9). Each answers the view, or 409 with why.
 //! - Producer controls go over the control channel (castcorder-protocol
 //!   `Request::StartTake`, `Request::Room`), authorized per device role. For
 //!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
@@ -314,6 +316,11 @@ fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
                 .ok_or_else(|| "no device".to_string())
                 .and_then(|d| app.persons.revoke(&d, now)),
         ),
+        "/person/leave" => done(crate::leave_person(
+            &app.persons,
+            &app.contacts,
+            app.call_links.base.as_ref().map(|b| b.base.as_str()),
+        )),
         _ => done(
             r.code
                 .ok_or_else(|| "no link code".to_string())
@@ -907,7 +914,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
             | "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/person"
-            | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
+            | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
+            | "/person/leave",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -936,7 +944,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/joined-rooms") => json(200, crate::joined::read(&app.library)),
         (
             "POST",
-            "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
+            "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
+            | "/person/leave",
         ) => {
             let r = match serde_json::from_slice::<PersonRequest>(&req.body) {
                 Ok(r) => r,

@@ -84,6 +84,10 @@ struct Saved {
     /// linked by, and those they told about (cast-40e.9).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     installs: Vec<String>,
+    /// Device names of those installs, by device id, as their presence
+    /// pings and answers gave them (cast-cs9).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    install_names: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -110,6 +114,18 @@ struct Code {
     /// Approved in advance for the app's own call window (cast-40e.7):
     /// a browser profile only, never an app install, and kept until used.
     auto: bool,
+}
+
+/// Another app install of the person this one knows but did not link
+/// (cast-cs9), as Settings lists it: it can be removed from here too.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct OtherInstall {
+    /// Its device id (what `POST /person/revoke` names).
+    pub id: String,
+    /// Its device name, once heard (empty until then).
+    pub name: String,
+    /// Its short fingerprint.
+    pub fingerprint: String,
 }
 
 /// A link request waiting for a decision, as the home page shows it.
@@ -152,6 +168,8 @@ pub struct View {
     pub fingerprint: String,
     /// Devices linked from here.
     pub devices: Vec<LinkedDevice>,
+    /// The person's other app installs this one knows and did not link.
+    pub installs: Vec<OtherInstall>,
     /// Link requests waiting for a decision.
     pub requests: Vec<Request>,
     /// Unspent link codes.
@@ -229,6 +247,7 @@ impl Persons {
                     devices: Vec::new(),
                     revoked: Vec::new(),
                     installs: Vec::new(),
+                    install_names: Default::default(),
                 };
                 write_atomic(&path, &serde_json::to_string_pretty(&saved)?)?;
                 info!(person = %person.id(), "made a person key");
@@ -331,6 +350,57 @@ impl Persons {
         }
     }
 
+    /// Remember the device name another app install of this person (its
+    /// device id `id`, already one of [`Persons::installs`]) gave in a
+    /// presence ping or answer (cast-cs9).
+    pub fn note_install_name(&self, id: &str, name: &str) {
+        let mut g = self.lock();
+        let name = crate::http::clean_label(name);
+        let known = g.saved.installs.iter().any(|k| {
+            unb64(k)
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .is_some_and(|b| device_id(&b) == id)
+        });
+        if name.is_empty() || !known || g.saved.install_names.get(id) == Some(&name) {
+            return;
+        }
+        g.saved.install_names.insert(id.to_string(), name);
+        if let Err(e) = g.save() {
+            warn!(error = %e, "could not save the install's name");
+        }
+    }
+
+    /// A revocation of this install itself, signed by the person key, for
+    /// the person's other installs to learn as it leaves the person
+    /// ([`Persons::start_over`]; cast-cs9). Not kept here.
+    pub fn leaving_revocation(&self, now_ms: u64) -> Revocation {
+        let g = self.lock();
+        g.person.revoke(&device_id(&g.host.id().0), now_ms)
+    }
+
+    /// This install leaves its person and starts over as a new one (a
+    /// device that changed hands; cast-cs9): a fresh person key and
+    /// certificate, no name, and none of the old person's devices,
+    /// installs or revocations. Its device name stays. The old person key
+    /// is gone from this install.
+    pub fn start_over(&self, now_ms: u64) -> io::Result<()> {
+        let mut g = self.lock();
+        let person = PersonKey::from_secret(crate::rendezvous::random()?);
+        let host_pub = g.host.id().0;
+        info!(from = %g.person.id(), to = %person.id(), "this install left its person and started over");
+        g.saved.key = b64(&person.secret());
+        g.saved.name = String::new();
+        g.saved.cert = person.certify(&host_pub, DeviceKind::App, now_ms);
+        g.saved.devices.clear();
+        g.saved.revoked.clear();
+        g.saved.installs.clear();
+        g.saved.install_names.clear();
+        g.person = person;
+        g.codes.clear();
+        g.joining = None;
+        g.save()
+    }
+
     /// Keep the revocations in `list` this person's key signed, which
     /// another install of the person made (cast-40e.9): the device ids
     /// newly revoked here.
@@ -415,6 +485,20 @@ impl Persons {
             device: device_id(&host_pub),
             fingerprint: fingerprint(&host_pub),
             devices: g.saved.devices.clone(),
+            installs: g
+                .saved
+                .installs
+                .iter()
+                .filter_map(|k| <[u8; 32]>::try_from(unb64(k)?).ok())
+                .map(|k| (device_id(&k), k))
+                .filter(|(id, _)| !g.saved.devices.iter().any(|d| &d.id == id))
+                .filter(|(id, _)| !g.own_revoked(id))
+                .map(|(id, k)| OtherInstall {
+                    name: g.saved.install_names.get(&id).cloned().unwrap_or_default(),
+                    fingerprint: fingerprint(&k),
+                    id,
+                })
+                .collect(),
             requests: g
                 .codes
                 .iter()
