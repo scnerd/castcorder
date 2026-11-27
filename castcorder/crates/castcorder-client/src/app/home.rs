@@ -444,7 +444,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                     <section id="home-rooms" class="home-place" hidden=move || place.get() != Place::Rooms>
                         <div class="home-head">
                             <h1>"Rooms"</h1>
-                            <span class="small muted">"Each room keeps one link. Guests join with it; joining continues the room's call, or starts a new one if nobody has been in it for a while."</span>
+                            <super::hints::Hint id="rooms-link">"Each room keeps one link. Guests join with it; joining continues the room's call, or starts a new one if nobody has been in it for a while."</super::hints::Hint>
                         </div>
                         <div class="row">
                             <label class="sr-only" for="new-room-name">"New room name"</label>

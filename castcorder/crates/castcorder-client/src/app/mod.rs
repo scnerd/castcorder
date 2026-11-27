@@ -52,6 +52,7 @@ mod capture;
 mod contact_offer;
 mod data;
 mod devices;
+mod hints;
 mod home;
 mod join;
 mod left;
