@@ -648,14 +648,17 @@ impl Call {
     }
 
     /// Every room, for the host machine's home.
-    pub(super) fn rooms_view(&mut self) -> Vec<RoomView> {
+    /// Every room as the producer page's Rooms list shows it, but for the
+    /// calls, which [`RoomsPlan::finish`] reads off the call thread (cast-0af).
+    pub(super) fn rooms_view(&mut self) -> RoomsPlan {
         let now = self.rooms.now_ms();
         let wall = crate::wall_ms();
         self.waiting
             .retain(|_, (_, at)| wall.saturating_sub(*at) <= WAITING_FOR_MS);
         let live = self.is_live();
         let default = self.rooms.default_room();
-        rooms::list_rooms(&self.rooms.library)
+        let live_call = if live { self.call_id.clone() } else { None };
+        let views = rooms::list_rooms(&self.rooms.library)
             .into_iter()
             .filter(|r| self.rooms.exists(r))
             .map(|name| {
@@ -686,31 +689,20 @@ impl Call {
                 } else {
                     people(&read_room(&dir))
                 };
-                let calls = rooms::list_calls(&dir);
                 let room_live = live && name == self.room_name;
                 let current = if room_live {
                     self.call_id.clone()
                 } else {
-                    rooms::route(&calls, now, self.rooms.gap).map(|c| c.id.clone())
+                    None
                 };
-                RoomView {
+                let view = RoomView {
                     link: self.rooms.link(&name),
                     open: state.open,
                     locked: state.locked,
                     password: state.password,
                     live: room_live,
                     current,
-                    calls: calls
-                        .into_iter()
-                        .map(|c| CallView {
-                            live: room_live && self.call_id.as_deref() == Some(c.id.as_str()),
-                            id: c.id,
-                            started_ms: c.meta.started_ms,
-                            last_active_ms: c.meta.last_active_ms,
-                            takes: c.takes,
-                            archived: c.meta.archived,
-                        })
-                        .collect(),
+                    calls: Vec::new(),
                     default: name == default,
                     persons,
                     producers,
@@ -727,7 +719,58 @@ impl Call {
                         w
                     },
                     name,
+                };
+                (view, dir)
+            })
+            .collect();
+        RoomsPlan {
+            views,
+            live_call,
+            now,
+            gap: self.rooms.gap,
+        }
+    }
+}
+
+/// The Rooms list worked out on the call thread but for each room's calls
+/// (cast-0af): [`RoomsPlan::finish`] reads those, on a thread of its own.
+pub struct RoomsPlan {
+    /// Per room: its view so far (no calls) and its folder.
+    views: Vec<(RoomView, PathBuf)>,
+    /// The live call, if any (only in the live room).
+    live_call: Option<String>,
+    now: u64,
+    gap: Duration,
+}
+
+impl RoomsPlan {
+    /// Read each room's calls; a room not live routes its current call.
+    pub fn finish(self) -> Vec<RoomView> {
+        let RoomsPlan {
+            views,
+            live_call,
+            now,
+            gap,
+        } = self;
+        views
+            .into_iter()
+            .map(|(mut view, dir)| {
+                let calls = rooms::list_calls(&dir);
+                if !view.live {
+                    view.current = rooms::route(&calls, now, gap).map(|c| c.id.clone());
                 }
+                view.calls = calls
+                    .into_iter()
+                    .map(|c| CallView {
+                        live: view.live && live_call.as_deref() == Some(c.id.as_str()),
+                        id: c.id,
+                        started_ms: c.meta.started_ms,
+                        last_active_ms: c.meta.last_active_ms,
+                        takes: c.takes,
+                        archived: c.meta.archived,
+                    })
+                    .collect();
+                view
             })
             .collect()
     }

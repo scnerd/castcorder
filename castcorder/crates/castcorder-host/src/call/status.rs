@@ -59,11 +59,64 @@ fn manifest_devices(call_dir: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// A status answer worked out on the call thread but for what reads call
+/// folders (cast-0af): each room's calls and whether the device was in each,
+/// which [`StatusPlan::finish`] reads on a thread of its own, so a library
+/// with many rooms and calls never stalls the live call.
+pub(super) struct StatusPlan {
+    device: String,
+    alias: Option<String>,
+    now: u64,
+    gap: std::time::Duration,
+    /// Per room: its status so far (calls empty), its folder, and whether
+    /// `current` is still to be routed from its calls (a room not live).
+    rooms: Vec<(RoomStatus, std::path::PathBuf, bool)>,
+}
+
+impl StatusPlan {
+    /// Read each room's calls: the current one of a room not live, and the
+    /// calls the device was in.
+    pub(super) fn finish(self) -> HostStatus {
+        let StatusPlan {
+            device,
+            alias,
+            now,
+            gap,
+            rooms,
+        } = self;
+        let mut out = HostStatus::default();
+        for (mut status, dir, route) in rooms {
+            if !status.removed {
+                let calls = rooms::list_calls(&dir);
+                if route {
+                    status.current = rooms::route(&calls, now, gap).map(|c| c.id.clone());
+                }
+                status.calls = calls
+                    .iter()
+                    .filter(|c| {
+                        let listed = members(&dir.join(&c.id));
+                        listed.contains(&device)
+                            || alias.as_ref().is_some_and(|a| listed.contains(a))
+                    })
+                    .map(|c| CallStatus {
+                        id: c.id.clone(),
+                        started_ms: c.meta.started_ms,
+                        takes: c.takes,
+                    })
+                    .collect();
+            }
+            out.rooms.push(status);
+        }
+        out
+    }
+}
+
 impl Call {
     /// Answer a status query of `device`: every room of this host it was in.
     /// `nonce` is what its proof signs.
     /// `person` is the person its certificate vouches for (verified against
-    /// the proof's key): a room that trusts that person counts it.
+    /// the proof's key): a room that trusts that person counts it. What reads
+    /// call folders is left to [`StatusPlan::finish`], off the call thread.
     pub(super) fn host_status(
         &mut self,
         device: &str,
@@ -72,7 +125,7 @@ impl Call {
         audience: &str,
         owner: bool,
         person: Option<[u8; 32]>,
-    ) -> Result<HostStatus, String> {
+    ) -> Result<StatusPlan, String> {
         let device = self
             .room
             .verify(device, proof, audience, nonce, crate::wall_ms())
@@ -81,7 +134,13 @@ impl Call {
         let revoked = self.rooms.persons.is_revoked(&device);
         let now = self.rooms.now_ms();
         let live = self.is_live();
-        let mut out = HostStatus::default();
+        let mut plan = StatusPlan {
+            device: String::new(),
+            alias: alias.clone(),
+            now,
+            gap: self.rooms.gap,
+            rooms: Vec::new(),
+        };
         for name in rooms::list_rooms(&self.rooms.library) {
             if !self.rooms.exists(&name) {
                 continue;
@@ -113,21 +172,24 @@ impl Call {
             let Some(m) = m else {
                 continue;
             };
+            let dir = self.rooms.room_dir(&name);
             if m.removed {
-                out.rooms.push(RoomStatus {
-                    room: name,
-                    removed: true,
-                    ..Default::default()
-                });
+                plan.rooms.push((
+                    RoomStatus {
+                        room: name,
+                        removed: true,
+                        ..Default::default()
+                    },
+                    dir,
+                    false,
+                ));
                 continue;
             }
-            let dir = self.rooms.room_dir(&name);
-            let calls = rooms::list_calls(&dir);
             let room_live = live && name == self.room_name;
             let current = if room_live {
                 self.call_id.clone()
             } else {
-                rooms::route(&calls, now, self.rooms.gap).map(|c| c.id.clone())
+                None
             };
             let in_call = if room_live {
                 let mut names: Vec<String> = self
@@ -141,35 +203,28 @@ impl Call {
             } else {
                 Vec::new()
             };
-            let mine = calls
-                .iter()
-                .filter(|c| {
-                    let listed = members(&dir.join(&c.id));
-                    listed.contains(&device) || alias.as_ref().is_some_and(|a| listed.contains(a))
-                })
-                .map(|c| CallStatus {
-                    id: c.id.clone(),
-                    started_ms: c.meta.started_ms,
-                    takes: c.takes,
-                })
-                .collect();
-            out.rooms.push(RoomStatus {
-                link: if m.trusted {
-                    self.rooms.link(&name)
-                } else {
-                    None
+            plan.rooms.push((
+                RoomStatus {
+                    link: if m.trusted {
+                        self.rooms.link(&name)
+                    } else {
+                        None
+                    },
+                    live: room_live,
+                    busy: live && !room_live,
+                    current,
+                    in_call,
+                    producer: m.producer,
+                    calls: Vec::new(),
+                    removed: false,
+                    room: name,
                 },
-                live: room_live,
-                busy: live && !room_live,
-                current,
-                in_call,
-                producer: m.producer,
-                calls: mine,
-                removed: false,
-                room: name,
-            });
+                dir,
+                !room_live,
+            ));
         }
-        Ok(out)
+        plan.device = device;
+        Ok(plan)
     }
 
     /// An admitted offer of verified `device` in the loaded room: enter the
@@ -282,6 +337,41 @@ mod tests {
         let dir = call_dir("nolist", "dev-a", false);
         assert!(!dir.join(MEMBERS).exists());
         assert_eq!(members(&dir), BTreeSet::from(["dev-a".to_string()]));
+    }
+
+    #[test]
+    fn a_status_plan_reads_the_calls_only_when_finished() {
+        // The plan holds no call listing: what the room's folder holds when
+        // it is finished (off the call thread) is what the answer says
+        // (cast-0af).
+        let room =
+            std::env::temp_dir().join(format!("castcorder-status-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&room);
+        std::fs::create_dir_all(&room).unwrap();
+        let plan = || StatusPlan {
+            device: "dev-a".into(),
+            alias: None,
+            now: 0,
+            gap: std::time::Duration::from_secs(1),
+            rooms: vec![(
+                RoomStatus {
+                    room: "r".into(),
+                    ..Default::default()
+                },
+                room.clone(),
+                true,
+            )],
+        };
+        let early = plan();
+        assert!(plan().finish().rooms[0].calls.is_empty(), "no calls yet");
+        let call = room.join("2026-11-27");
+        std::fs::create_dir_all(&call).unwrap();
+        rooms::write_meta(&call, &rooms::CallMeta::default()).unwrap();
+        std::fs::write(call.join(MEMBERS), "{\"device\":\"dev-a\"}\n").unwrap();
+        let got = early.finish();
+        assert_eq!(got.rooms[0].calls.len(), 1, "{got:?}");
+        assert_eq!(got.rooms[0].calls[0].id, "2026-11-27");
+        let _ = std::fs::remove_dir_all(&room);
     }
 
     #[test]
