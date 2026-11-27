@@ -9,15 +9,19 @@
 //!   pings and contact links reach) and when they were added. Contacts are
 //!   per app install: the person's other installs do not learn them yet.
 //! - Pairing, at the person who makes the code: "Add a contact" makes a
-//!   one-time contact code (single use, [`CODE_TTL_MS`]). The first app
-//!   install to send a contact request with it claims it, bound to the key
-//!   that signed the request; anyone else is refused. The request must carry
-//!   that install's own certificate (an app install's, of another person).
-//!   It is accepted at once: answered with this install's certificate and
-//!   person name, and the asking person is a contact here. Nobody here is
-//!   asked (David, 2026-11-27): making and sending the code was the decision,
-//!   and the code is single use. The claim is kept until the code expires,
-//!   so the same install asking again (its answer lost) is answered again.
+//!   contact code with the lifetime the maker picks ([`Terms`]; a day
+//!   unless chosen, [`MIN_CODE_TTL_MS`] to [`MAX_CODE_TTL_MS`]), single use
+//!   unless the maker lets anyone with it use it (cast-ek4). Codes are kept
+//!   in `contacts.json`, so they outlive a restart, and the maker can cancel
+//!   one. A single-use code is claimed by the first app install to send a
+//!   contact request with it, bound to the key that signed the request;
+//!   anyone else is refused. The request must carry that install's own
+//!   certificate (an app install's, of another person). It is accepted at
+//!   once: answered with this install's certificate and person name, and the
+//!   asking person is a contact here. Nobody here is asked (David,
+//!   2026-11-27): making and sending the code was the decision. The claim is
+//!   kept until the code expires, so the same install asking again (its
+//!   answer lost) is answered again.
 //! - Pairing, at the person who uses the code ([`Contacts::add`]): seal a
 //!   contact request to the code's host key, send it (rendezvous mailbox or
 //!   the LAN listener's `POST /contact`), and ask again every
@@ -58,8 +62,36 @@ use tracing::{debug, info, warn};
 use crate::person::{Exchange, POLL, Persons, Route, WAIT, write_atomic};
 use crate::presence::{Board, Me, PresenceView, Timing};
 
-/// How long a contact code stays usable.
+/// How long a contact code made in a call stays usable (cast-40e.10):
+/// both people are there to use it.
 pub const CODE_TTL_MS: u64 = crate::person::CODE_TTL_MS;
+
+/// How long a contact code from "Add a contact" lasts unless the maker
+/// picks otherwise: a day, time for the other person to see the message.
+pub const DEFAULT_CODE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// The shortest lifetime a maker can pick: ten minutes.
+pub const MIN_CODE_TTL_MS: u64 = 10 * 60 * 1000;
+/// The longest lifetime a maker can pick: thirty days.
+pub const MAX_CODE_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// What a maker picks for a contact code from "Add a contact" (cast-ek4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Terms {
+    /// How long it stays usable, clamped to [`MIN_CODE_TTL_MS`] to
+    /// [`MAX_CODE_TTL_MS`].
+    pub ttl_ms: u64,
+    /// Only the first app install to use it is added.
+    pub once: bool,
+}
+
+impl Default for Terms {
+    fn default() -> Self {
+        Self {
+            ttl_ms: DEFAULT_CODE_TTL_MS,
+            once: true,
+        }
+    }
+}
 
 /// A person this install's person is a contact of.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,17 +160,44 @@ struct Saved {
     /// Appear offline: send no presence pings and answer none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     appear_offline: bool,
+    /// Contact codes this install made that have not expired (cast-ek4):
+    /// kept so a code meant to last days outlives a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    codes: Vec<Code>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Code {
+    /// Names the code to the page (to cancel it); not the secret.
+    id: u64,
     secret: [u8; 16],
     made_ms: u64,
-    /// The key of the install that used it: only it may ask again.
-    claim: Option<[u8; 32]>,
+    expires_ms: u64,
+    /// Only the first install to use it is added.
+    once: bool,
+    /// The keys of the installs that used it. A single-use code admits
+    /// only the first again (its answer lost).
+    #[serde(default)]
+    used_by: Vec<[u8; 32]>,
     /// Made for this person (its id) from a call (cast-40e.10): their
     /// request is accepted, anyone else's refused.
+    #[serde(default)]
     for_person: Option<String>,
+}
+
+/// A contact code this install made, as the home lists it (cast-ek4).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CodeView {
+    /// What `POST /contacts/code/cancel` names.
+    pub id: u64,
+    /// When it was made (unix ms).
+    pub made_ms: u64,
+    /// When it stops working (unix ms).
+    pub expires_ms: u64,
+    /// Only the first person to use it is added.
+    pub once: bool,
+    /// How many installs used it.
+    pub used: usize,
 }
 
 /// Using someone's contact code, as the home shows it.
@@ -188,8 +247,10 @@ pub struct ContactView {
 pub struct View {
     /// Every contact, in the order added.
     pub contacts: Vec<ContactView>,
-    /// Unspent contact codes.
+    /// Contact codes that can still add someone.
     pub codes: usize,
+    /// Every unexpired contact code from "Add a contact", newest first.
+    pub links: Vec<CodeView>,
     /// Using someone's contact code, if started.
     pub adding: Option<Adding>,
     /// Presence pings run (this install has a rendezvous).
@@ -207,7 +268,6 @@ pub struct View {
 struct Inner {
     path: PathBuf,
     saved: Saved,
-    codes: Vec<Code>,
     adding: Option<Adding>,
     board: Board,
     invites: crate::invite::Invites,
@@ -252,7 +312,6 @@ impl Contacts {
             inner: Arc::new(Mutex::new(Inner {
                 path,
                 saved,
-                codes: Vec::new(),
                 adding: None,
                 board: Board::default(),
                 invites: Default::default(),
@@ -286,7 +345,26 @@ impl Contacts {
                     presence: g.board.view(&c.id, now_ms, &self.timing),
                 })
                 .collect(),
-            codes: g.codes.iter().filter(|c| c.claim.is_none()).count(),
+            codes: g
+                .saved
+                .codes
+                .iter()
+                .filter(|c| !c.once || c.used_by.is_empty())
+                .count(),
+            links: g
+                .saved
+                .codes
+                .iter()
+                .rev()
+                .filter(|c| c.for_person.is_none())
+                .map(|c| CodeView {
+                    id: c.id,
+                    made_ms: c.made_ms,
+                    expires_ms: c.expires_ms,
+                    once: c.once,
+                    used: c.used_by.len(),
+                })
+                .collect(),
             adding: g.adding.clone(),
             presence: self.presence_on.load(Ordering::SeqCst),
             appear_offline: g.saved.appear_offline,
@@ -417,9 +495,27 @@ impl Contacts {
             .cloned()
     }
 
-    /// Make a one-time contact code.
+    /// Make a contact code on the default [`Terms`].
     pub fn new_code(&self, now_ms: u64) -> io::Result<ContactCode> {
-        self.make_code(None, now_ms)
+        self.new_code_with(Terms::default(), now_ms)
+    }
+
+    /// Make a contact code on the maker's `terms` (cast-ek4).
+    pub fn new_code_with(&self, terms: Terms, now_ms: u64) -> io::Result<ContactCode> {
+        let ttl = terms.ttl_ms.clamp(MIN_CODE_TTL_MS, MAX_CODE_TTL_MS);
+        self.make_code(None, now_ms + ttl, terms.once, now_ms)
+    }
+
+    /// Stop the contact code `id` working.
+    pub fn cancel_code(&self, id: u64) -> Result<(), String> {
+        let mut g = self.lock();
+        let before = g.saved.codes.len();
+        g.saved.codes.retain(|c| c.id != id);
+        if g.saved.codes.len() == before {
+            return Err("no such contact link".into());
+        }
+        info!(id, "contact code cancelled");
+        g.save().map_err(|e| e.to_string())
     }
 
     /// Make a one-time contact code for the person `person` (an id), whom
@@ -427,20 +523,32 @@ impl Contacts {
     /// it from an install of that person is accepted with nobody asked,
     /// since choosing them was the decision.
     pub fn new_code_for(&self, person: &str, now_ms: u64) -> io::Result<ContactCode> {
-        self.make_code(Some(person.to_string()), now_ms)
+        self.make_code(Some(person.to_string()), now_ms + CODE_TTL_MS, true, now_ms)
     }
 
-    fn make_code(&self, for_person: Option<String>, now_ms: u64) -> io::Result<ContactCode> {
+    fn make_code(
+        &self,
+        for_person: Option<String>,
+        expires_ms: u64,
+        once: bool,
+        now_ms: u64,
+    ) -> io::Result<ContactCode> {
         let secret = crate::rendezvous::random()?;
+        // Within 2^53, so a page's JavaScript reads it exactly.
+        let id = u64::from_le_bytes(crate::rendezvous::random()?) >> 11;
         let mut g = self.lock();
         g.expire(now_ms);
-        info!(for_person = ?for_person, "made a contact code");
-        g.codes.push(Code {
+        info!(for_person = ?for_person, expires_ms, once, "made a contact code");
+        g.saved.codes.push(Code {
+            id,
             secret,
             made_ms: now_ms,
-            claim: None,
+            expires_ms,
+            once,
+            used_by: Vec::new(),
             for_person,
         });
+        g.save()?;
         Ok(ContactCode {
             host: self.host.id(),
             secret,
@@ -1119,8 +1227,13 @@ impl Inner {
     }
 
     fn expire(&mut self, now_ms: u64) {
-        self.codes
-            .retain(|c| now_ms.saturating_sub(c.made_ms) <= CODE_TTL_MS);
+        let before = self.saved.codes.len();
+        self.saved.codes.retain(|c| now_ms <= c.expires_ms);
+        if self.saved.codes.len() != before
+            && let Err(e) = self.save()
+        {
+            warn!(error = %e, "could not save the contact codes");
+        }
     }
 
     /// Add or update the contact `person` with what one of their app
@@ -1165,11 +1278,16 @@ impl Inner {
             crate::room::decision(device, "guest", "add contact", false, why);
             ContactAnswer::Refused(why.into())
         };
-        let Some(i) = self.codes.iter().position(|c| b64(&c.secret) == ask.code) else {
+        let Some(i) = self
+            .saved
+            .codes
+            .iter()
+            .position(|c| b64(&c.secret) == ask.code && now_ms <= c.expires_ms)
+        else {
             return refuse("unknown or expired contact code");
         };
-        let code = &mut self.codes[i];
-        if code.claim.is_some_and(|c| c != key) {
+        let code = &mut self.saved.codes[i];
+        if code.once && code.used_by.first().is_some_and(|c| *c != key) {
             return refuse("contact code already used by someone else");
         }
         if code
@@ -1180,8 +1298,10 @@ impl Inner {
             return refuse("this contact code was made for someone else");
         }
         let name = crate::http::clean_label(&ask.name);
-        let first = code.claim.is_none();
-        code.claim = Some(key);
+        let first = !code.used_by.contains(&key);
+        if first {
+            code.used_by.push(key);
+        }
         self.upsert(person, &name, cert, now_ms);
         if first {
             self.board.sweep();

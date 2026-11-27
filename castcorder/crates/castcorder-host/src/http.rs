@@ -30,8 +30,9 @@
 //! - Contacts, for the host machine's own page only (the same guard):
 //!   `GET /contacts` answers [`crate::contact::View`] (`?look=1`: the home
 //!   is open, so presence pings every contact install, at most every few
-//!   minutes); `POST /contacts/code`
-//!   answers `{"links":[...],"code":FRAGMENT}`, a new one-time contact code;
+//!   minutes); `POST /contacts/code` `{"minutes":M?,"once":B?}` (a day and
+//!   single use unless given) answers `{"links":[...],"code":FRAGMENT}`, a
+//!   new contact code; `POST /contacts/code/cancel` `{"id":N}` stops one;
 //!   `POST /contacts/add` `{"code":CODE}` asks the code's person in the
 //!   background (the first install to use a code is added at once);
 //!   `POST /contacts/nickname` `{"person":ID,"nickname":N}`;
@@ -204,6 +205,12 @@ fn contacts_json(app: &App) -> String {
 struct ContactRequest {
     #[serde(default)]
     code: Option<String>,
+    /// `/contacts/code`: how long it lasts, in minutes (cast-ek4).
+    #[serde(default)]
+    minutes: Option<u64>,
+    /// `/contacts/code`: only the first person to use it is added.
+    #[serde(default)]
+    once: Option<bool>,
     #[serde(default)]
     person: Option<String>,
     #[serde(default)]
@@ -236,7 +243,16 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
     match path {
         // With `person`: for that person, chosen in a call (cast-40e.10).
         "/contacts/code" => match r.person.as_deref().map_or_else(
-            || app.contacts.new_code(crate::wall_ms()),
+            || {
+                let mut terms = crate::contact::Terms::default();
+                if let Some(m) = r.minutes {
+                    terms.ttl_ms = m.saturating_mul(60_000);
+                }
+                if let Some(once) = r.once {
+                    terms.once = once;
+                }
+                app.contacts.new_code_with(terms, crate::wall_ms())
+            },
             |p| app.contacts.new_code_for(p, crate::wall_ms()),
         ) {
             Ok(code) => json(
@@ -249,6 +265,10 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
             ),
             Err(e) => text(409, e.to_string()),
         },
+        "/contacts/code/cancel" => done(
+            r.id.ok_or_else(|| "no contact link".to_string())
+                .and_then(|id| app.contacts.cancel_code(id)),
+        ),
         "/contacts/add" => done(
             r.code
                 .clone()
@@ -829,6 +849,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/contacts/code"
+            | "/contacts/code/cancel"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"
@@ -866,6 +887,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         (
             "POST",
             "/contacts/code"
+            | "/contacts/code/cancel"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"
