@@ -300,6 +300,14 @@ pub(super) async fn connect_once(ui: Ui, epoch: u32, conn: u32) -> Result<(), Js
     if !current() {
         return Ok(());
     }
+    // A connection that needs a relay gets none while the host's relay budget
+    // is spent: say so, or the guest only sees it reconnecting (cast-gln).
+    if relay_now
+        && let Some(mb) = &mailbox
+        && crate::signal::relay_quota_spent(mb.relay_error.as_deref())
+    {
+        ui.notes.update(crate::notes::relay_budget_spent);
+    }
     let pc = match &mailbox {
         Some(mb) => RtcPeerConnection::new_with_configuration(&rtc_config(&mb.ice_servers, true))?,
         None => RtcPeerConnection::new()?,
