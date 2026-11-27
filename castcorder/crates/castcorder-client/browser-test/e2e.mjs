@@ -99,7 +99,7 @@ import { takeChecks } from './lib/take.mjs';
 import { micLostChecks, micRecoveredChecks } from './lib/trackchips.mjs';
 import { liveLevelChecks } from './lib/levels.mjs';
 import { themeChecks } from './lib/theme.mjs';
-import { lobbyLinkChecks, topBarLinkChecks } from './lib/link.mjs';
+import { lobbyLinkChecks, topBarLinkChecks, popupCloseChecks } from './lib/link.mjs';
 import { videoChecks } from './lib/video.mjs';
 import { videoRecChecks } from './lib/videorec.mjs';
 import { securityChecks } from './lib/security.mjs';
@@ -221,6 +221,7 @@ try {
   await sleep(1000);
   check((await B.locator('#take-start').count()) === 0, 'producer controls on the localhost page only, not on the HTTPS page');
   await topBarLinkChecks(A, B);
+  await popupCloseChecks(A);
 
   // B receives A's forwarded audio.
   const flowing = await waitFor(async () => {

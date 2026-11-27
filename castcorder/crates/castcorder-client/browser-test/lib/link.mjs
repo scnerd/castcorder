@@ -30,3 +30,37 @@ export async function topBarLinkChecks(A, B) {
     'a guest\'s top bar has no Invite and no link');
   await A.click('#invite');
 }
+
+// Popups close on an outside click and on Escape (cast-1ft): the Invite and
+// "..." menus and the Devices dialog, on the producer's page.
+export async function popupCloseChecks(A) {
+  const outside = () => A.mouse.click(2, 2);
+  for (const [name, button, pop] of [
+    ['Invite', '#invite', '.invite-pop'],
+    ['More', '#more-menu', '.more-pop'],
+  ]) {
+    await A.click(button);
+    check(await A.locator(pop).isVisible(), name + ' menu opens');
+    await outside();
+    check(!(await A.locator(pop).isVisible()), 'a click outside closes the ' + name + ' menu');
+    await A.click(button);
+    await A.keyboard.press('Escape');
+    check(!(await A.locator(pop).isVisible()), 'Escape closes the ' + name + ' menu');
+    await A.click(button);
+    await A.click(button);
+    check(!(await A.locator(pop).isVisible()), 'its own button still closes the ' + name + ' menu');
+  }
+  // Opening one menu while another is open closes the first.
+  await A.click('#invite');
+  await A.click('#more-menu');
+  check(!(await A.locator('.invite-pop').isVisible()) && (await A.locator('.more-pop').isVisible()),
+    'opening More closes Invite');
+  await A.keyboard.press('Escape');
+  // The Devices dialog: a click inside keeps it, outside closes it.
+  await A.click('#devices');
+  await A.waitForSelector('#devices-dialog');
+  await A.locator('#devices-dialog h2').click();
+  check((await A.locator('#devices-dialog').count()) === 1, 'a click inside the Devices dialog keeps it open');
+  await outside();
+  check((await A.locator('#devices-dialog').count()) === 0, 'a click outside closes the Devices dialog');
+}

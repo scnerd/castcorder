@@ -199,6 +199,14 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
     let open = move || room().is_some_and(|r| r.open);
     let new_password = RwSignal::new(String::new());
     let menu = RwSignal::new(None::<u64>);
+    super::popups::register(
+        "row-menu",
+        ".row-menu-wrap",
+        move || menu.try_get_untracked().flatten().is_some(),
+        move || {
+            let _ = menu.try_set(None);
+        },
+    );
     let act = move |a: RoomAction| producer_request(ui, Request::Room(a), false);
     let rows = move || room().map(|r| r.participants).unwrap_or_default();
     let me = move || ui.participant.get().parse::<u64>().ok();
@@ -253,7 +261,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                                 {move || (me() != Some(p.participant.0)).then(|| super::devices::remote_sources(ui, p.participant.0))}
                             </span>
                             <Show when=move || !p.host_machine>
-                                <div class="menu-wrap">
+                                <div class="menu-wrap row-menu-wrap">
                                     <button class="row-menu btn tiny ghost" aria-label="More actions for this person"
                                         aria-expanded=move || if menu.get() == Some(p.participant.0) { "true" } else { "false" }
                                         on:click=move |_| menu.update(|m| *m = if *m == Some(p.participant.0) { None } else { Some(p.participant.0) })>"..."</button>
@@ -684,6 +692,9 @@ fn Call(ui: Ui) -> impl IntoView {
     let invite_open = RwSignal::new(false);
     let phone_more = RwSignal::new(false);
     let more_open = RwSignal::new(false);
+    super::popups::register_flag("invite", ".invite-wrap", invite_open);
+    super::popups::register_flag("more", ".more-wrap", more_open);
+    super::popups::register_flag("phone-more", ".more-dock", phone_more);
     let top_title = move || {
         let r = ui
             .call_ref
@@ -765,7 +776,7 @@ fn Call(ui: Ui) -> impl IntoView {
                 </div>
                 <div class="right">
                     <Show when=producer>
-                        <div class="menu-wrap">
+                        <div class="menu-wrap invite-wrap">
                             <button id="invite" class="btn" aria-expanded=move || if invite_open.get() { "true" } else { "false" }
                                 on:click=move |_| invite_open.update(|o| *o = !*o)>
                                 <Icon name="link" small=true/>"Invite"</button>
@@ -779,7 +790,7 @@ fn Call(ui: Ui) -> impl IntoView {
                     </Show>
                     <button class="btn" id="open-recordings" aria-pressed=move || pressed(Panel::Recordings) on:click=move |_| toggle(Panel::Recordings)>
                         <Icon name="folder" small=true/>"Recordings"</button>
-                    <div class="menu-wrap">
+                    <div class="menu-wrap more-wrap">
                         <button id="more-menu" class="btn" aria-label="More" aria-expanded=move || if more_open.get() { "true" } else { "false" }
                             on:click=move |_| more_open.update(|o| *o = !*o)>"..."</button>
                         <div class="popover more-pop" hidden=move || !more_open.get()>
@@ -955,7 +966,7 @@ fn Call(ui: Ui) -> impl IntoView {
                         </button>
                         <span class="dock-label">{move || if producer() { "People" } else { "Recordings" }}</span>
                     </div>
-                    <div class="dock-item phone-only">
+                    <div class="dock-item phone-only more-dock">
                         <Show when=move || phone_more.get()>
                             <div class="dialog more-sheet" id="more-sheet" role="menu">
                                 <button id="more-self-view" class="btn ghost" on:click=move |_| { phone_more.set(false); ui.self_view.update(|v| *v = !*v) }>
@@ -1122,19 +1133,9 @@ pub(super) fn App() -> impl IntoView {
         cb.forget();
     }
     listen(&window(), "online", Box::new(move || on_wake(ui)));
-    // Escape closes the Devices dialog (cast-3u9).
-    if let Some(d) = window().document() {
-        let cb = Closure::<dyn FnMut(web_sys::Event)>::wrap(Box::new(move |ev: web_sys::Event| {
-            let key = js_sys::Reflect::get(&ev, &JsValue::from_str("key")).ok();
-            if key.and_then(|k| k.as_string()).as_deref() == Some("Escape")
-                && ui.devices.open.get_untracked()
-            {
-                ui.devices.open.set(false);
-            }
-        }));
-        let _ = d.add_event_listener_with_callback("keydown", cb.as_ref().unchecked_ref());
-        cb.forget();
-    }
+    // Outside click and Escape close every popup and dialog (cast-3u9, cast-1ft).
+    popups::register_flag("devices", "#devices-dialog", ui.devices.open);
+    popups::install();
     // The tab title and icon say "recording" too, for a guest in another tab.
     Effect::new(move |_| {
         let take = ui.take.get();

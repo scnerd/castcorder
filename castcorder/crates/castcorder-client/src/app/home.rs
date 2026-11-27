@@ -659,7 +659,7 @@ fn room_card(
                         <Icon name="link" small=true/>
                         <span class="sr-only">{let n = name.clone(); move || if copied.get() == n { "Copied" } else { "Copy link" }}</span>
                     </button>
-                    <details class="room-menu" node_ref=menu>
+                    <details class="room-menu" data-popup node_ref=menu>
                         <summary class="btn icon" title="More for this room" aria-label="More for this room">"..."</summary>
                         <div class="room-menu-items">
                             <button class="menu-item new-call" on:click=move |_| { close_menu(); act("/rooms/call", serde_json::json!({ "room": n2.clone(), "call": null }), "New call started: the next to join lands in it."); }>"Start a fresh call"</button>

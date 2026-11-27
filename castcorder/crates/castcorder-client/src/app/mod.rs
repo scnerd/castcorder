@@ -61,6 +61,7 @@ mod media;
 mod meters;
 mod native;
 mod person;
+mod popups;
 mod recordings;
 mod recvideo;
 mod rejoin;
