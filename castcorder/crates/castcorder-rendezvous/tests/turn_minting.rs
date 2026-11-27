@@ -8,7 +8,7 @@
 //!   gone, no more.
 //! - A host key over its relay budget (a stored ledger) gets no credentials,
 //!   as a host or for its guests (`relay_quota`); the admin listener reports
-//!   its usage.
+//!   its usage. One near it (90% or more) gets short-lived credentials.
 
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
@@ -255,6 +255,7 @@ fn http_get(addr: SocketAddr, path: &str) -> String {
 fn a_host_key_over_its_relay_budget_gets_no_relay_credentials() {
     let over = HostKey::from_secret([21; 32]);
     let under = HostKey::from_secret([22; 32]);
+    let near = HostKey::from_secret([23; 32]);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -265,6 +266,7 @@ fn a_host_key_over_its_relay_budget_gets_no_relay_credentials() {
     let mut ledger = Ledger::default();
     ledger.record(&over.id(), 5_000, now);
     ledger.record(&under.id(), 10, now);
+    ledger.record(&near.id(), 950, now);
     save(&dir.join(LEDGER_FILE), &ledger.to_json()).unwrap();
 
     let (addr, admin) = start_with(Some(Metering {
@@ -292,6 +294,19 @@ fn a_host_key_over_its_relay_budget_gets_no_relay_credentials() {
     let (_, ice, why) = hello(&mut connect(addr, &under.id().encode()));
     assert_eq!(turn_users(&ice).len(), 1);
     assert_eq!(why, None);
+    let expiry =
+        |users: Vec<String>| -> u64 { users[0].split(':').next().unwrap().parse().unwrap() };
+    assert!(expiry(turn_users(&ice)) >= now + 600, "{ice:?}");
+
+    // Near it: minted, but for five minutes (the TTL here is ten), so
+    // coturn reports the sessions' bytes sooner.
+    let (_near_ws, ice, why) = register(addr, &near);
+    assert_eq!(why, None);
+    let e = expiry(turn_users(&ice));
+    assert!(e >= now + 300 && e <= now + 300 + 150 + 5, "{e} vs {now}");
+    let (_, ice, _) = hello(&mut connect(addr, &near.id().encode()));
+    let e = expiry(turn_users(&ice));
+    assert!(e >= now + 300 && e <= now + 300 + 150 + 5, "{e} vs {now}");
 
     // The operator's view on the admin listener.
     let resp = http_get(admin.expect("admin bound"), "/usage");

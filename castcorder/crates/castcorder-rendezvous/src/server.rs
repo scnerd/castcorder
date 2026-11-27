@@ -323,12 +323,13 @@ async fn fetch(url: &str) -> io::Result<String> {
 
 /// Why `host` gets no relay credentials because of its budget, if so.
 /// The credential already minted for `ip` and `host`, if it has more than
-/// half its lifetime left.
-fn reusable(hub: &Hub, ip: IpAddr, host: &HostId, turn: &TurnConfig) -> Option<IceServer> {
+/// half of `ttl` left and was minted with `ttl` or shorter.
+fn reusable(hub: &Hub, ip: IpAddr, host: &HostId, ttl: u64) -> Option<IceServer> {
     let cache = hub.minted.lock().expect("minted lock");
     let s = cache.get(&(ip, *host))?;
     let left = s.expires?.saturating_sub(unix_now());
-    (left > turn.ttl.as_secs() / 2).then(|| s.clone())
+    // Not one minted long-lived before the host key came near its budget.
+    (left > ttl / 2 && left <= ttl + ttl / 2).then(|| s.clone())
 }
 
 /// Keep `s` for the next hello of `ip` to `host`, dropping expired entries.
@@ -337,6 +338,16 @@ fn remember(hub: &Hub, ip: IpAddr, host: HostId, s: &IceServer) {
     let now = unix_now();
     cache.retain(|_, v| v.expires.is_some_and(|e| e > now));
     cache.insert((ip, host), s.clone());
+}
+
+/// Whether `host` is near its relay budget (mint short-lived credentials).
+fn near_budget(hub: &Hub, host: &HostId) -> bool {
+    hub.meter.as_ref().is_some_and(|m| {
+        m.ledger
+            .lock()
+            .expect("ledger lock")
+            .near_budget(host, m.budget, unix_now())
+    })
 }
 
 fn quota_refusal(hub: &Hub, host: &HostId) -> Option<String> {
@@ -501,7 +512,7 @@ fn registered(hub: &Hub, mb: &mut Mailbox, conn: ConnId, outs: &mut [Out], now: 
             quota_refusal(hub, &host),
             now,
         )
-        .map(|()| mint(turn, &host, unix_now()));
+        .map(|()| mint(turn, &host, unix_now(), near_budget(hub, &host)));
     fill_registered(outs, conn, grant);
 }
 
@@ -532,7 +543,8 @@ async fn connection(
                 // that is gone (or never was) mints nothing. A host gets its
                 // own credentials once registered (see `registered`).
                 let over = quota_refusal(&hub, &host);
-                let reuse = reusable(&hub, ip, &host, turn);
+                let near = near_budget(&hub, &host);
+                let reuse = reusable(&hub, ip, &host, turn.ttl_for(near).as_secs());
                 let ask = if reuse.is_some() {
                     RelayAsk::HelloReused
                 } else {
@@ -540,7 +552,7 @@ async fn connection(
                 };
                 match g.0.relay(id, host, ask, proof.as_deref(), over, now) {
                     Ok(()) => ice.push(reuse.unwrap_or_else(|| {
-                        let s = mint(turn, &host, unix_now());
+                        let s = mint(turn, &host, unix_now(), near);
                         remember(&hub, ip, host, &s);
                         s
                     })),

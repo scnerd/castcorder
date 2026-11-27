@@ -36,6 +36,10 @@ use serde::{Deserialize, Serialize};
 pub const WINDOW_DAYS: u64 = castcorder_mailbox::cf_usage::WINDOW_DAYS;
 const DAY_S: u64 = 86_400;
 
+/// From this share of the budget on, a host key's relay credentials are
+/// minted short-lived ([`Ledger::near_budget`]).
+pub const NEAR_BUDGET_PERCENT: u128 = 90;
+
 /// The ledger's file name in the data dir.
 pub const LEDGER_FILE: &str = "relay-usage.json";
 
@@ -241,6 +245,15 @@ impl Ledger {
         (used >= budget).then(|| castcorder_mailbox::cf_usage::budget_refusal(used, budget))
     }
 
+    /// Whether `host` has used [`NEAR_BUDGET_PERCENT`] of `budget` or more
+    /// in the window (its credentials are then minted short-lived, see
+    /// [`crate::turn::NEAR_BUDGET_TTL`]).
+    pub fn near_budget(&self, host: &HostId, budget: Option<u64>, now_unix: u64) -> bool {
+        budget.is_some_and(|b| {
+            u128::from(self.used(host, now_unix)) * 100 >= u128::from(b) * NEAR_BUDGET_PERCENT
+        })
+    }
+
     /// The ledger as stored.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("a ledger serializes")
@@ -379,6 +392,20 @@ mod tests {
         assert_eq!(again.observe(&c, T0 + 60), 20);
         assert_eq!(again.used(&a, T0 + 60), 160);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn near_the_budget_from_ninety_percent() {
+        let a = id(1);
+        let mut l = Ledger::default();
+        l.record(&a, 899, T0);
+        assert!(!l.near_budget(&a, Some(1_000), T0));
+        assert!(!l.near_budget(&a, None, T0));
+        l.record(&a, 1, T0);
+        assert!(l.near_budget(&a, Some(1_000), T0));
+        assert!(l.near_budget(&a, Some(0), T0));
+        l.record(&a, u64::MAX, T0);
+        assert!(l.near_budget(&a, Some(u64::MAX), T0));
     }
 
     #[test]
