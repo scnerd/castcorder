@@ -542,6 +542,9 @@ fn Lobby(ui: Ui) -> impl IntoView {
     }
 }
 
+/// Seconds on the left page, with nothing left to send, before it returns to the rooms.
+const AUTO_HOME_SECS: u32 = 20;
+
 /// After Leave (cast-n56.4): what was left, the recordings on their way to
 /// the host, Rejoin and Your calls (the rooms list below).
 #[component]
@@ -569,6 +572,33 @@ fn LeftPage(
             el.scroll_into_view();
         }
     };
+    // On the host machine the page returns to the rooms by itself (cast-n56.12):
+    // after AUTO_HOME_SECS, counted only while no recordings are on their way
+    // and until the person stays.
+    let local = home::is_local_page();
+    let remaining = RwSignal::new(AUTO_HOME_SECS);
+    let staying = RwSignal::new(false);
+    if local
+        && let Ok(handle) = set_interval_with_handle(
+            move || {
+                if staying.get_untracked() {
+                    return;
+                }
+                if ui.sync_left.get_untracked() > 0 {
+                    remaining.set(AUTO_HOME_SECS);
+                    return;
+                }
+                let r = remaining.get_untracked().saturating_sub(1);
+                remaining.set(r);
+                if r == 0 {
+                    let _ = window().location().set_href("/");
+                }
+            },
+            std::time::Duration::from_secs(1),
+        )
+    {
+        on_cleanup(move || handle.clear());
+    }
     view! {
         <div class="left-main" id="left-call">
             <div class="left-card">
@@ -593,6 +623,15 @@ fn LeftPage(
                     <button id="your-calls" class="btn outline" on:click=your_calls hidden=move || rejoin::load().is_empty()>"Your calls"</button>
                     <button id="left-settings" class="btn ghost" on:click=move |_| gone.summary.set(None)>"Change name or devices"</button>
                 </div>
+                <Show when=move || local>
+                    <div class="row left-home">
+                        <a id="left-home" class="btn primary" href="/">"Back to your rooms"</a>
+                        <span class="small muted" id="left-home-note" hidden=move || staying.get() || sending()>
+                            {move || format!("Going there in {}s.", remaining.get())}
+                            " "<button id="left-stay" class="linklike" on:click=move |_| staying.set(true)>"Stay here"</button>
+                        </span>
+                    </div>
+                </Show>
             </div>
         </div>
     }

@@ -444,6 +444,15 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .invite-list { gap: 4px; }
 .past-calls[open] > summary { margin-bottom: 6px; }
 
+/* The nav is pinned: the home page itself does not scroll, the nav and the place
+   beside it each scroll on their own (cast-n56.1). */
+@media (min-width: 761px) {
+  .lobby.home:has(> .home-shell) { overflow: hidden; }
+  .home-shell { height: 100%; flex: 1 1 auto; }
+  .home-nav { position: static; min-height: 0; height: 100%; overflow-y: auto; }
+  .home-shell > :not(.home-nav) { min-height: 0; overflow-y: auto; }
+}
+
 @media (max-width: 760px) {
   .home-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; align-content: start; }
   .home-nav { flex-direction: row; flex-wrap: wrap; align-items: center; min-height: 0; position: static;
@@ -628,3 +637,12 @@ details.fold > summary > span:first-of-type { margin-right: auto; }
   border-bottom: 1px solid var(--border);
   overflow-wrap: anywhere;
 }
+
+/* Tutorial hints (cast-n56.12): clearly a tip, dismissible, retire by themselves. */
+.hint { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px;
+  border: 1px dashed var(--accent); background: var(--surface2); font-size: 13px; }
+.hint[hidden] { display: none; }
+.hint-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent); }
+.hint-text { flex: 1; color: var(--muted); }
+.linklike { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; }
+.left-home { align-items: center; margin-top: 8px; }

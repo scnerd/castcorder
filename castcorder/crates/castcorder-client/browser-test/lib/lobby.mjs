@@ -83,5 +83,13 @@ export async function lobbyChecks() {
   await L.click('#left-settings');
   check(await L.isVisible('#name') && (await L.inputValue('#name')) === 'Lee',
     'Change name or devices goes back to the lobby with the name kept');
+  // Back from You left: obvious on the host machine's page, and automatic after a while (cast-n56.12).
+  await L.click('#join');
+  await waitFor(async () => (await text(L, '#participant')).length > 0 && !(await L.isVisible('#left-call')), 'L joined again', 30000);
+  await L.click('#leave');
+  await waitFor(() => L.isVisible('#left-call'), 'L left a third time', 10000);
+  check(await L.isVisible('#left-home'), 'You left offers Back to your rooms on the host machine');
+  await waitFor(async () => (await L.locator('#nav-rooms').count()) === 1,
+    'You left returns to the rooms by itself after a while', 40000);
   await L.close();
 }

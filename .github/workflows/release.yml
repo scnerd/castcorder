@@ -428,23 +428,33 @@ jobs:
           xvfb-run -a castcorder-app --smoke 2>&1 | tee smoke.log
           grep -q APP_READY smoke.log
 
+      # Copied flat first: uploading the bundle directories directly would keep their
+      # nested paths inside the artifact's zip. Each platform's artifact then holds just
+      # its installers (and updater signatures) at the root; the draft release attaches
+      # them as bare files.
+      - name: Stage installers
+        shell: bash
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          # The .sig files and the macOS .app.tar.gz exist only with the updater on.
+          for f in \
+            castcorder/target/release/bundle/nsis/*.exe{,.sig} \
+            castcorder/target/release/bundle/msi/*.msi{,.sig} \
+            castcorder/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
+            castcorder/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz{,.sig} \
+            castcorder/target/release/bundle/deb/*.deb \
+            castcorder/target/release/bundle/appimage/*.AppImage{,.sig}; do
+            cp "$f" dist/
+          done
+          ls -l dist
+
       - name: Upload installers
         uses: actions/upload-artifact@v7
         with:
           name: installers-${{ matrix.name }}
           if-no-files-found: error
-          # The .sig files and the macOS .app.tar.gz exist only with the updater on.
-          path: |
-            castcorder/target/release/bundle/nsis/*.exe
-            castcorder/target/release/bundle/nsis/*.exe.sig
-            castcorder/target/release/bundle/msi/*.msi
-            castcorder/target/release/bundle/msi/*.msi.sig
-            castcorder/target/universal-apple-darwin/release/bundle/dmg/*.dmg
-            castcorder/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
-            castcorder/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
-            castcorder/target/release/bundle/deb/*.deb
-            castcorder/target/release/bundle/appimage/*.AppImage
-            castcorder/target/release/bundle/appimage/*.AppImage.sig
+          path: dist/*
 
   # The web client as released, for the Worker to serve at /v/<version>/ (the Cargo
   # workspace version, which the hosts' call links pin) from every later deploy.

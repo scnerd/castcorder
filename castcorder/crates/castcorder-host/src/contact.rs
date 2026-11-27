@@ -755,6 +755,7 @@ impl Contacts {
         if person == self.persons.id() {
             if let Ok(a) = r {
                 self.persons.learn_own_revoked(&a.revoked);
+                self.persons.note_install_name(device, &a.device);
                 if let Some(sync) = &a.sync {
                     self.merge(sync);
                 }
@@ -816,6 +817,8 @@ impl Contacts {
                 return None;
             }
             self.persons.note_installs([key]);
+            self.persons
+                .note_install_name(&device_id(&key), &ping.device);
             if let Some(sync) = &ping.sync {
                 self.merge(sync);
             }
@@ -1208,6 +1211,19 @@ impl Contacts {
         }
         drop(g);
         self.persons.note_revoked(revoked);
+    }
+
+    /// Forget every contact, removal, contact code and invite: this install
+    /// is leaving its person, whose contacts they are (cast-cs9).
+    pub fn forget_person(&self) -> io::Result<()> {
+        let mut g = self.lock();
+        g.saved.contacts.clear();
+        g.saved.removed.clear();
+        g.saved.codes.clear();
+        g.adding = None;
+        g.invites = Default::default();
+        g.board = Board::default();
+        g.save()
     }
 
     /// Link this install to another person ([`Persons::join`]), unless it has

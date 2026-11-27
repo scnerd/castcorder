@@ -276,13 +276,19 @@ try {
   // its answer to the host's restart instead of asking for a second restart
   // seconds later (which, on a lossy network, could leave it with no path).
   const early = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('relay credentials renewed with the host\'s ICE restart') || l.includes('renewed while the host restarted ICE')));
+  // A guest whose credentials were minted well after the host's (it joined
+  // more than ~20% of the TTL later; on a slow CI runner it can) is not near
+  // its renewal at the host's restart: it says so and renews on its own
+  // schedule, asking for one restart of its own then.
+  const late = ['A', 'B'].filter((n) => !early.includes(n) && logs[n].some((l) => l.includes('not near renewal at the host\'s ICE restart')));
   const second = (host.err.slice(at).match(/guest renewed its relay credentials; restarting ICE/g) || []).length;
   // Over TCP the host's restart can come a moment after a guest's own renewal
   // (its reconnect to the rendezvous is slower), and the order is a matter of
   // timing (cast-ej4 tracks the TCP drops); over UDP it reliably comes first.
-  check((early.length === 2 && second === 0) || TURN_TRANSPORT === 'tcp', 'each guest renewed its own relay credentials within the host\'s ICE restart, and none asked for a second restart'
-    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')'
-    + (early.length === 2 && second === 0 ? '' : ' | ' + ['A', 'B'].map((n) => n + ': ' + logs[n].filter((l) => /relay credentials|ICE restart|renew/i.test(l)).slice(-5).join(' / ').slice(0, 700)).join(' | ')));
+  const timely = early.length + late.length === 2 && second <= late.length;
+  check(timely || TURN_TRANSPORT === 'tcp', 'each guest renewed its own relay credentials within the host\'s ICE restart (or, minted later, on its own schedule), and none asked for a second restart'
+    + ' (renewed with it: ' + (early.join(', ') || 'none') + '; later on schedule: ' + (late.join(', ') || 'none') + '; guest-asked restarts: ' + second + ')'
+    + (timely ? '' : ' | ' + ['A', 'B'].map((n) => n + ': ' + logs[n].filter((l) => /relay credentials|ICE restart|renew/i.test(l)).slice(-5).join(' / ').slice(0, 700)).join(' | ')));
   const lost = ['A', 'B'].filter((n) => logs[n].some((l) => l.includes('connection to the host lost')));
   const same = [];
   for (const [n, p] of [['A', A], ['B', B]]) if ((await text(p, '#participant')) === participants[n]) same.push(n);
