@@ -335,7 +335,7 @@ fn parse_code(prefix: &str, s: &str) -> Result<(HostId, [u8; 16]), LinkError> {
 /// Code"): which app install to ask, and the secret it made for this one
 /// request. Shaped like a [`LinkCode`] (`contact.<host-id>.<secret>`), but
 /// it never links a device: the other person asks with it to become a
-/// contact of the person who made it, and that person accepts or declines.
+/// contact of the person who made it, and is added at once.
 /// Not a contact link, which is the connection between contacts' devices.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ContactCode {

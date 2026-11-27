@@ -360,7 +360,8 @@ pub struct ContactAsk {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContactAnswer {
-    /// Nobody has decided yet: ask again.
+    /// Nobody has decided yet: ask again. Only an install from before codes
+    /// were accepted at once (2026-11-27) answers this.
     Pending,
     /// Accepted: the two persons are now contacts.
     Accepted(ContactGrant),

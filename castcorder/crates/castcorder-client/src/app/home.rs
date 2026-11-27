@@ -131,9 +131,6 @@ struct Invites {
     invites: Vec<InviteIn>,
     #[serde(default)]
     invited: Vec<InviteOut>,
-    /// Contact requests waiting (only counted, for the nav).
-    #[serde(default)]
-    requests: Vec<serde_json::Value>,
 }
 
 /// The app's own link for a call link: `castcorder://` in place of the
@@ -385,21 +382,12 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let room_names = leptos::prelude::Signal::derive(move || {
         data.with(|d| d.rooms.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
     });
-    // Contact requests waiting, as a badge on Contacts.
-    let asks = move || invites.with(|v| v.requests.len());
     let nav = move |p: Place, id: &'static str, label: &'static str, icon: &'static str| {
-        let badge = (p == Place::Contacts).then(|| {
-            view! {
-                <Show when=move || asks() != 0>
-                    <span class="nav-badge" title="Contact requests">{asks}</span>
-                </Show>
-            }
-        });
         view! {
             <button id=id class="home-nav-item" class:on=move || place.get() == p
                 aria-current=move || if place.get() == p { "page" } else { "false" }
                 on:click=move |_| place.set(p)>
-                <Icon name=icon small=true/>{label}{badge}
+                <Icon name=icon small=true/>{label}
             </button>
         }
     };

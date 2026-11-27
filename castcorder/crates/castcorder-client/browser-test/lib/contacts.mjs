@@ -8,16 +8,16 @@ import { check, text, waitFor } from './helpers.mjs';
 // mailbox, on the host machine's home in a real browser:
 // - "Add a contact" on the first host's home makes a one-time contact code
 //   naming the rendezvous; a second host install (another person) asks with
-//   it through the mailbox; the request shows on the home by name and
-//   fingerprint, is accepted there, and each install lists the other;
+//   it through the mailbox and is added at once, with nothing to accept
+//   (David, 2026-11-27): the home lists Bob and closes Add contact, and each
+//   install lists the other;
 // - presence: each install sees the other online through the mailbox, and
 //   the home shows Bob online by device name; appear offline toggles there;
 // - a nickname given on the home shows in the list;
 // - the home trusts the contact in a room with the room card's picker, and
 //   stops trusting them;
 // - one-sided: the second install removes the first; the first still lists
-//   it. Asking again, the home declines: the second install is told so and
-//   lists nobody.
+//   it. Using a new code, the second install is added again.
 // `HTTP`: the first host's localhost listener (http://...); `rendezvous`: host:port.
 export async function contactsChecks({ HTTP, rendezvous }) {
   const { exe, dist, RESULTS, chromium, browsers, logs } = ctx;
@@ -67,13 +67,6 @@ export async function contactsChecks({ HTTP, rendezvous }) {
 
   // Bob's install asks with it, through the mailbox.
   await call(HTTP2, '/contacts/add', { code: link });
-  await page.waitForSelector('#contact-requests li .accept-contact', { timeout: 30000 });
-  const asked = await text(page, '#contact-requests li');
-  await waitFor(async () => (await text(page, '#nav-contacts .nav-badge')) === '1', 'contacts: the nav counts the request', 10000);
-  check(asked.includes('Bob Guest wants to add you as a contact') && asked.includes(bob.fingerprint),
-    'contacts: the request reached the home through the mailbox, by name and fingerprint: ' + asked);
-  check((await call(HTTP2, '/contacts')).adding.state === 'waiting', 'contacts: Bob waits for Ann to accept');
-  await page.click('#contact-requests li .accept-contact');
   const added = await waitFor(async () => {
     const a = (await call(HTTP2, '/contacts')).adding;
     return a && a.state !== 'waiting' ? a : null;
@@ -82,6 +75,8 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   check((await call(HTTP2, '/contacts')).contacts.some((c) => c.id === ann.id && c.name === 'Ann Host'),
     'contacts: Bob lists Ann');
   await waitFor(async () => (await text(page, '#contact-list')).includes('Bob Guest'), 'contacts: the home lists Bob', 10000);
+  check(await page.locator('#add-contact-panel').isHidden(), 'contacts: the new contact closed Add contact, so it shows');
+  check(await page.getByRole('button', { name: 'Accept' }).count() === 0, 'contacts: nobody at Ann was asked to accept');
   check((await call(HTTP, '/contacts')).contacts.some((c) => c.id === bob.id), 'contacts: Ann lists Bob');
 
   // Presence (cast-40e.3): sealed pings through the mailbox, sent once they
@@ -197,17 +192,16 @@ export async function contactsChecks({ HTTP, rendezvous }) {
   await call(HTTP2, '/contacts/remove', { person: ann.id });
   check((await call(HTTP2, '/contacts')).contacts.length === 0, 'contacts: Bob removed Ann');
   check((await call(HTTP, '/contacts')).contacts.some((c) => c.id === bob.id), 'contacts: removing is one-sided: Ann still lists Bob');
-  // Bob asks again with a new code; the home declines.
+  // Bob uses a new code of Ann's: added again, Ann still one contact.
   const again = (await call(HTTP, '/contacts/code', {})).links.find((l) => l.startsWith('http://' + rendezvous + '/'));
   await call(HTTP2, '/contacts/add', { code: again });
-  await page.waitForSelector('#contact-requests li .decline-contact', { timeout: 30000 });
-  await page.click('#contact-requests li .decline-contact');
-  const declined = await waitFor(async () => {
+  const readded = await waitFor(async () => {
     const a = (await call(HTTP2, '/contacts')).adding;
     return a && a.state !== 'waiting' ? a : null;
-  }, 'contacts: Bob hears the decline', 30000, 500);
-  check(declined.state === 'failed' && declined.detail === 'declined', 'contacts: declined: ' + JSON.stringify(declined));
-  check((await call(HTTP2, '/contacts')).contacts.length === 0, 'contacts: after a decline Bob lists nobody');
+  }, 'contacts: Bob added again', 30000, 500);
+  check(readded.state === 'added' && (await call(HTTP2, '/contacts')).contacts.some((c) => c.id === ann.id)
+    && (await call(HTTP, '/contacts')).contacts.filter((c) => c.id === bob.id).length === 1,
+  'contacts: a new code pairs them again: ' + JSON.stringify(readded));
   // Settings > Connection and Recordings folder (cast-n56.2), on Ann's
   // home: registered with the rendezvous, presence on, the folder and its
   // free space.

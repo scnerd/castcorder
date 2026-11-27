@@ -110,9 +110,6 @@ fn contacts_see_each_other_online_through_the_rendezvous() {
     let links = a.contact_code().unwrap();
     let lan = links.iter().find(|l| !l.contains("/v/")).unwrap();
     b.add_contact(lan).unwrap();
-    wait("Bob's request at Ann", || a.contacts().requests.len() == 1);
-    a.decide_contact(&a.contacts().requests[0].device.clone(), true)
-        .unwrap();
     wait("Bob to be added", || b.contacts().contacts.len() == 1);
 
     // Each sees the other online, by device name.
@@ -168,9 +165,6 @@ fn a_person_s_installs_share_contacts_through_the_rendezvous() {
     });
     let links = a.contact_code().unwrap();
     b.add_contact(links.iter().find(|l| !l.contains("/v/")).unwrap())
-        .unwrap();
-    wait("Bob's request at Ann", || a.contacts().requests.len() == 1);
-    a.decide_contact(&a.contacts().requests[0].device.clone(), true)
         .unwrap();
     wait("Bob to be added", || b.contacts().contacts.len() == 1);
 

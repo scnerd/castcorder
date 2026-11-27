@@ -3,10 +3,10 @@
 //! real TCP and TLS between them.
 //!
 //! - Ann's install makes a contact code; Bob's install asks with it over
-//!   Ann's LAN listener (sealed to Ann's host key) and waits; Ann sees the
-//!   request by Bob's name and fingerprint and accepts; each now lists the
-//!   other. A nickname survives a restart; removing is one-sided.
-//! - Cy uses another code of Ann's; Ann declines: neither lists the other.
+//!   Ann's LAN listener (sealed to Ann's host key) and is added at once,
+//!   nobody at Ann asked; each now lists the other. A nickname survives a
+//!   restart; removing is one-sided.
+//! - Cy uses the code Bob used: refused, neither lists the other.
 //! - Room trust for a person: Bob's install key, with its certificate, is
 //!   kept out of Ann's locked room until Ann trusts Bob's person there (Cy,
 //!   not a contact, cannot be trusted), then enters; taken back, it is kept
@@ -151,15 +151,7 @@ fn two_persons_pair_mutually_and_a_room_can_trust_a_contact() {
     assert!(a.add_contact(&links[0]).is_err());
     b.add_contact(&links[0]).unwrap();
 
-    // Bob waits until Ann accepts, by his name and fingerprint.
-    wait("Bob's request at Ann", || a.contacts().requests.len() == 1);
-    let req = a.contacts().requests[0].clone();
-    assert_eq!(req.name, "Bob");
-    assert_eq!(req.person, bob);
-    assert_eq!(req.fingerprint, b.person().fingerprint);
-    assert_eq!(b.contacts().adding, Some(Adding::Waiting));
-    assert!(a.contacts().contacts.is_empty());
-    a.decide_contact(&req.device, true).unwrap();
+    // Bob is added at once: Ann made and sent the code (David, 2026-11-27).
     wait("Bob to be added", || {
         b.contacts().adding == Some(Adding::Added("Ann".into()))
     });
@@ -179,17 +171,17 @@ fn two_persons_pair_mutually_and_a_room_can_trust_a_contact() {
     assert_eq!(b.contact(&ann).unwrap().devices, vec![a.person_cert()]);
     assert_eq!(a.contact(&bob).unwrap().devices, vec![b.person_cert()]);
 
-    // Cy asks with another code; Ann declines.
-    let links = a.contact_code().unwrap();
+    // Cy got hold of the code Bob used: refused.
     c.add_contact(&links[0]).unwrap();
-    wait("Cy's request at Ann", || a.contacts().requests.len() == 1);
-    let req = a.contacts().requests[0].clone();
-    assert_eq!(req.person, cy);
-    a.decide_contact(&req.device, false).unwrap();
     wait("Cy to be refused", || {
         matches!(c.contacts().adding, Some(Adding::Failed(_)))
     });
-    assert_eq!(c.contacts().adding, Some(Adding::Failed("declined".into())));
+    assert!(
+        matches!(&c.contacts().adding, Some(Adding::Failed(w)) if w.contains("someone else")),
+        "{:?}",
+        c.contacts().adding
+    );
+    assert!(a.contact(&cy).is_none());
     assert!(c.contacts().contacts.is_empty());
     assert_eq!(a.contacts().contacts.len(), 1, "only Bob");
 

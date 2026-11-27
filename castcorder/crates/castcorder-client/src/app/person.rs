@@ -341,14 +341,6 @@ impl ContactItem {
     }
 }
 
-/// A contact request waiting for a decision.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-struct ContactAskItem {
-    device: String,
-    fingerprint: String,
-    name: String,
-}
-
 /// One room a contact shares (`GET /contacts/rooms`, castcorder-protocol
 /// `SharedRoom`).
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -421,7 +413,6 @@ struct SentItem {
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct ContactsView {
     contacts: Vec<ContactItem>,
-    requests: Vec<ContactAskItem>,
     adding: Option<Joining>,
     /// Presence pings run (the app has a rendezvous).
     #[serde(default)]
@@ -461,8 +452,8 @@ enum Shared {
     Failed(String),
 }
 
-/// Home > Contacts (docs/design.md "Contacts", cast-40e.13): requests to
-/// accept or decline, contacts grouped Online and Offline with presence and
+/// Home > Contacts (docs/design.md "Contacts", cast-40e.13): contacts
+/// grouped Online and Offline with presence and
 /// Invite, a detail pane for the picked one (invite to a room, join their
 /// live call, nickname, rooms you share, remove), and Add contact (copy my
 /// contact link, or paste one). `list` is shared with the rooms' trust
@@ -516,8 +507,9 @@ pub(super) fn ContactsCard(
                             {
                                 selected.set(None);
                             }
-                            // A new request: close Add contact, so it shows.
-                            if v.requests.len() > data.with_untracked(|d| d.requests.len()) {
+                            // A new contact (they used my link): close Add
+                            // contact, so it shows.
+                            if v.contacts.len() > data.with_untracked(|d| d.contacts.len()) {
                                 adding_open.set(false);
                             }
                             data.set(v);
@@ -567,7 +559,7 @@ pub(super) fn ContactsCard(
                     }
                     links.set(all);
                     message.set(
-                        "Copied. Send it to the person you want to add: it works once, for 10 minutes. Then accept their request here."
+                        "Copied. Send it to the person you want to add: it works once, for 10 minutes. Whoever uses it becomes your contact, with nothing to accept."
                             .into(),
                     );
                 }
@@ -581,7 +573,7 @@ pub(super) fn ContactsCard(
         post(
             "/contacts/add",
             serde_json::json!({ "code": c }),
-            "Asked: they accept it on their side.",
+            "Adding...",
         )
     };
     // Ask the contact's installs which rooms they share, over contact links.
@@ -689,41 +681,13 @@ pub(super) fn ContactsCard(
             </header>
             <span id="contacts-message" class="small muted" role="status">{move || message.get()}</span>
             <span id="contact-adding" class="small muted">{move || match data.get().adding {
-                Some(j) if j.state == "waiting" => "Waiting for them to accept".to_string(),
+                Some(j) if j.state == "waiting" => "Adding...".to_string(),
                 Some(j) if j.state == "added" => format!("Added {} as a contact", j.detail.unwrap_or_default()),
                 Some(j) => format!("Not added: {}", j.detail.unwrap_or_default()),
                 None => String::new(),
             }}</span>
             <div class="contacts-cols">
                 <div class="contacts-lists">
-                    <Show when=move || !data.with(|v| v.requests.is_empty())>
-                        <section class="contact-requests-card" aria-label="Requests">
-                            <span class="group-label accent">"Requests"</span>
-                            <ul id="contact-requests" class="list">
-                                <For each=move || data.get().requests key=|r| r.device.clone() let:r>
-                                    {
-                                        let (d1, d2) = (r.device.clone(), r.device.clone());
-                                        let who = if r.name.is_empty() { "Someone".to_string() } else { r.name.clone() };
-                                        view! {
-                                            <li class="contact-request" data-device=r.device.clone()>
-                                                {avatar(&who, None, false)}
-                                                <span class="contact-text">
-                                                    <span>{format!("{who} wants to add you as a contact")}</span>
-                                                    <span class="small muted">{format!("Fingerprint {}", r.fingerprint)}</span>
-                                                </span>
-                                                <span class="call-actions">
-                                                    <button class="btn tiny outline decline-contact"
-                                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d2.clone(), "accept": false }), "Declined.")>"Decline"</button>
-                                                    <button class="btn tiny primary accept-contact"
-                                                        on:click=move |_| post("/contacts/decide", serde_json::json!({ "device": d1.clone(), "accept": true }), "Contact added.")>"Accept"</button>
-                                                </span>
-                                            </li>
-                                        }
-                                    }
-                                </For>
-                            </ul>
-                        </section>
-                    </Show>
                     <div id="contact-list">
                         <Show when=presence_on fallback=move || view! {
                             <section aria-label="Contacts">
