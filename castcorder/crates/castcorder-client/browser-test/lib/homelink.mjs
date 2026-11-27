@@ -123,7 +123,7 @@ export async function homeLinkChecks() {
   check((await P.locator('#leave-person').innerText()).trim() === 'Leave for good?', 'Leave asks once more before leaving');
   check(errors.length === 0, 'the link page raised no page errors: ' + errors.join('; '));
 
-  // The Rooms explanation is a dismissible tip that stays gone (cast-n56.12).
+  // The Rooms explanation is a dismissible tip that stays gone (cast-cjs).
   await P.click('#nav-rooms');
   const tip = P.locator('[data-hint="rooms-link"]');
   check(await tip.isVisible(), 'the Rooms page shows its explanation as a tip');

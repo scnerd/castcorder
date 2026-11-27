@@ -638,7 +638,7 @@ details.fold > summary > span:first-of-type { margin-right: auto; }
   overflow-wrap: anywhere;
 }
 
-/* Tutorial hints (cast-n56.12): clearly a tip, dismissible, retire by themselves. */
+/* Tutorial hints (cast-cjs): clearly a tip, dismissible, retire by themselves. */
 .hint { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px;
   border: 1px dashed var(--accent); background: var(--surface2); font-size: 13px; }
 .hint[hidden] { display: none; }

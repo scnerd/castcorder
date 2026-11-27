@@ -1,6 +1,6 @@
 //! Tutorial hints: a short explanation that looks like one (a "Tip" box with
 //! "Got it") and goes away for good, on this browser profile, once dismissed or
-//! once it has been shown on a few page loads (cast-n56.12). Explanations that
+//! once it has been shown on a few page loads (cast-cjs). Explanations that
 //! stay on the page forever read as clutter once the topic is known.
 
 use leptos::prelude::*;
