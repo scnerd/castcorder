@@ -32,7 +32,7 @@ use castcorder_app::host_control::{
     Badge, HostControl, TrayRoom, bridge_allows, tray_badge, tray_room_label, tray_room_of,
     tray_text,
 };
-use castcorder_app::{deeplink, remembered};
+use castcorder_app::{deeplink, external, remembered};
 use tauri::ipc::CapabilityBuilder;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -275,6 +275,13 @@ fn setup(app: &AppHandle, args: &AppArgs) {
             }
             true
         })
+        // The home's "Report a bug" link opens GitHub in the system browser.
+        .on_new_window(|u, _| {
+            if !external::open_bug_report(u.as_str()) {
+                tracing::warn!(url = %u, "a page asked for a new window; refused");
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
         .title("Castcorder")
         .inner_size(1100.0, 760.0)
         .visible(!args.hidden)
@@ -339,6 +346,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let report = MenuItem::with_id(app, "report_bug", "Report a bug", true, None::<&str>)?;
     let update_item = updates::item(app, smoke);
     let menu = Menu::with_items(
         app,
@@ -348,6 +356,7 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             &open,
             &folder,
             &rooms_menu,
+            &report,
             &login,
         ],
     )?;
@@ -378,6 +387,11 @@ fn tray(app: &AppHandle, smoke: bool) -> tauri::Result<()> {
             "open_folder" => {
                 if let Err(e) = app.state::<Shell>().host.open_recordings_folder() {
                     tracing::warn!(error = %e, "recordings folder not opened");
+                }
+            }
+            "report_bug" => {
+                if !external::open_bug_report(&external::bug_report_url()) {
+                    tracing::warn!("the bug report page could not be opened");
                 }
             }
             updates::ID => updates::clicked(app),
