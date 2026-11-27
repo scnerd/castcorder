@@ -653,6 +653,15 @@ pub(super) async fn renew_with_host_restart(pc: &RtcPeerConnection, offer: &str)
         })
     });
     if !near {
+        // Minted well after the host's (a guest that joined later): renewing
+        // now would cut their life short; they renew on their own schedule
+        // and ask for a restart of their own then.
+        if let Some(due) = with_engine(|e| renewal_of(e, pc).map(|r| r.due_ms)) {
+            info!(
+                renew_in_s = ((due - js_sys::Date::now()) / 1000.0).round(),
+                "relay credentials not near renewal at the host's ICE restart; renewing on schedule"
+            );
+        }
         return;
     }
     match renew_credentials(pc).await {

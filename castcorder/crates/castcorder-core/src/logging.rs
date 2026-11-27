@@ -284,7 +284,16 @@ pub struct RotatingLog<S: Storage> {
     seq: u32,
     file: Option<S::File>,
     len: u64,
+    /// When the open file was opened: it is closed and reopened every
+    /// [`REOPEN_EVERY`], see [`RotatingLog::write_line`].
+    opened: Option<std::time::Instant>,
 }
+
+/// How long the log file stays open before it is closed and reopened. Windows
+/// reports an open file's size in directory listings (Explorer, `dir`) as of
+/// when it was opened, so a running app's log looked empty for hours; closing
+/// it brings the listing up to date.
+const REOPEN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl<S: Storage> RotatingLog<S> {
     /// Log into `dir`; nothing is created until the first line.
@@ -296,6 +305,7 @@ impl<S: Storage> RotatingLog<S> {
             seq: 0,
             file: None,
             len: 0,
+            opened: None,
         }
     }
 
@@ -312,6 +322,11 @@ impl<S: Storage> RotatingLog<S> {
     /// one would pass the size limit.
     pub fn write_line(&mut self, line: &str) -> io::Result<()> {
         let bytes = line.len() as u64 + 1;
+        if self.opened.is_some_and(|t| t.elapsed() >= REOPEN_EVERY)
+            && let Some(mut f) = self.file.take()
+        {
+            f.sync()?;
+        }
         if self.file.is_some() && self.len > 0 && self.len + bytes > self.max_bytes {
             if let Some(mut f) = self.file.take() {
                 f.sync()?;
@@ -324,6 +339,7 @@ impl<S: Storage> RotatingLog<S> {
             let f = self.dir.open(&name)?;
             self.len = f.len()?;
             self.file = Some(f);
+            self.opened = Some(std::time::Instant::now());
         }
         let f = self.file.as_mut().expect("opened above");
         let mut buf = Vec::with_capacity(line.len() + 1);
