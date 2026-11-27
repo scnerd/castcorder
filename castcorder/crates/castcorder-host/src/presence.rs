@@ -435,6 +435,43 @@ fn send(
 /// How often the counts of presence pings are logged.
 const TRAFFIC_LOG: Duration = Duration::from_secs(60 * 60);
 
+/// Tell the person's other app installs `installs`, through the rendezvous
+/// at `base`, that this one is leaving the person (cast-cs9): one ping each,
+/// from this install as it still is, carrying `revocation` (of itself) with
+/// the person's others, so each drops it as it would a removed device. Waits
+/// at most [`Timing::bye`]; an install that is offline does not hear it, and
+/// can remove this one by hand. How many pings went.
+pub fn tell_leaving_person(
+    contacts: &crate::contact::Contacts,
+    base: &str,
+    installs: Vec<HostId>,
+    revocation: castcorder_link::person::Revocation,
+) -> usize {
+    let wait = contacts.timing().bye;
+    let handles: Vec<_> = installs
+        .into_iter()
+        .filter_map(|to| {
+            let mut me = contacts.me();
+            me.revoked.push(revocation.clone());
+            let base = base.to_string();
+            thread::Builder::new()
+                .name("leaving-person".into())
+                .spawn(move || {
+                    let r = ping(&me, &to, crate::wall_ms(), &mut |sealed| {
+                        crate::rendezvous::exchange_within(&base, &to, sealed, wait)
+                    });
+                    debug!(device = %to.short(), answered = r.is_ok(), "told an install of the person this one leaves");
+                })
+                .ok()
+        })
+        .collect();
+    let n = handles.len();
+    for h in handles {
+        let _ = h.join();
+    }
+    n
+}
+
 /// Send presence pings through the rendezvous at `base` until `stop` is set;
 /// then tell the installs shown online that this one is leaving, waiting at
 /// most [`Timing::bye`] for them.

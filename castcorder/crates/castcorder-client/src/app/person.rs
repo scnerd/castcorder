@@ -32,6 +32,16 @@ struct Linked {
     kind: String,
 }
 
+/// Another of the person's app installs this one knows but did not link
+/// (cast-cs9).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct OtherInstall {
+    id: String,
+    #[serde(default)]
+    name: String,
+    fingerprint: String,
+}
+
 /// A link request waiting for a decision.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct LinkRequest {
@@ -57,6 +67,8 @@ struct PersonView {
     device_name: String,
     fingerprint: String,
     devices: Vec<Linked>,
+    #[serde(default)]
+    installs: Vec<OtherInstall>,
     requests: Vec<LinkRequest>,
     joining: Option<Joining>,
 }
@@ -115,6 +127,8 @@ pub(super) fn PersonCard() -> impl IntoView {
     // The linked device whose Remove was pressed once: the second press
     // revokes it (cast-40e.6).
     let removing = RwSignal::new(None::<String>);
+    // Leave was pressed once: the second press leaves (cast-cs9).
+    let leaving = RwSignal::new(false);
     let refresh = move || {
         spawn_local(async move {
             match person_request("/person", None).await {
@@ -264,6 +278,34 @@ pub(super) fn PersonCard() -> impl IntoView {
                         }
                     }
                 </For>
+                <For each=move || data.get().installs key=|d| d.id.clone() let:d>
+                    {
+                        let (id1, id2) = (d.id.clone(), d.id.clone());
+                        let asked = move || removing.get().as_deref() == Some(id1.as_str());
+                        let name = if d.name.is_empty() { "Another of your Castcorder apps".to_string() } else { d.name.clone() };
+                        view! {
+                    <li class="device-row other-install" data-device=d.id.clone()>
+                        <Icon name="screen" small=true/>
+                        <span class="contact-text">
+                            <span class="contact-name">{name}</span>
+                            <span class="small muted">{format!("Castcorder app \u{b7} fingerprint {}", d.fingerprint)}</span>
+                        </span>
+                        <button class="btn tiny outline revoke-device"
+                            title="It stops being yours everywhere: your rooms and your contacts stop trusting it. Lost or sold devices."
+                            on:click=move |_| {
+                                if removing.get_untracked().as_deref() == Some(id2.as_str()) {
+                                    removing.set(None);
+                                    post("/person/revoke", serde_json::json!({ "device": id2.clone() }), "Device removed.");
+                                } else {
+                                    removing.set(Some(id2.clone()));
+                                }
+                            }>
+                            {move || if asked() { "Remove for good?" } else { "Remove" }}
+                        </button>
+                    </li>
+                        }
+                    }
+                </For>
             </ul>
             <div class="row">
                 <button id="link-device" class="btn primary" on:click=make_code>"Link another device"</button>
@@ -283,6 +325,24 @@ pub(super) fn PersonCard() -> impl IntoView {
                         on:input=move |ev| code.set(event_target_value(&ev)) />
                     <button id="join-person" class="btn" disabled=move || code.get().trim().is_empty() on:click=join>"Link this app"</button>
                 </div>
+            </details>
+            <details class="leave-person">
+                <summary>"This computer changed hands?"</summary>
+                <span class="small muted">{move || {
+                    let who = data.with(|d| if d.name.is_empty() { "your".to_string() } else { format!("{}'s", d.name) });
+                    format!("Take it out of {who} devices. Your other devices that are online now drop it (remove it there if one is not), and it starts over as a new person with no contacts. Its rooms and recordings stay on it.")
+                }}</span>
+                <button id="leave-person" class="btn outline"
+                    on:click=move |_| {
+                        if leaving.get_untracked() {
+                            leaving.set(false);
+                            post("/person/leave", serde_json::json!({}), "This computer left. It is a new person now.");
+                        } else {
+                            leaving.set(true);
+                        }
+                    }>
+                    {move || if leaving.get() { "Leave for good?" } else { "Leave" }}
+                </button>
             </details>
             <span id="joining" class="small muted">{move || match data.get().joining {
                 Some(j) if j.state == "waiting" => "Waiting for approval on the other device".to_string(),
@@ -419,10 +479,53 @@ struct SentItem {
     delivered: bool,
 }
 
+/// A contact link this install made (`GET /contacts`, `links`; cast-ek4).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct CodeItem {
+    id: u64,
+    expires_ms: u64,
+    once: bool,
+    #[serde(default)]
+    used: usize,
+}
+
+impl CodeItem {
+    fn line(&self) -> String {
+        let who = match (self.once, self.used) {
+            (true, 0) => "for one person, not used yet".to_string(),
+            (true, _) => "for one person, used".to_string(),
+            (false, 0) => "for anyone with it, not used yet".to_string(),
+            (false, 1) => "for anyone with it, used once".to_string(),
+            (false, n) => format!("for anyone with it, used {n} times"),
+        };
+        format!("Works until {}, {who}", super::home::when(self.expires_ms))
+    }
+}
+
+/// How long a new contact link lasts: the picker's choices, in minutes.
+const LIFETIMES: [(u64, &str); 5] = [
+    (60, "1 hour"),
+    (24 * 60, "1 day"),
+    (3 * 24 * 60, "3 days"),
+    (7 * 24 * 60, "1 week"),
+    (30 * 24 * 60, "30 days"),
+];
+
+/// "1 day", for a lifetime in minutes from [`LIFETIMES`].
+fn lifetime_label(minutes: u64) -> &'static str {
+    LIFETIMES
+        .iter()
+        .find(|(m, _)| *m == minutes)
+        .map_or("1 day", |(_, l)| l)
+}
+
 /// `GET /contacts`.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct ContactsView {
     contacts: Vec<ContactItem>,
+    /// Contact links this install made that still work, newest first.
+    #[serde(default)]
+    links: Vec<CodeItem>,
     adding: Option<Joining>,
     /// Presence pings run (the app has a rendezvous).
     #[serde(default)]
@@ -478,6 +581,9 @@ pub(super) fn ContactsCard(
     let links = RwSignal::new(Vec::<String>::new());
     let code = RwSignal::new(String::new());
     let adding_open = RwSignal::new(false);
+    // The new contact link's lifetime (minutes) and whether one person only.
+    let lifetime = RwSignal::new(24 * 60u64);
+    let once = RwSignal::new(true);
     super::popups::register_flag("add-contact", ".add-contact-wrap", adding_open);
     let selected = RwSignal::new(None::<String>);
     let nick = RwSignal::new(String::new());
@@ -549,7 +655,9 @@ pub(super) fn ContactsCard(
     };
     let copy_link = move |_| {
         spawn_local(async move {
-            match person_request("/contacts/code", Some("{}".into())).await {
+            let (minutes, one) = (lifetime.get_untracked(), once.get_untracked());
+            let body = serde_json::json!({ "minutes": minutes, "once": one }).to_string();
+            match person_request("/contacts/code", Some(body)).await {
                 Ok(t) => {
                     let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
                     let all: Vec<String> = v["links"]
@@ -568,10 +676,16 @@ pub(super) fn ContactsCard(
                         );
                     }
                     links.set(all);
-                    message.set(
-                        "Copied. Send it to the person you want to add: it works once, for 10 minutes. Whoever uses it becomes your contact, with nothing to accept."
-                            .into(),
-                    );
+                    let who = if one {
+                        "Whoever uses it first becomes your contact"
+                    } else {
+                        "Everyone who uses it becomes your contact"
+                    };
+                    message.set(format!(
+                        "Copied. Send it to the person you want to add: it works for {}. {who}, with nothing to accept.",
+                        lifetime_label(minutes)
+                    ));
+                    refresh();
                 }
                 Err(e) => message.set(e),
             }
@@ -670,7 +784,25 @@ pub(super) fn ContactsCard(
                     </button>
                     <div id="add-contact-panel" class="add-contact-panel" role="dialog" aria-label="Add a contact" hidden=move || !adding_open.get()>
                         <strong>"Add a contact"</strong>
-                        <span class="small muted">"Send them your contact link. It works once, for 10 minutes."</span>
+                        <span class="small muted">"Send them your contact link. Whoever uses it becomes your contact."</span>
+                        <div class="row contact-link-terms">
+                            <label class="field" for="contact-link-life">"Works for"</label>
+                            <select id="contact-link-life"
+                                on:change=move |ev| {
+                                    if let Ok(m) = event_target_value(&ev).parse() {
+                                        lifetime.set(m);
+                                    }
+                                }>
+                                {LIFETIMES.iter().map(|(m, label)| view! {
+                                    <option value=m.to_string() selected=move || lifetime.get() == *m>{*label}</option>
+                                }).collect_view()}
+                            </select>
+                            <label class="check">
+                                <input id="contact-link-once" type="checkbox" prop:checked=move || once.get()
+                                    on:change=move |ev| once.set(event_target_checked(&ev)) />
+                                "One person only"
+                            </label>
+                        </div>
                         <button id="copy-contact-link" class="btn" on:click=copy_link>
                             <Icon name="link" small=true/>"Copy my contact link"
                         </button>
@@ -679,6 +811,23 @@ pub(super) fn ContactsCard(
                                 <li class="linkbar"><code class="contact-code">{l}</code></li>
                             </For>
                         </ul>
+                        <Show when=move || !data.with(|v| v.links.is_empty())>
+                            <span class="small muted">"Your links that still work"</span>
+                            <ul id="contact-links" class="list">
+                                <For each=move || data.get().links key=|l| (l.id, l.used) let:l>
+                                    {
+                                        let id = l.id;
+                                        view! {
+                                            <li class="contact-link-row row" data-id=id.to_string()>
+                                                <span class="small">{l.line()}</span>
+                                                <button class="btn tiny outline cancel-contact-link"
+                                                    on:click=move |_| post("/contacts/code/cancel", serde_json::json!({ "id": id }), "Link cancelled: it no longer works.")>"Cancel"</button>
+                                            </li>
+                                        }
+                                    }
+                                </For>
+                            </ul>
+                        </Show>
                         <span class="or-rule small muted">"or"</span>
                         <label class="field" for="contact-code-input">"Paste a link someone sent you"</label>
                         <div class="row">

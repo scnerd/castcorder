@@ -30,8 +30,9 @@
 //! - Contacts, for the host machine's own page only (the same guard):
 //!   `GET /contacts` answers [`crate::contact::View`] (`?look=1`: the home
 //!   is open, so presence pings every contact install, at most every few
-//!   minutes); `POST /contacts/code`
-//!   answers `{"links":[...],"code":FRAGMENT}`, a new one-time contact code;
+//!   minutes); `POST /contacts/code` `{"minutes":M?,"once":B?}` (a day and
+//!   single use unless given) answers `{"links":[...],"code":FRAGMENT}`, a
+//!   new contact code; `POST /contacts/code/cancel` `{"id":N}` stops one;
 //!   `POST /contacts/add` `{"code":CODE}` asks the code's person in the
 //!   background (the first install to use a code is added at once);
 //!   `POST /contacts/nickname` `{"person":ID,"nickname":N}`;
@@ -45,7 +46,9 @@
 //!   `POST /person/code` answers `{"links":[...],"code":FRAGMENT}`, a new
 //!   one-time link; `POST /person/decide` `{"device":ID,"approve":B}`;
 //!   `POST /person/join` `{"code":LINK}` links this install to another
-//!   person in the background. Each answers the view, or 409 with why.
+//!   person in the background; `POST /person/revoke` `{"device":ID}` removes
+//!   one of the person's devices; `POST /person/leave` takes this install
+//!   out of its person (it starts over as a new one, cast-cs9). Each answers the view, or 409 with why.
 //! - Producer controls go over the control channel (castcorder-protocol
 //!   `Request::StartTake`, `Request::Room`), authorized per device role. For
 //!   scripts on the host machine only (403 elsewhere): `POST /take/start` and `POST /take/stop`
@@ -204,6 +207,12 @@ fn contacts_json(app: &App) -> String {
 struct ContactRequest {
     #[serde(default)]
     code: Option<String>,
+    /// `/contacts/code`: how long it lasts, in minutes (cast-ek4).
+    #[serde(default)]
+    minutes: Option<u64>,
+    /// `/contacts/code`: only the first person to use it is added.
+    #[serde(default)]
+    once: Option<bool>,
     #[serde(default)]
     person: Option<String>,
     #[serde(default)]
@@ -236,7 +245,16 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
     match path {
         // With `person`: for that person, chosen in a call (cast-40e.10).
         "/contacts/code" => match r.person.as_deref().map_or_else(
-            || app.contacts.new_code(crate::wall_ms()),
+            || {
+                let mut terms = crate::contact::Terms::default();
+                if let Some(m) = r.minutes {
+                    terms.ttl_ms = m.saturating_mul(60_000);
+                }
+                if let Some(once) = r.once {
+                    terms.once = once;
+                }
+                app.contacts.new_code_with(terms, crate::wall_ms())
+            },
             |p| app.contacts.new_code_for(p, crate::wall_ms()),
         ) {
             Ok(code) => json(
@@ -249,6 +267,10 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
             ),
             Err(e) => text(409, e.to_string()),
         },
+        "/contacts/code/cancel" => done(
+            r.id.ok_or_else(|| "no contact link".to_string())
+                .and_then(|id| app.contacts.cancel_code(id)),
+        ),
         "/contacts/add" => done(
             r.code
                 .clone()
@@ -314,6 +336,11 @@ fn person_post(app: &App, path: &str, r: PersonRequest) -> Response {
                 .ok_or_else(|| "no device".to_string())
                 .and_then(|d| app.persons.revoke(&d, now)),
         ),
+        "/person/leave" => done(crate::leave_person(
+            &app.persons,
+            &app.contacts,
+            app.call_links.base.as_ref().map(|b| b.base.as_str()),
+        )),
         _ => done(
             r.code
                 .ok_or_else(|| "no link code".to_string())
@@ -833,6 +860,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         | (
             "POST",
             "/contacts/code"
+            | "/contacts/code/cancel"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"
@@ -870,6 +898,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         (
             "POST",
             "/contacts/code"
+            | "/contacts/code/cancel"
             | "/contacts/add"
             | "/contacts/nickname"
             | "/contacts/remove"
@@ -909,7 +938,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
             | "/rooms" | "/rooms/link" | "/rooms/call" | "/rooms/archive" | "/rooms/rename"
-            | "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
+            | "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
+            | "/person/leave",
         ) if !native_allowed(req, producer) => text(
             403,
             "the native microphone and the rooms are only available to the host machine's own page",
@@ -938,7 +968,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         ("GET", "/joined-rooms") => json(200, crate::joined::read(&app.library)),
         (
             "POST",
-            "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke",
+            "/person" | "/person/code" | "/person/decide" | "/person/join" | "/person/revoke"
+            | "/person/leave",
         ) => {
             let r = match serde_json::from_slice::<PersonRequest>(&req.body) {
                 Ok(r) => r,
