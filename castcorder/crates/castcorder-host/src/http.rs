@@ -109,6 +109,8 @@ pub struct App {
     pub contacts: crate::contact::Contacts,
     /// Contact links (`/contacts/rooms`), with a rendezvous.
     pub contact_links: Option<crate::contact_link::Links>,
+    /// Moves the library for the app embedding the host (cast-hs4).
+    pub relocate: Option<crate::library::Relocate>,
 }
 
 /// `GET /person`: the person as the home shows it (never the key).
@@ -129,7 +131,8 @@ fn settings_json(app: &App) -> String {
         .map(|h| h.clone())
         .unwrap_or_default();
     serde_json::json!({
-        "library": app.library.display().to_string(),
+        "library": std::path::absolute(&app.library).unwrap_or_else(|_| app.library.clone()).display().to_string(),
+        "library_movable": app.relocate.is_some(),
         "free_bytes": free,
         "total_bytes": total,
         "audio_secs_left": free.map(|f| diskspace::seconds_left(f, false)),
@@ -923,6 +926,7 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
             }
         }
         ("GET", "/native" | "/rooms" | "/person" | "/settings" | "/joined-rooms")
+        | ("POST", "/settings/library")
         | (
             "POST",
             "/native/join" | "/native/leave" | "/native/mute" | "/native/switch" | "/native/backup"
@@ -953,6 +957,30 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
         }
         ("GET", "/person") => json(200, person_json(app)),
         ("GET", "/settings") => json(200, settings_json(app)),
+        ("POST", "/settings/library") => {
+            #[derive(serde::Deserialize)]
+            struct Move {
+                path: String,
+            }
+            let to = match serde_json::from_slice::<Move>(&req.body) {
+                Ok(m) => PathBuf::from(m.path.trim()),
+                Err(e) => return text(400, format!("bad json: {e}")),
+            };
+            let Some(relocate) = &app.relocate else {
+                return text(
+                    409,
+                    "this host cannot move its recordings folder: start it with --library instead"
+                        .to_string(),
+                );
+            };
+            if let Err(e) = crate::library::check_target(&app.library, &to) {
+                return text(409, e);
+            }
+            match (relocate.0)(to) {
+                Ok(()) => json(200, "{\"moving\":true}".into()),
+                Err(e) => text(409, e),
+            }
+        }
         ("GET", "/joined-rooms") => json(200, crate::joined::read(&app.library)),
         (
             "POST",
@@ -1291,6 +1319,7 @@ mod tests {
             persons: test_persons(),
             contacts: test_contacts(),
             contact_links: None,
+            relocate: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1368,6 +1397,7 @@ mod tests {
             persons: test_persons(),
             contacts: test_contacts(),
             contact_links: None,
+            relocate: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = local.local_addr().unwrap();
@@ -1419,6 +1449,7 @@ mod tests {
             persons: test_persons(),
             contacts: test_contacts(),
             contact_links: None,
+            relocate: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = local.local_addr().unwrap();
@@ -1450,6 +1481,7 @@ mod tests {
             persons: test_persons(),
             contacts: test_contacts(),
             contact_links: None,
+            relocate: None,
         });
         let local = TcpListener::bind("127.0.0.1:0").unwrap();
         let lan = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1491,6 +1523,7 @@ mod tests {
             persons: test_persons(),
             contacts: test_contacts(),
             contact_links: None,
+            relocate: None,
         });
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
