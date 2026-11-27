@@ -166,6 +166,34 @@ struct Conn {
     stream: Box<dyn Stream>,
     inbuf: Vec<u8>,
     last_sent: Instant,
+    /// Set once the client has sent its Refresh with lifetime 0 (deleting its
+    /// allocation): the connection is dropped then, so that the next allocation
+    /// from this client socket is made on a fresh connection. Reusing one that
+    /// carried a deleted allocation made the server answer 437 to the next
+    /// Allocate on it.
+    close_at: Option<Instant>,
+}
+
+/// How long after a deallocation the connection is kept (for the answer).
+const CLOSE_AFTER_DEALLOCATE: Duration = Duration::from_millis(1500);
+
+/// Whether `d` is a TURN Refresh request with LIFETIME 0.
+pub(crate) fn is_deallocation(d: &[u8]) -> bool {
+    if d.len() < 20 || d[0] >> 6 != 0 || u16::from_be_bytes([d[0], d[1]]) != 0x0004 {
+        return false;
+    }
+    let len = usize::from(u16::from_be_bytes([d[2], d[3]])).min(d.len() - 20);
+    let attrs = &d[20..20 + len];
+    let mut i = 0;
+    while i + 4 <= attrs.len() {
+        let t = u16::from_be_bytes([attrs[i], attrs[i + 1]]);
+        let l = usize::from(u16::from_be_bytes([attrs[i + 2], attrs[i + 3]]));
+        if t == 0x000D && l == 4 && attrs.len() >= i + 8 {
+            return attrs[i + 4..i + 8] == [0, 0, 0, 0];
+        }
+        i += 4 + l.div_ceil(4) * 4;
+    }
+    false
 }
 
 /// Drop a connection whose client socket has sent nothing for this long (an
@@ -193,6 +221,7 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
                                     stream,
                                     inbuf: Vec::new(),
                                     last_sent: Instant::now(),
+                                    close_at: None,
                                 },
                             );
                         }
@@ -203,6 +232,10 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
                 }
                 if let Some(c) = conns.get_mut(&from) {
                     c.last_sent = Instant::now();
+                    if is_deallocation(&buf[..n]) {
+                        debug!(client = %from, "TURN stream: deallocation seen; closing the stream soon");
+                        c.close_at = Some(Instant::now() + CLOSE_AFTER_DEALLOCATE);
+                    }
                     if let Some(frame) = frame_for_stream(&buf[..n])
                         && let Err(e) = c.stream.write_all(&frame).and_then(|()| c.stream.flush())
                     {
@@ -222,7 +255,7 @@ fn run(udp: UdpSocket, host: &str, port: u16, kind: Kind, roots: &Arc<rustls::Ro
         // Each stream -> datagrams to its client.
         let mut gone: Vec<SocketAddr> = vec![];
         for (peer, c) in conns.iter_mut() {
-            if c.last_sent.elapsed() > IDLE {
+            if c.last_sent.elapsed() > IDLE || c.close_at.is_some_and(|t| Instant::now() >= t) {
                 gone.push(*peer);
                 continue;
             }
@@ -309,6 +342,21 @@ pub(crate) fn drain(buf: &mut Vec<u8>) -> Result<Vec<Vec<u8>>, ()> {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+
+    #[test]
+    fn a_refresh_with_lifetime_zero_is_a_deallocation() {
+        let refresh = |lifetime: u32| {
+            let mut m = vec![0x00, 0x04, 0x00, 0x08];
+            m.extend_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+            m.extend_from_slice(&[7; 12]);
+            m.extend_from_slice(&[0x00, 0x0D, 0x00, 0x04]);
+            m.extend_from_slice(&lifetime.to_be_bytes());
+            m
+        };
+        assert!(is_deallocation(&refresh(0)));
+        assert!(!is_deallocation(&refresh(600)));
+        assert!(!is_deallocation(&stun(4, 1)));
+    }
 
     fn stun(len: usize, fill: u8) -> Vec<u8> {
         let mut m = vec![0x00, 0x01];
