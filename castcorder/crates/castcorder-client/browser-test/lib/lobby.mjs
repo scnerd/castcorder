@@ -83,7 +83,7 @@ export async function lobbyChecks() {
   await L.click('#left-settings');
   check(await L.isVisible('#name') && (await L.inputValue('#name')) === 'Lee',
     'Change name or devices goes back to the lobby with the name kept');
-  // Back from You left: obvious on the host machine's page, and automatic after a while (cast-n56.12).
+  // Back from You left: obvious on the host machine's page, and automatic after a while (cast-afu).
   await L.click('#join');
   await waitFor(async () => (await text(L, '#participant')).length > 0 && !(await L.isVisible('#left-call')), 'L joined again', 30000);
   await L.click('#leave');
