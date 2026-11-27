@@ -116,6 +116,11 @@ export async function homeLinkChecks() {
   await lab.locator('.revoke-device').click();
   await waitFor(async () => (await lab.count()) === 0, 'the revoked browser leaves the You card', 10000);
   check((await text(P, '#person-message')) === 'Device removed.', 'the You card says the device was removed');
+  // cast-cs9: a computer that changed hands can leave the person; it asks twice.
+  await P.click('.leave-person summary');
+  check((await P.locator('#leave-person').innerText()).trim() === 'Leave', 'the You card offers Leave for a computer that changed hands');
+  await P.click('#leave-person');
+  check((await P.locator('#leave-person').innerText()).trim() === 'Leave for good?', 'Leave asks once more before leaving');
   check(errors.length === 0, 'the link page raised no page errors: ' + errors.join('; '));
 
   // Last: in Firefox a custom-scheme link leaves the page deaf to later clicks.

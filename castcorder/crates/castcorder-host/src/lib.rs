@@ -313,6 +313,35 @@ impl Finisher {
     }
 }
 
+/// This install leaves its person (a device that changed hands; cast-cs9):
+/// first, through the rendezvous at `base` when there is one, it tells the
+/// person's other app installs it knows, with a revocation of itself signed
+/// by the person key, so they drop it (and tell the person's contacts);
+/// then it forgets the person's contacts and starts over as a new person.
+pub fn leave_person(
+    persons: &person::Persons,
+    contacts: &contact::Contacts,
+    base: Option<&str>,
+) -> Result<(), String> {
+    let now = wall_ms();
+    let revocation = persons.leaving_revocation(now);
+    let installs: Vec<_> = persons
+        .installs()
+        .into_iter()
+        .map(castcorder_link::HostId)
+        .collect();
+    let told = match base {
+        Some(base) if !installs.is_empty() => {
+            presence::tell_leaving_person(contacts, base, installs, revocation)
+        }
+        _ => 0,
+    };
+    contacts.forget_person().map_err(|e| e.to_string())?;
+    persons.start_over(now).map_err(|e| e.to_string())?;
+    tracing::info!(told, "left the person");
+    Ok(())
+}
+
 /// A host running in this process, from [`start`] until [`Running::stop`].
 pub struct Running {
     room: String,
@@ -412,6 +441,16 @@ impl Running {
     /// Revoke one of this person's linked devices, by device id (cast-40e.6).
     pub fn revoke_device(&self, device: &str) -> Result<(), String> {
         self.persons.revoke(device, wall_ms())
+    }
+
+    /// This install leaves its person and starts over as a new one
+    /// ([`leave_person`]; cast-cs9).
+    pub fn leave_person(&self) -> Result<(), String> {
+        leave_person(
+            &self.persons,
+            &self.contacts,
+            self.call_links.base.as_ref().map(|b| b.base.as_str()),
+        )
     }
 
     /// Link this install to the person of the device that made `code`, in

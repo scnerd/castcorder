@@ -32,6 +32,16 @@ struct Linked {
     kind: String,
 }
 
+/// Another of the person's app installs this one knows but did not link
+/// (cast-cs9).
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+struct OtherInstall {
+    id: String,
+    #[serde(default)]
+    name: String,
+    fingerprint: String,
+}
+
 /// A link request waiting for a decision.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct LinkRequest {
@@ -57,6 +67,8 @@ struct PersonView {
     device_name: String,
     fingerprint: String,
     devices: Vec<Linked>,
+    #[serde(default)]
+    installs: Vec<OtherInstall>,
     requests: Vec<LinkRequest>,
     joining: Option<Joining>,
 }
@@ -115,6 +127,8 @@ pub(super) fn PersonCard() -> impl IntoView {
     // The linked device whose Remove was pressed once: the second press
     // revokes it (cast-40e.6).
     let removing = RwSignal::new(None::<String>);
+    // Leave was pressed once: the second press leaves (cast-cs9).
+    let leaving = RwSignal::new(false);
     let refresh = move || {
         spawn_local(async move {
             match person_request("/person", None).await {
@@ -264,6 +278,34 @@ pub(super) fn PersonCard() -> impl IntoView {
                         }
                     }
                 </For>
+                <For each=move || data.get().installs key=|d| d.id.clone() let:d>
+                    {
+                        let (id1, id2) = (d.id.clone(), d.id.clone());
+                        let asked = move || removing.get().as_deref() == Some(id1.as_str());
+                        let name = if d.name.is_empty() { "Another of your Castcorder apps".to_string() } else { d.name.clone() };
+                        view! {
+                    <li class="device-row other-install" data-device=d.id.clone()>
+                        <Icon name="screen" small=true/>
+                        <span class="contact-text">
+                            <span class="contact-name">{name}</span>
+                            <span class="small muted">{format!("Castcorder app \u{b7} fingerprint {}", d.fingerprint)}</span>
+                        </span>
+                        <button class="btn tiny outline revoke-device"
+                            title="It stops being yours everywhere: your rooms and your contacts stop trusting it. Lost or sold devices."
+                            on:click=move |_| {
+                                if removing.get_untracked().as_deref() == Some(id2.as_str()) {
+                                    removing.set(None);
+                                    post("/person/revoke", serde_json::json!({ "device": id2.clone() }), "Device removed.");
+                                } else {
+                                    removing.set(Some(id2.clone()));
+                                }
+                            }>
+                            {move || if asked() { "Remove for good?" } else { "Remove" }}
+                        </button>
+                    </li>
+                        }
+                    }
+                </For>
             </ul>
             <div class="row">
                 <button id="link-device" class="btn primary" on:click=make_code>"Link another device"</button>
@@ -283,6 +325,24 @@ pub(super) fn PersonCard() -> impl IntoView {
                         on:input=move |ev| code.set(event_target_value(&ev)) />
                     <button id="join-person" class="btn" disabled=move || code.get().trim().is_empty() on:click=join>"Link this app"</button>
                 </div>
+            </details>
+            <details class="leave-person">
+                <summary>"This computer changed hands?"</summary>
+                <span class="small muted">{move || {
+                    let who = data.with(|d| if d.name.is_empty() { "your".to_string() } else { format!("{}'s", d.name) });
+                    format!("Take it out of {who} devices. Your other devices that are online now drop it (remove it there if one is not), and it starts over as a new person with no contacts. Its rooms and recordings stay on it.")
+                }}</span>
+                <button id="leave-person" class="btn outline"
+                    on:click=move |_| {
+                        if leaving.get_untracked() {
+                            leaving.set(false);
+                            post("/person/leave", serde_json::json!({}), "This computer left. It is a new person now.");
+                        } else {
+                            leaving.set(true);
+                        }
+                    }>
+                    {move || if leaving.get() { "Leave for good?" } else { "Leave" }}
+                </button>
             </details>
             <span id="joining" class="small muted">{move || match data.get().joining {
                 Some(j) if j.state == "waiting" => "Waiting for approval on the other device".to_string(),
