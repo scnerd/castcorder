@@ -112,11 +112,14 @@ tasks:
       two installs on two computers behind their own masquerading routers
       (Linux network namespaces, lib/netns.mjs), the rendezvous on the
       "internet" between them, each person's browser inside their computer's
-      namespace. Skips without root unless CASTCORDER_CI is set.
+      namespace. Skips without root unless CASTCORDER_CI is set. The rendezvous
+      comes from lib/world.mjs: the Cloudflare Worker under wrangler dev (built
+      first), or castcorder-rendezvous with CASTCORDER_RENDEZVOUS=native.
     dir: castcorder/crates/castcorder-client/browser-test
     env:
       CASTCORDER_DIST: "{{.ROOT_DIR}}/castcorder/crates/castcorder-client/dist"
     cmds:
+      - task: worker:build
       - cargo build --release --locked -p castcorder-host -p castcorder-rendezvous
       - cd .. && trunk build --release
       - npm install --no-audit --no-fund

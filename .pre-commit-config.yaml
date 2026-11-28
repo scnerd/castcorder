@@ -18,6 +18,16 @@ repos:
         types: [text]
         exclude: &generated-or-source '^castcorder/spikes/|^\.beads/|^\.agents/|^\.codex/|^LICENSE'
 
+      # A story test gets its services from lib/world.mjs, which hands out only
+      # implementations held to the protocol by tests/conformance.rs; one that
+      # started its own server could pass against a stand-in that differs
+      # from production (ADR 0003, ADR 0004).
+      - id: journeys-use-the-world
+        name: journeys start no servers themselves (use lib/world.mjs)
+        language: pygrep
+        entry: "castcorder-rendezvous['\"]|wrangler\\.js|RENDEZVOUS_READY|RV_EXE"
+        files: '^castcorder/crates/castcorder-client/browser-test/journey[^/]*\.mjs$'
+
       # uvx keeps Python tooling off pip.
       - id: shellcheck
         name: shellcheck (scripts/*.sh)
