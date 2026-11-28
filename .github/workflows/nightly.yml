@@ -412,7 +412,8 @@ jobs:
   # A failing scheduled run files an issue pointing at it.
   report:
     name: report
-    needs: [heavy, camtoggle, platforms, windows-gst, degraded, nemesis, installers]
+    needs:
+      [heavy, camtoggle, platforms, windows-gst, degraded, nemesis, installers]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
