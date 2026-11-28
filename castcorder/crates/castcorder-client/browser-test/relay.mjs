@@ -300,6 +300,12 @@ try {
   check((lost.length === 0 || degraded) && same.length === 2, 'no guest lost its connection or rejoined across the renewal'
     + (lost.length ? ' (lost: ' + lost.join(', ') + (degraded ? ', tolerated on a degraded network' : '') + ')' : '')
     + (same.length === 2 ? '' : ' (rejoined: ' + ['A', 'B'].filter((n) => !same.includes(n)).join(', ') + ')'));
+  if (lost.length) {
+    // The host's side of the renewal, timestamped, for working out which end went quiet (cast-ej4).
+    console.log('host log from the renewal on: ' + host.err.slice(at - 400).split('\n')
+      .filter((l) => /castcorder_transport|castcorder_host::(room|rendezvous)|guest\{/.test(l) && !/video layer|bandwidth|bwe/.test(l))
+      .map((l) => l.slice(0, 260)).slice(0, 80).join('\n'));
+  }
   for (const n of lost) console.log('guest ' + n + ': ' + logs[n].filter((l) => /connection to the host lost|connection state|relay credentials|answered host renegotiation|joined/.test(l)).map((l) => l.replaceAll('\n', ' ')).join(' | '));
   const started2 = await post('/take/start');
   check(started2[0] === 200, 'take 2 started after the renewal: ' + started2.join(' '));

@@ -12,6 +12,7 @@
 use serde::Deserialize;
 
 use super::native::NATIVE_HEADER;
+use super::person::flash;
 use super::view::{Icon, Mark};
 use super::*;
 
@@ -63,6 +64,9 @@ struct HomeRoom {
 struct HomeData {
     rooms: Vec<HomeRoom>,
     lan: Vec<String>,
+    /// The host's reachability self-check: "yes", "no", or empty (unknown).
+    #[serde(default)]
+    reachable: String,
 }
 
 /// One `/rooms` or `/folder/open` request; the answer's text, or the host's
@@ -323,6 +327,10 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let new_name = RwSignal::new(String::new());
     let contacts = RwSignal::new(Vec::<super::person::ContactItem>::new());
     let who = RwSignal::new(Who::default());
+    // Whether `GET /person` answered yet: the name prompt waits for it, so a
+    // named person never sees it flash by (cast-evgr).
+    let who_loaded = RwSignal::new(false);
+    let first_name = RwSignal::new(String::new());
     let place = RwSignal::new(Place::Rooms);
     let invites = RwSignal::new(Invites::default());
     // Rooms contacts share with this person and can let them into (they hold
@@ -351,9 +359,9 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             data.set(d)
                         }
                     }
-                    Err(e) => message.set(format!("rooms not readable: {e}")),
+                    Err(e) => flash(message, format!("rooms not readable: {e}")),
                 },
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
             if let Ok(t) = home_request("GET", "/contacts", None).await
                 && let Ok(v) = serde_json::from_str::<Invites>(&t)
@@ -369,9 +377,13 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             }
             if let Ok(t) = home_request("GET", "/person", None).await
                 && let Ok(w) = serde_json::from_str::<Who>(&t)
-                && who.get_untracked() != w
             {
-                who.set(w);
+                if who.get_untracked() != w {
+                    who.set(w);
+                }
+                if !who_loaded.get_untracked() {
+                    who_loaded.set(true);
+                }
             }
         })
     };
@@ -452,8 +464,27 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let act = move |path: &'static str, body: serde_json::Value, done: &'static str| {
         spawn_local(async move {
             match home_request("POST", path, Some(body.to_string())).await {
-                Ok(_) => message.set(done.into()),
-                Err(e) => message.set(e),
+                Ok(_) => flash(message, done.into()),
+                Err(e) => flash(message, e),
+            }
+            refresh();
+        })
+    };
+    // A fresh install has no name (cast-evgr): until one is saved, contacts
+    // see "Someone without a name", so the Rooms page asks for it.
+    let save_first_name = move || {
+        let name = first_name.get_untracked();
+        if name.trim().is_empty() {
+            return;
+        }
+        spawn_local(async move {
+            let body = serde_json::json!({ "name": name }).to_string();
+            match home_request("POST", "/person", Some(body)).await {
+                Ok(_) => {
+                    first_name.set(String::new());
+                    flash(message, "Saved. You can change it in Settings.".into());
+                }
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -483,19 +514,22 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             failed.push(e);
                         }
                     }
-                    message.set(match (people.len(), failed.is_empty()) {
-                        (0, _) => "Room made.".into(),
-                        (n, true) => format!(
-                            "Room made; it trusts {n} {}.",
-                            if n == 1 { "person" } else { "people" }
-                        ),
-                        (_, false) => format!(
-                            "Room made, but not every person was trusted: {}",
-                            failed.join("; ")
-                        ),
-                    });
+                    flash(
+                        message,
+                        match (people.len(), failed.is_empty()) {
+                            (0, _) => "Room made.".into(),
+                            (n, true) => format!(
+                                "Room made; it trusts {n} {}.",
+                                if n == 1 { "person" } else { "people" }
+                            ),
+                            (_, false) => format!(
+                                "Room made, but not every person was trusted: {}",
+                                failed.join("; ")
+                            ),
+                        },
+                    );
                 }
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -523,7 +557,11 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     };
     // Through the rendezvous once any room has a link there; else the LAN.
     let reach = move || {
-        if data.get().rooms.iter().any(|r| r.link.is_some()) {
+        let d = data.get();
+        if d.reachable == "no" {
+            // The self-check found the rendezvous does not deliver to it.
+            "Others can't reach this computer right now"
+        } else if d.rooms.iter().any(|r| r.link.is_some()) {
             "Reachable from anywhere"
         } else {
             "Reachable on this network only"
@@ -599,6 +637,21 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             <span class="room-actions">
                                 <button id="install-update" class="btn primary" on:click=install_update>"Restart to update"</button>
                             </span>
+                        </div>
+                    </div>
+                    <div id="ask-name" class="room-card ask-name"
+                        hidden=move || place.get() != Place::Rooms || !who_loaded.get() || !who.with(|w| w.name.trim().is_empty())>
+                        <div class="room-head">
+                            <div class="room-title"><h2>"What's your name?"</h2></div>
+                            <span class="small muted room-line">"Your contacts and the people you call see it."</span>
+                        </div>
+                        <div class="row">
+                            <label class="sr-only" for="first-name">"Your name"</label>
+                            <input id="first-name" placeholder="Your name" prop:value=move || first_name.get()
+                                on:input=move |ev| first_name.set(event_target_value(&ev))
+                                on:keydown=move |ev| if ev.key() == "Enter" { save_first_name() } />
+                            <button id="save-first-name" class="btn primary" disabled=move || first_name.get().trim().is_empty()
+                                on:click=move |_| save_first_name()>"Save"</button>
                         </div>
                     </div>
                     <ul id="invites" class="list" hidden=move || invites.get().invites.is_empty()>
@@ -701,6 +754,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 </button>
                             })
                         }}
+                        // Nothing to list, nothing to show: the section appears once this app has joined a room.
+                        <Show when=move || !joined.get().is_empty()>
                         <div class="home-head joined">
                             <h2>"Rooms you joined"</h2>
                             // The rooms this app joined on other hosts live in its
@@ -714,7 +769,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 }
                                 // The link opens the app's call window; say so, and what
                                 // an empty answer means, where the click happened.
-                                message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
+                                flash(message, "Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
                                 super::person::show_element("home-message");
                             }>"Rooms you joined"</a></span>
                         </div>
@@ -723,6 +778,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 {joined_card(r)}
                             </For>
                         </ul>
+                        </Show>
                     </section>
                     <section id="home-contacts" class="home-place" hidden=move || place.get() != Place::Contacts>
                         <super::person::ContactsCard list=contacts rooms=room_names/>

@@ -7,6 +7,8 @@ import { openGuest } from './guest.mjs';
 
 // The home's You card and linking a browser profile to a person (cast-40e.8,
 // cast-x4j), chromium and firefox, on a host of its own:
+// - a fresh install's Rooms page asks for a name until one is saved
+//   (cast-evgr);
 // - the host machine's home shows its person (name, this device's fingerprint);
 // - "Rooms you joined" and "Link a device" each show a visible result: a
 //   message inside the viewport, and for the link a code to open elsewhere;
@@ -38,6 +40,26 @@ export async function homeLinkChecks() {
 
   const P = await openGuest('H', [], HTTP11, undefined, 'Pat');
   await P.setViewportSize({ width: 1000, height: 500 });
+  // Nothing joined yet: no "Rooms you joined" heading, and no contacts means
+  // an empty-state line, not "Online 0 / Offline 0" (cast-zf2a).
+  await P.goto(HTTP11 + '/');
+  await P.waitForSelector('#contact-list', { state: 'attached', timeout: 15000 });
+  check(!(await text(P, '#home-main, .home-main')).includes('Rooms you joined'), 'home: no "Rooms you joined" while nothing is joined');
+  check((await text(P, '#contact-list')).includes('No contacts yet') && !(await text(P, '#contact-list')).includes('Offline'),
+    'contacts: an empty list says so instead of counting 0 and 0');
+  // A fresh install has no name: the Rooms page asks for one until it is
+  // saved (cast-evgr), and the nav then names the person.
+  await waitFor(async () => await P.locator('#ask-name').isVisible(), 'a fresh install asks for a name on the Rooms page', 10000);
+  check((await text(P, '#home-who')) === 'You', 'before a name is saved the nav says You');
+  await P.fill('#first-name', 'Pat');
+  await P.press('#first-name', 'Enter');
+  await waitFor(async () => (await text(P, '#home-who')) === 'Pat', 'the saved name shows in the nav', 10000);
+  await waitFor(async () => await P.locator('#ask-name').isHidden(), 'the name prompt goes once a name is saved', 10000);
+  check(true, 'saving a name from the Rooms page names the person and the prompt goes');
+  await P.goto(HTTP11 + '/');
+  await P.waitForSelector('#contact-list', { state: 'attached', timeout: 15000 });
+  await waitFor(async () => (await text(P, '#home-who')) === 'Pat', 'the home loaded the person', 10000);
+  check(await P.locator('#ask-name').isHidden(), 'a named person is not asked again after a reload');
   // The rooms the app's call window joined elsewhere, as it hands them to the
   // app (cast-n56.9; the host keeps the list in its library): shown as cards.
   writeFileSync(join(LIB, 'joined-rooms.json'), JSON.stringify([
@@ -171,6 +193,9 @@ export async function homeLinkChecks() {
   await P.click('#create-room');
   await waitFor(async () => (await text(P, '#rooms')).includes('after-the-link'),
     'the home still takes clicks after "Rooms you joined"', 10000);
+  // cast-4imd: a status message clears itself; it used to stay up for good.
+  await waitFor(async () => (await text(P, '#home-message')) === '',
+    'the home status message clears on its own', 25000);
 
   // cast-66n: rename a room, then archive it and bring it back.
   const junk = P.locator('#rooms li[data-room="after-the-link"]');

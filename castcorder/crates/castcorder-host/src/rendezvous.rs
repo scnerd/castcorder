@@ -187,6 +187,12 @@ pub struct Health {
     pub relay: String,
     /// Why the relay is unavailable (the rendezvous's reason).
     pub relay_detail: String,
+    /// Whether others can reach this install through the rendezvous, as the
+    /// self-check found (castcorder-host `reach`): `"yes"`, `"no"` (see
+    /// `reachable_detail`), or empty while unknown or not registered.
+    pub reachable: String,
+    /// Why the last self-checks failed.
+    pub reachable_detail: String,
     /// The STUN server the rendezvous named: contact links learn their
     /// server-reflexive address from it, so a contact behind another router
     /// can reach them (or their relay can).
@@ -485,9 +491,11 @@ pub fn exchange_within(
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
     let url = castcorder_link::wire::mailbox_url(&t.ws_url, to);
     let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
-    let ServerMsg::Hello { .. } = read_msg(&mut ws)? else {
-        return Err("expected hello".into());
-    };
+    match read_msg(&mut ws)? {
+        ServerMsg::Hello { .. } => {}
+        ServerMsg::Error { code, message } => return Err(format!("{code}: {message}")),
+        _ => return Err("expected hello".into()),
+    }
     send(
         &mut ws,
         &ClientMsg::Offer {
@@ -848,6 +856,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         );
         return None;
     };
+    // This host's own reachability self-check (castcorder-host `reach`).
+    if let Some(a) = crate::reach::answer(&plain) {
+        return Some(b64(&reply.seal(to_json(&a).as_bytes())));
+    }
     let parsed =
         serde_json::from_slice::<OfferPlain>(&plain).map(|o| (cfg.secrets().room_of(&o.secret), o));
     let result = match parsed {

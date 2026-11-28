@@ -353,7 +353,7 @@ pub(super) fn Producer(ui: Ui) -> impl IntoView {
                 </div>
             </details>
             <details class="fold" id="connection-details">
-                <summary><span>"Connection details"</span></summary>
+                <summary><span>"Guests and call"</span></summary>
                 <div class="fold-body small">
                     <ul id="guests-detail" class="list">
                         <For each=rows key=|p| format!("{}{}{}", p.participant.0, p.producer, p.trusted) let:p>
@@ -1068,7 +1068,7 @@ fn Call(ui: Ui) -> impl IntoView {
                             <button id="take-stop" class="take-btn stop" hidden=move || !can_stop() disabled=move || !can_stop()
                                 on:click=move |_| producer_request(ui, Request::StopTake, false)>
                                 {move || format!("Stop {}", take_label(&ui.take.get()).to_lowercase())}</button>
-                            <span class="dock-label">{move || if can_stop() { "Only producers can stop a take" } else { "Every machine starts its tracks" }}</span>
+                            <span class="dock-label">{move || if can_stop() { "Stops it for everyone" } else { "Every machine starts its tracks" }}</span>
                         </div>
                     </Show>
                 </div>
