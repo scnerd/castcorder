@@ -38,6 +38,13 @@ export async function homeLinkChecks() {
 
   const P = await openGuest('H', [], HTTP11, undefined, 'Pat');
   await P.setViewportSize({ width: 1000, height: 500 });
+  // Nothing joined yet: no "Rooms you joined" heading, and no contacts means
+  // an empty-state line, not "Online 0 / Offline 0" (cast-zf2a).
+  await P.goto(HTTP11 + '/');
+  await P.waitForSelector('#contact-list', { state: 'attached', timeout: 15000 });
+  check(!(await text(P, '#home-main, .home-main')).includes('Rooms you joined'), 'home: no "Rooms you joined" while nothing is joined');
+  check((await text(P, '#contact-list')).includes('No contacts yet') && !(await text(P, '#contact-list')).includes('Offline'),
+    'contacts: an empty list says so instead of counting 0 and 0');
   // The rooms the app's call window joined elsewhere, as it hands them to the
   // app (cast-n56.9; the host keeps the list in its library): shown as cards.
   writeFileSync(join(LIB, 'joined-rooms.json'), JSON.stringify([
