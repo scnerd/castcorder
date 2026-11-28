@@ -269,6 +269,38 @@ fn primary_ipv4() -> Option<IpAddr> {
     }
 }
 
+/// Every address another machine on a local network could reach this one by:
+/// the interfaces' IPv4 addresses that are up, not loopback or link-local,
+/// the default route's first (cast-np35). One address is not enough on a
+/// machine with a VPN or a virtual adapter on its default route: the peer
+/// two metres away on the same wifi then finds no path and goes through the
+/// relay. At most [`MAX_LAN_ADDRS`].
+fn lan_ipv4s() -> Vec<IpAddr> {
+    let mut found: Vec<IpAddr> = primary_ipv4().into_iter().collect();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for i in ifaces {
+            let ip = i.ip();
+            let IpAddr::V4(v4) = ip else { continue };
+            if i.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || found.contains(&ip)
+            {
+                continue;
+            }
+            found.push(ip);
+        }
+    }
+    found.truncate(MAX_LAN_ADDRS);
+    found
+}
+
+/// The most LAN addresses offered as host candidates.
+const MAX_LAN_ADDRS: usize = 6;
+
 /// What "now" is for routing joiners to calls ([`Config::clock`]).
 #[derive(Clone)]
 pub struct RoutingClock(pub Arc<dyn castcorder_port_clock::Clock>);
@@ -969,7 +1001,7 @@ pub fn start(
 
     let lan: Vec<IpAddr> = if args.bind.is_unspecified() {
         if args.advertise.is_empty() {
-            primary_ipv4().into_iter().collect()
+            lan_ipv4s()
         } else {
             args.advertise.clone()
         }
@@ -1122,7 +1154,13 @@ pub fn start(
     let rendezvous_tx = tx.clone();
 
     let links: Vec<String> = if args.bind.is_unspecified() || args.bind.is_loopback() {
-        advertise_ips.clone()
+        // The page links name the default route's address alone; the other
+        // LAN addresses are offered to ICE as host candidates (cast-np35).
+        if args.advertise.is_empty() {
+            advertise_ips.iter().take(1).copied().collect()
+        } else {
+            advertise_ips.clone()
+        }
     } else {
         vec![args.bind]
     }
@@ -1297,5 +1335,29 @@ mod origin_tests {
             super::origin_of("http://127.0.0.1:5000"),
             "http://127.0.0.1:5000"
         );
+    }
+}
+
+#[cfg(test)]
+mod lan_tests {
+    /// The addresses offered to the LAN (cast-np35): usable IPv4 only, no
+    /// duplicates, within the cap, the default route's address first.
+    #[test]
+    fn lan_addresses_are_usable_distinct_and_led_by_the_default_route() {
+        let all = super::lan_ipv4s();
+        assert!(all.len() <= super::MAX_LAN_ADDRS);
+        for ip in &all {
+            let std::net::IpAddr::V4(v4) = ip else {
+                panic!("{ip} is not IPv4")
+            };
+            assert!(!v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified());
+        }
+        let mut sorted = all.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len(), "no duplicates: {all:?}");
+        if let Some(primary) = super::primary_ipv4() {
+            assert_eq!(all.first(), Some(&primary));
+        }
     }
 }

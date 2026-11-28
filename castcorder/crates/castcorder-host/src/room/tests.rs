@@ -919,6 +919,66 @@ fn a_producer_person_s_devices_join_as_producers() {
     assert!(room.producer_persons().is_empty());
 }
 
+/// A producer is a person, not one device (cast-fpxw): Bob's laptop is made a
+/// producer; with nobody else in the gated call, his phone (another device of
+/// the same person, trusted in the room) opens it too, while a trusted
+/// stranger's device still waits.
+#[test]
+fn a_producer_person_s_other_device_opens_a_gated_call() {
+    let bob = [42u8; 32];
+    let bob_id = castcorder_link::person::person_id(&bob);
+    let seat = |k: u8| Seat {
+        person: Some([k; 32]),
+        ..Seat::default()
+    };
+    let mut room = Room::new(false);
+    room.admit("host-page", true, None).unwrap();
+    room.accepted(1, "host-page", true);
+    room.join(1, "Host").unwrap();
+    room.accepted_as(2, "dev-laptop", seat(42));
+    room.join(2, "Bob").unwrap();
+    room.apply(
+        1,
+        &RoomAction::SetProducer {
+            participant: ParticipantId(2),
+            producer: true,
+        },
+        SALT,
+    )
+    .unwrap();
+    room.left(1);
+    room.left(2);
+    room.trust_person(&bob_id, true).unwrap();
+    let phone = Seat {
+        person: Some(bob),
+        ..Seat::default()
+    };
+    assert_eq!(
+        room.admit_offer_as("dev-phone", None, phone, None),
+        Ok(Admission::Enter),
+        "Bob's phone opens the call: Bob is a producer"
+    );
+    room.accepted_as(3, "dev-phone", phone);
+    assert!(room.join(3, "Bob").unwrap().producer);
+    // Another person, trusted too, but no producer: waits.
+    let carol = [43u8; 32];
+    room.trust_person(&castcorder_link::person::person_id(&carol), true)
+        .unwrap();
+    room.left(3);
+    assert_eq!(
+        room.admit_offer_as(
+            "dev-carol",
+            None,
+            Seat {
+                person: Some(carol),
+                ..Seat::default()
+            },
+            None
+        ),
+        Ok(Admission::Wait)
+    );
+}
+
 /// A status query counts the room's trust of a whole person (cast-40e.11):
 /// a device whose certificate vouches for a trusted person is a trusted
 /// member even if it never joined, or joined while no producer was there,
