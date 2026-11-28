@@ -304,7 +304,8 @@ fn contact_post(app: &App, path: &str, r: ContactRequest) -> Response {
                 reply,
             })
             .unwrap_or_default();
-            let invite = crate::invite::make(&app.call_links, &room, in_call)?;
+            let (in_call, title) = in_call;
+            let invite = crate::invite::make(&app.call_links, &room, title, in_call)?;
             app.contacts.invite(&p, invite, crate::wall_ms())
         })),
         "/contacts/invite/dismiss" => done(

@@ -574,7 +574,7 @@ enum Shared {
 #[component]
 pub(super) fn ContactsCard(
     list: RwSignal<Vec<ContactItem>>,
-    rooms: leptos::prelude::Signal<Vec<String>>,
+    rooms: leptos::prelude::Signal<Vec<(String, String)>>,
 ) -> impl IntoView {
     let data = RwSignal::new(ContactsView::default());
     let message = RwSignal::new(String::new());
@@ -926,7 +926,7 @@ pub(super) fn ContactsCard(
                                                 if all.is_empty() {
                                                     return view! { <li class="small muted">"No rooms yet: make one under Rooms."</li> }.into_any();
                                                 }
-                                                all.into_iter().map(|room| {
+                                                all.into_iter().map(|(room, shown)| {
                                                     let state = match sent.iter().find(|s| s.person == person && s.room == room) {
                                                         Some(s) if s.delivered => "Invited",
                                                         Some(_) => "Gets it when back online",
@@ -935,7 +935,7 @@ pub(super) fn ContactsCard(
                                                     let (r1, who) = (room.clone(), person.clone());
                                                     view! {
                                                         <li class="invite-room" data-room=room.clone()>
-                                                            <span>{room.clone()}</span>
+                                                            <span>{shown}</span>
                                                             <span class="small muted invite-room-state">{state}</span>
                                                             <button class="btn tiny send-invite-room"
                                                                 on:click=move |_| post("/contacts/invite", serde_json::json!({ "person": who.clone(), "room": r1.clone() }), "Invite sent.")>

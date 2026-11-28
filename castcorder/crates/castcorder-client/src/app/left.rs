@@ -59,11 +59,7 @@ pub(super) fn leave(ui: Ui) {
     } else {
         0
     };
-    let room = ui
-        .call_ref
-        .get_untracked()
-        .map(|c| c.room)
-        .unwrap_or_else(|| ui.room_name.get_untracked());
+    let room = leptos::prelude::untrack(|| ui.shown_room());
     let l = left_ui();
     l.most.set(0);
     l.summary.set(Some(Summary {
