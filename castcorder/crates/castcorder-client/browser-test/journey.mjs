@@ -5,9 +5,10 @@
 // runs as root; CI uses sudo). Their browsers run inside their computers'
 // namespaces, so each home is that computer's own localhost page.
 //
-//  0. The rendezvous behaves as the production one (the Cloudflare Worker,
-//     ADR 0004) does: it never pings a connection (--no-ping), so each host
-//     must keep its own registration alive and notice when it dies.
+//  0. The rendezvous never pings a connection, as the production one (the
+//     Cloudflare Worker, ADR 0004) does not (tests/conformance.rs holds both to
+//     that), so each host must keep its own registration alive and notice
+//     when it dies.
 //  1. Dana (D) makes a contact link on Dana's home; Eli (E) pastes it on Eli's.
 //     Each lists the other, online. Then the rendezvous is redeployed
 //     (restarted) while Dana's connection is quiet and cut: Dana's install
@@ -105,7 +106,7 @@ let failed = null;
 try {
   net.setup();
   const RV_ARGS = ['--listen', net.INET_IP + ':8080', '--stun', net.INET_IP + ':3478',
-    '--client', VERSION + '=' + dist, '--no-ping'];
+    '--client', VERSION + '=' + dist];
   let rv = start(net.NS.inet, RV_EXE, RV_ARGS, 'rendezvous');
   await waitFor(() => rv.out.match(/RENDEZVOUS_READY/), 'rendezvous ready', 20000);
   const RV = 'http://' + net.INET_IP + ':8080';

@@ -15,7 +15,7 @@ use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
+use castcorder_link::wire::{IceServer, ServerMsg, b64, code, to_json};
 use castcorder_link::{HostId, stun};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -23,17 +23,14 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::mailbox::{
-    ConnId, Limits, MAILBOX_PARAM, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered,
-    query_param, relay_host, relay_proof,
+    ConnId, Limits, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered, mailbox_of, relay_host,
+    relay_proof,
 };
 use crate::turn::{TurnConfig, mint};
 use crate::usage::{LEDGER_FILE, Ledger, parse_metrics, save};
 
 /// Largest WebSocket frame accepted (a sealed SDP is a few KiB).
 pub const MAX_FRAME: usize = crate::mailbox::MAX_FRAME;
-/// How often the server pings each connection.
-const PING: Duration = Duration::from_secs(20);
-
 /// How to run.
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -55,10 +52,6 @@ pub struct Config {
     pub turn: Option<TurnConfig>,
     /// Relay usage accounting and budgets, if any.
     pub metering: Option<Metering>,
-    /// Never ping connections, as the Worker rendezvous (ADR 0004) does not:
-    /// a host must keep its own connection alive and notice when it dies
-    /// (tests run the journey this way).
-    pub no_ping: bool,
 }
 
 /// Relay metering: where coturn's usage comes from, where it is kept, the
@@ -94,7 +87,6 @@ struct Hub {
     clients: HashMap<String, PathBuf>,
     public_host: Option<String>,
     trust_forwarded_for: bool,
-    no_ping: bool,
     turn: Option<TurnConfig>,
     /// The credential last minted for each (client address, host) hello, so a
     /// client that reconnects within its lifetime reuses it and counts once.
@@ -175,7 +167,6 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         clients: cfg.clients.into_iter().collect(),
         public_host: cfg.public_host,
         trust_forwarded_for: cfg.trust_forwarded_for,
-        no_ping: cfg.no_ping,
         turn: cfg.turn,
         minted: Mutex::new(HashMap::new()),
         meter: meter.clone(),
@@ -469,7 +460,9 @@ async fn ws(
     // The host relay credentials are asked for, with the guest's proof of a
     // call link it admits.
     let host = relay_host(query).map(|h| (h, relay_proof(query).map(str::to_string)));
-    let scope = query_param(query, MAILBOX_PARAM).and_then(|h| HostId::parse(h).ok());
+    // As the Worker routes: the mailbox a connection is for (`?mailbox=`, else
+    // a guest's `?host=`); one that names none is refused once upgraded.
+    let scope = mailbox_of(query);
     upgrade
         .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
@@ -531,6 +524,16 @@ async fn connection(
     host: Option<(HostId, Option<String>)>,
     scope: Option<HostId>,
 ) {
+    let Some(scope) = scope else {
+        warn!(ip = %ip, "connection refused: names no host's mailbox");
+        let refusal = ServerMsg::Error {
+            code: code::BAD_MESSAGE.into(),
+            message: "name the host's mailbox: /ws?mailbox=HOST_ID".into(),
+        };
+        let _ = socket.send(Message::Text(to_json(&refusal).into())).await;
+        let _ = socket.send(Message::Close(None)).await;
+        return;
+    };
     let mut nonce = [0u8; 32];
     if getrandom::fill(&mut nonce).is_err() {
         warn!("no randomness for the nonce; connection dropped");
@@ -541,7 +544,7 @@ async fn connection(
     let opened = {
         let mut g = hub.mailbox.lock().expect("mailbox lock");
         let now = hub.now();
-        let r = g.0.open(ip, peer, nonce, scope, now);
+        let r = g.0.open(ip, peer, nonce, Some(scope), now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
             if let (Some(turn), Some((host, proof))) = (&hub.turn, host) {
@@ -583,8 +586,6 @@ async fn connection(
         relay_error,
     };
     let _ = tx.send(Message::Text(to_json(&hello).into()));
-    let mut ping = tokio::time::interval(PING);
-    ping.tick().await;
     loop {
         tokio::select! {
             out = rx.recv() => {
@@ -612,11 +613,6 @@ async fn connection(
                         debug!(conn = id, error = %e, "websocket error");
                         break;
                     }
-                }
-            }
-            _ = ping.tick(), if !hub.no_ping => {
-                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
-                    break;
                 }
             }
         }

@@ -386,6 +386,12 @@ jobs:
       - name: System test against the Worker (wrangler dev)
         run: task test:system:worker
 
+      # The rendezvous protocol contract against both implementations: the
+      # self-hosted castcorder-rendezvous and the Worker under wrangler dev must
+      # behave the same on the wire (ADR 0003, ADR 0004).
+      - name: Rendezvous conformance (castcorder-rendezvous and the Worker)
+        run: task test:conformance
+
       # The Worker's relay credentials and its per-host-key daily cap across a
       # wrangler restart. Its Cloudflare Realtime TURN part runs only with a TURN
       # key and is the one part allowed to skip under CASTCORDER_CI: it runs when

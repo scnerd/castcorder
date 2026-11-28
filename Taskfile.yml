@@ -180,6 +180,23 @@ tasks:
       - cargo build --release --locked -p castcorder-host
       - node worker-relay.mjs
 
+  test:conformance:
+    desc: The rendezvous protocol contract against both implementations - castcorder-rendezvous and the Cloudflare Worker under wrangler dev (no Cloudflare account)
+    summary: |
+      Runs castcorder-rendezvous's tests/conformance.rs: the same black-box
+      WebSocket cases (hello, mailbox scope, registration, offer and answer,
+      errors, client-owned liveness with no server pings, a restart mid-session)
+      against the self-hosted server and the Worker. A difference between the
+      two fails (ADR 0003; ADR 0004: the Worker's semantics are the protocol).
+      Builds the Worker first; CASTCORDER_CONFORMANCE_WORKER makes a missing
+      Worker a failure rather than a skip.
+    dir: castcorder
+    env:
+      CASTCORDER_CONFORMANCE_WORKER: "1"
+    cmds:
+      - task: worker:build
+      - cargo test --release --locked -p castcorder-rendezvous --test conformance -- --nocapture
+
   test:relay:
     desc: Forced-relay system test - a relay-only host and two relay-only Chromium guests hold a call through coturn (needs Docker)
     summary: |
