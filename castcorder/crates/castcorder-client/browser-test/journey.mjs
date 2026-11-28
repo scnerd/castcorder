@@ -23,6 +23,10 @@
 //     A second take: Eli leaves while it records; the track arrives after it stops.
 //  5. Both leave and press "Back to your rooms" to get home.
 //
+// With CASTCORDER_NEMESIS_SEED the world also injects seeded faults at each
+// step boundary (a redeploy, a home cut off for seconds, packet loss): every
+// check is an invariant that must hold once they heal.
+//
 // The rendezvous comes from lib/world.mjs (the Worker under wrangler dev by
 // default; CASTCORDER_RENDEZVOUS=native for castcorder-rendezvous), never
 // started here.
@@ -112,10 +116,13 @@ const api = (p, path, body) => p.evaluate(async ([path, body]) => {
 
 let failed = null;
 let rv = null;
+let nem = null;
 try {
   net.setup();
   rv = await world.rendezvous({ start, ns: net.NS.inet, ip: net.INET_IP, port: 8080, stunPort: 3478, dist, version: VERSION });
   const RV = rv.http;
+  // Faults at each step boundary when CASTCORDER_NEMESIS_SEED is set.
+  nem = world.nemesis({ net, rv });
   const host = (ns, who, room) => start(ns, HOST_EXE, ['--dist', dist, '--library', join(RESULTS, 'library-' + who),
     '--room', room, '--rendezvous', RV], 'host-' + who);
   const hd = host(net.NS.d, 'D', 'Show');
@@ -136,6 +143,7 @@ try {
   const dana = await api(D, '/person');
   const eli = await api(E, '/person');
 
+  await nem.step('contacts');
   // 1. Contacts, by link.
   await D.click('#nav-contacts');
   await D.click('#add-contact');
@@ -169,13 +177,15 @@ try {
   check(!!back, 'after a redeploy Dana\x27s install registers again by itself (it pings a rendezvous that never pings)');
   await waitFor(async () => (await api(E, '/contacts')).contacts.some((c) => c.id === dana.id && c.online.length > 0), 'Eli sees Dana online again', 60000, 500).catch(() => null);
 
+  await nem.step('shared room');
   // 2. Dana makes Eli a producer in "Show"; Eli asks for the rooms they share.
   await api(D, '/rooms/trust', { room: 'Show', person: eli.id, trust: true, producer: true });
   await E.click('#contact-list li .contact-pick');
+  // Eli's install keeps asking for up to 40 s (contact_link::PATIENCE).
   const shared = await waitFor(async () => {
     const t = await text(E, '#contact-detail .contact-shared');
     return /Show|No rooms|not|fail|time/i.test(t) && !/asking/i.test(t) ? t : null;
-  }, 'Eli hears which rooms Eli shares with Dana', 40000, 500).catch(() => null);
+  }, 'Eli hears which rooms Eli shares with Dana', 60000, 500).catch(() => null);
   check(shared && shared.includes('Show'), 'Eli asked Dana\'s install over a contact link and hears they share Show: ' + shared);
 
   // Eli's home lists Show under "Shared with you", with Join: no need to
@@ -188,6 +198,7 @@ try {
   const sharedHref = (await sharedCard.count()) ? await sharedCard.locator('.join-shared').getAttribute('href') : '';
   check(sharedHref.startsWith('castcorder://'), 'its Join opens the room in the app: ' + sharedHref.replace(/#.*/, '#...'));
 
+  await nem.step('invite and call');
   // 3. Dana invites Eli to the call from the room card; the invite reaches
   // Eli's home over a contact link.
   await D.click('#nav-rooms');
@@ -220,6 +231,19 @@ try {
   check(true, 'Dana and Eli are both in the call, each from their own home network');
   check(EC.url().startsWith(RV), 'Eli joined on the call link from the invite');
 
+  // A take records only the guests in the call when it starts, so a fault
+  // here heals first, and Dana starts the take once the call has settled:
+  // Eli connected for longer than either side takes to declare the other
+  // gone (4 s), as a producer waits for everyone before recording.
+  await nem.step('takes', { healed: true });
+  if (nem.seed !== null) {
+    let since = null;
+    await waitFor(async () => {
+      if ((await state(EC)) !== 'connected') { since = null; return false; }
+      since ??= Date.now();
+      return Date.now() - since >= 6000;
+    }, 'Eli back in the call and steady', 60000, 250);
+  }
   // 4. Dana records a take; Eli's track reaches Dana's install.
   await waitFor(async () => DC.isEnabled('#take-start'), 'Dana can start a take', 20000);
   await DC.click('#take-start');
@@ -265,6 +289,7 @@ try {
   const late = await waitFor(eliTrack2, 'Eli\'s take 2 track on Dana\'s install', 90000, 1000).catch(() => null);
   check(late !== null, 'Eli\'s track of take 2 reached Dana\'s install although Eli had left the call: ' + late);
 
+  await nem.step('leave');
   // 5. Both leave and go home.
   for (const [p, who] of [[DC, 'Dana']]) {
     await p.click('#leave');
@@ -290,6 +315,7 @@ try {
   console.log('FAIL test did not complete: ' + String(e && e.stack || e));
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
+  if (nem) await nem.heal().catch(() => {});
   if (rv) await rv.stop().catch(() => {});
   for (const st of procs) { try { st.p.kill('SIGTERM'); } catch { /* gone */ } }
   await sleep(500);

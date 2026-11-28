@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      nemesis_seed:
+        description: "Replay one nemesis seed (the journey job; empty: three new seeds)"
+        required: false
+        default: ""
   pull_request:
     paths:
       - ".github/workflows/nightly.yml"
@@ -271,6 +276,78 @@ jobs:
           name: degraded-relay-logs
           path: castcorder/crates/castcorder-client/browser-test/test-results/relay-*
 
+  # The journey (two installs on two home networks, the Worker under wrangler dev) with
+  # seeded faults at every step: rendezvous redeploys, a home's uplink cut for seconds,
+  # packet loss (browser-test/lib/world.mjs, nemesis). New seeds every night; a failing
+  # seed replays exactly with CASTCORDER_NEMESIS_SEED (or the nemesis_seed input).
+  nemesis:
+    name: journey with faults (seed ${{ matrix.slot }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install Task
+        uses: arduino/setup-task@v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Ensure toolchain and wasm32 target
+        run: rustup show active-toolchain
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: castcorder
+          key: nightly-nemesis
+
+      - name: Install trunk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install browser system libraries
+        working-directory: castcorder/crates/castcorder-client/browser-test
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install-deps chromium
+
+      - name: Start a null audio sink
+        run: |
+          sudo apt-get install -y --no-install-recommends pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci
+          pactl set-default-sink ci
+
+      - name: Pick the seed
+        env:
+          ASKED: ${{ github.event.inputs.nemesis_seed }}
+          SLOT: ${{ matrix.slot }}
+        run: |
+          if [ -n "$ASKED" ]; then seed="$ASKED"; else seed=$(( GITHUB_RUN_NUMBER * 10 + SLOT )); fi
+          echo "CASTCORDER_NEMESIS_SEED=$seed" >> "$GITHUB_ENV"
+          echo "::notice::nemesis seed $seed (replay: CASTCORDER_NEMESIS_SEED=$seed task test:journey)"
+
+      - name: Journey with faults
+        run: task test:journey
+
+      - name: Upload journey logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nemesis-journey-logs-${{ matrix.slot }}
+          path: castcorder/crates/castcorder-client/browser-test/test-results/journey*
+
   # The release workflow, run by hand on this commit: it verifies the version, then builds the
   # installers on Windows, macOS and Linux and smoke-starts each one (no release is made). Run
   # here so a change that breaks an installer build shows up in the nightly, not at a tag
@@ -316,7 +393,7 @@ jobs:
   # A failing scheduled run files an issue pointing at it.
   report:
     name: report
-    needs: [heavy, camtoggle, platforms, windows-gst, degraded, installers]
+    needs: [heavy, camtoggle, platforms, windows-gst, degraded, nemesis, installers]
     if: ${{ failure() && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:

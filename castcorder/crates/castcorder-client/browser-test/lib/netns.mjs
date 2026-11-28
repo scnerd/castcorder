@@ -91,6 +91,31 @@ export function blackhole(ip, port) {
   inNs(NS.inet, 'iptables', '-I', 'OUTPUT', '-p', 'tcp', '-d', ip, '--dport', String(port), '-j', 'DROP');
 }
 
+// The routers of the two homes, by home ('d', 'e').
+export const ROUTER = { d: NS.rd, e: NS.re };
+
+// Faults at a home's router, on its link to the internet (lib/world.mjs's
+// nemesis). Each returns the function that undoes it.
+// - cut: nothing passes either way (a dropped uplink, a partition).
+// - lossy: each packet either way is dropped with probability `p`.
+export function cut(home) {
+  return routerRules(home, [['-j', 'DROP']]);
+}
+export function lossy(home, p) {
+  return routerRules(home, [['-m', 'statistic', '--mode', 'random', '--probability', String(p), '-j', 'DROP']]);
+}
+function routerRules(home, matches) {
+  const ns = ROUTER[home];
+  const rules = [];
+  for (const m of matches) {
+    for (const [chain, dir] of [['FORWARD', '-i'], ['FORWARD', '-o'], ['INPUT', '-i'], ['OUTPUT', '-o']]) {
+      rules.push([chain, dir, 'wan', ...m]);
+    }
+  }
+  for (const r of rules) inNs(ns, 'iptables', '-I', ...r);
+  return () => { for (const r of rules) { try { inNs(ns, 'iptables', '-D', ...r); } catch { /* gone */ } } };
+}
+
 export function teardown() {
   for (const ns of Object.values(NS)) {
     try { run('ip', 'netns', 'del', ns); } catch { /* not there */ }

@@ -115,3 +115,78 @@ async function worker({ start, ns, ip, port, stunPort, dist, version, http }) {
     async stop() { kill(st); kill(stun); rmSync(state, { recursive: true, force: true }); },
   };
 }
+
+// ---------------------------------------------------------------- nemesis
+//
+// Faults by default, in the Jepsen manner: with CASTCORDER_NEMESIS_SEED set,
+// every step boundary a journey marks (`await nem.step('name')`) may start
+// one fault, chosen by a PRNG from that seed, so a failing run replays
+// exactly with the same seed. Faults are ones the product claims to
+// survive, each healed before the next boundary or within seconds:
+//
+// - redeploy: the rendezvous killed outright and started again;
+// - partition: one home's uplink cut for 3 to 10 s, then restored;
+// - loss: one home's uplink drops 2 to 8 % of packets until the next step.
+//
+// The journey's checks are invariants with a time budget: they must hold
+// once faults heal. A step whose precondition a fault would break (a take
+// needs its guests in the call when it starts) passes { healed: true }:
+// a partition then runs and heals before step() returns, and the journey
+// waits for the call to settle again. Without a seed (the clean run)
+// step() does nothing.
+
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/// The nemesis for a journey on network `net` (lib/netns.mjs) with
+/// rendezvous `rv` (from rendezvous()). `log(line)` records what it did.
+export function nemesis({ net, rv, log = console.log }) {
+  const raw = process.env.CASTCORDER_NEMESIS_SEED;
+  const seed = raw ? Number.parseInt(raw, 10) >>> 0 : null;
+  const pending = [];
+  const timers = [];
+  if (seed === null) return { seed, async step() {}, async heal() {} };
+  log('nemesis: seed ' + seed + ' (replay with CASTCORDER_NEMESIS_SEED=' + seed + ')');
+  const rnd = mulberry32(seed);
+  const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
+  const heal = async () => {
+    for (const t of timers.splice(0)) clearTimeout(t);
+    for (const undo of pending.splice(0)) undo();
+  };
+  return {
+    seed,
+    heal,
+    async step(name, { healed = false } = {}) {
+      await heal();
+      if (rnd() < 0.35) { log('nemesis before ' + name + ': none'); return; }
+      const home = pick(['d', 'e']);
+      const fault = pick(['redeploy', 'partition', 'loss']);
+      if (fault === 'redeploy') {
+        log('nemesis before ' + name + ': redeploy the rendezvous');
+        await rv.restart();
+      } else if (fault === 'partition') {
+        const ms = 3000 + Math.floor(rnd() * 7000);
+        log('nemesis before ' + name + ': cut home ' + home + ' for ' + ms + ' ms');
+        const undo = net.cut(home);
+        if (healed) {
+          await new Promise((r) => setTimeout(r, ms));
+          undo();
+          log('nemesis: home ' + home + ' back before ' + name);
+          return;
+        }
+        pending.push(undo);
+        timers.push(setTimeout(() => { const i = pending.indexOf(undo); if (i >= 0) pending.splice(i, 1); undo(); }, ms));
+      } else {
+        const p = Math.round((0.02 + rnd() * 0.06) * 100) / 100;
+        log('nemesis before ' + name + ': home ' + home + ' loses ' + Math.round(p * 100) + '% of packets');
+        pending.push(net.lossy(home, p));
+      }
+    },
+  };
+}
