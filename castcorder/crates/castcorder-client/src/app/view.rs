@@ -31,10 +31,32 @@ fn take_label(take: &str) -> String {
     }
 }
 
-/// The side panel actually shown, given the person's choice and role.
-fn shown_panel(panel: Panel, producer: bool) -> Panel {
+/// At or below this width the page is laid out for a phone (style.css).
+const PHONE_WIDTH: f64 = 760.0;
+
+/// From this width the Transcript panel and People or Recordings fit side by
+/// side beside the stage (two 360 px panels).
+const TWO_PANELS_WIDTH: f64 = 1240.0;
+
+fn page_width() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.inner_width().ok())
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1280.0)
+}
+
+/// Whether the Transcript panel is wanted: the person's choice, else open
+/// unless the page is a phone's (cast-2wqp).
+fn transcript_wanted(choice: Option<bool>, width: f64) -> bool {
+    choice.unwrap_or(width > PHONE_WIDTH)
+}
+
+/// The side panel actually shown, given the person's choice, role, and
+/// whether the Transcript panel takes the only room there is: then nothing
+/// opens by itself beside it (cast-2wqp).
+fn shown_panel(panel: Panel, producer: bool, transcript_first: bool) -> Panel {
     match panel {
-        Panel::Auto if producer => Panel::People,
+        Panel::Auto if producer && !transcript_first => Panel::People,
         Panel::Auto | Panel::Closed => Panel::Closed,
         Panel::People if !producer => Panel::Closed,
         p => p,
@@ -689,10 +711,38 @@ fn Call(ui: Ui) -> impl IntoView {
         let r = ui.recording.get();
         r.starts_with("recording") || r.starts_with("starting")
     };
-    let panel = move || shown_panel(ui.panel.get(), producer());
+    // The Transcript panel (cast-2wqp) is its own side panel. Where it and
+    // another do not both fit, it wins unless the person opened the other.
+    {
+        let on_resize = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            ui.width.set(page_width());
+        });
+        let _ =
+            window().add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref());
+        on_resize.forget();
+    }
+    let one_fits = move || ui.width.get() < TWO_PANELS_WIDTH;
+    let transcript_want = move || transcript_wanted(ui.transcript_open.get(), ui.width.get());
+    let panel = move || shown_panel(ui.panel.get(), producer(), transcript_want() && one_fits());
+    let transcript_shown = move || transcript_want() && (!one_fits() || panel() == Panel::Closed);
     let toggle = move |p: Panel| {
-        let now = shown_panel(ui.panel.get_untracked(), ui.role.get_untracked().producer);
+        let now = shown_panel(
+            ui.panel.get_untracked(),
+            ui.role.get_untracked().producer,
+            transcript_wanted(ui.transcript_open.get_untracked(), ui.width.get_untracked())
+                && ui.width.get_untracked() < TWO_PANELS_WIDTH,
+        );
         ui.panel.set(if now == p { Panel::Closed } else { p });
+    };
+    let toggle_transcript = move || {
+        if transcript_shown() {
+            ui.transcript_open.set(Some(false));
+        } else {
+            ui.transcript_open.set(Some(true));
+            if one_fits() {
+                ui.panel.set(Panel::Closed);
+            }
+        }
     };
     let pressed = move |p: Panel| if panel() == p { "true" } else { "false" };
     // Opening a side panel closes the Devices dialog (cast-3u9).
@@ -770,9 +820,7 @@ fn Call(ui: Ui) -> impl IntoView {
     };
     let invite_open = RwSignal::new(false);
     let phone_more = RwSignal::new(false);
-    let more_open = RwSignal::new(false);
     super::popups::register_flag("invite", ".invite-wrap", invite_open);
-    super::popups::register_flag("more", ".more-wrap", more_open);
     super::popups::register_flag("phone-more", ".more-dock", phone_more);
     let top_title = move || {
         let r = ui.shown_room();
@@ -865,15 +913,9 @@ fn Call(ui: Ui) -> impl IntoView {
                     </Show>
                     <button class="btn" id="open-recordings" aria-pressed=move || pressed(Panel::Recordings) on:click=move |_| toggle(Panel::Recordings)>
                         <Icon name="folder" small=true/>"Recordings"</button>
-                    <div class="menu-wrap more-wrap">
-                        <button id="more-menu" class="btn" aria-label="More" aria-expanded=move || if more_open.get() { "true" } else { "false" }
-                            on:click=move |_| more_open.update(|o| *o = !*o)>"..."</button>
-                        <div class="popover more-pop" hidden=move || !more_open.get()>
-                            <button class="btn ghost" id="open-transcript" aria-pressed=move || pressed(Panel::Transcript)
-                                on:click=move |_| { more_open.set(false); toggle(Panel::Transcript) }>
-                                <Icon name="lines" small=true/>"Transcript"</button>
-                        </div>
-                    </div>
+                    <button class="btn" id="open-transcript" aria-pressed=move || if transcript_shown() { "true" } else { "false" }
+                        on:click=move |_| toggle_transcript()>
+                        <Icon name="lines" small=true/>"Transcript"</button>
                 </div>
             </header>
 
@@ -924,7 +966,6 @@ fn Call(ui: Ui) -> impl IntoView {
                         <h2>{move || match panel() {
                             Panel::People => "People and call",
                             Panel::Recordings => "Recordings",
-                            Panel::Transcript => "Transcript",
                             _ => "",
                         }}</h2>
                         <button class="btn tiny outline" aria-label="Close panel" on:click=move |_| ui.panel.set(Panel::Closed)>
@@ -943,9 +984,6 @@ fn Call(ui: Ui) -> impl IntoView {
                             <Show when=move || !ui.role.get().host_machine>
                                 <recordings::YourRecordings ui=ui/>
                             </Show>
-                        </div>
-                        <div class="section" hidden=move || panel() != Panel::Transcript>
-                            <super::transcript::Transcript ui=ui/>
                         </div>
                         <details class="diag">
                             <summary>"Connection details"</summary>
@@ -975,6 +1013,16 @@ fn Call(ui: Ui) -> impl IntoView {
                                 <dt>"Errors"</dt><dd><code id="errors">{move || ui.errors.get().join(" | ")}</code></dd>
                             </dl>
                         </details>
+                    </div>
+                </aside>
+                <aside class="side transcript-side" id="transcript-side" hidden=move || !transcript_shown()>
+                    <div class="side-head">
+                        <h2>"Transcript"</h2>
+                        <button class="btn tiny outline" aria-label="Close transcript" on:click=move |_| ui.transcript_open.set(Some(false))>
+                            <Icon name="x" small=true/></button>
+                    </div>
+                    <div class="side-body">
+                        <super::transcript::Transcript ui=ui/>
                     </div>
                 </aside>
             </div>
@@ -1052,7 +1100,7 @@ fn Call(ui: Ui) -> impl IntoView {
                                     <button id="more-recordings" class="btn ghost" on:click=move |_| { phone_more.set(false); toggle(Panel::Recordings) }>
                                         <Icon name="folder" small=true/>"Recordings"</button>
                                 </Show>
-                                <button id="more-transcript" class="btn ghost" on:click=move |_| { phone_more.set(false); toggle(Panel::Transcript) }>
+                                <button id="more-transcript" class="btn ghost" on:click=move |_| { phone_more.set(false); toggle_transcript() }>
                                     <Icon name="lines" small=true/>"Transcript"</button>
                             </div>
                         </Show>
@@ -1162,6 +1210,8 @@ pub(super) fn App() -> impl IntoView {
         theme: RwSignal::new(stored_theme()),
         host_link: RwSignal::new(String::new()),
         panel: RwSignal::new(Panel::Auto),
+        transcript_open: RwSignal::new(None),
+        width: RwSignal::new(page_width()),
         self_view: RwSignal::new(true),
         levels: RwSignal::new(VecDeque::new()),
         devices: devices::DeviceUi::new(),

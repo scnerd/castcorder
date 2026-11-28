@@ -45,7 +45,7 @@ export async function takeInfoChecks() {
   // fixed slot, so nothing on the bar moves when a take starts.
   const bar = (p) => p.evaluate(() => {
     const x = (sel) => { const e = document.querySelector(sel); return e ? Math.round(e.getBoundingClientRect().left) : null; };
-    return { recordings: x('#open-recordings'), more: x('#more-menu'), h1: document.querySelector('.topbar h1')?.textContent,
+    return { recordings: x('#open-recordings'), more: x('#open-transcript'), h1: document.querySelector('.topbar h1')?.textContent,
       role: document.querySelector('#role-chip')?.textContent };
   });
   const idleBar = await bar(P);
