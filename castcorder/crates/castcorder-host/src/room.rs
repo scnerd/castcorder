@@ -586,13 +586,25 @@ impl Room {
         self.saved.devices.get(device)
     }
 
+    /// Whether `person` is a producer here: named as one, or one of their
+    /// devices was granted the role (the role follows the person).
+    fn person_producer(&self, person: &str) -> bool {
+        self.saved.producer_persons.contains(person)
+            || self
+                .saved
+                .devices
+                .values()
+                .any(|d| d.producer && !d.banned && d.person.as_deref() == Some(person))
+    }
+
     fn conn_role(&self, c: &Conn) -> Role {
         let rec = self.saved.devices.get(&c.device);
         let granted = rec
             .is_some_and(|d| d.producer && (d.trusted || self.conn_person_trusted(c)) && !d.banned);
-        // A producer person: every device of theirs, unless kicked.
+        // A producer person: every trusted device of theirs, unless kicked.
         let by_person = c.person.as_ref().is_some_and(|p| {
-            self.saved.producer_persons.contains(p) && self.saved.persons.contains(p)
+            self.person_producer(p)
+                && (self.saved.persons.contains(p) || rec.is_some_and(|d| d.trusted))
         }) && !rec.is_some_and(|d| d.banned);
         Role {
             producer: c.at_host || c.owner || granted || by_person,
@@ -857,7 +869,14 @@ impl Room {
         if self.saved.locked && !trusted {
             return Err(Refusal::Locked);
         }
-        let producer = trusted && rec.is_some_and(|d| d.producer);
+        // A producer is a person, not one device: any trusted device of a
+        // person who is a producer here opens the call, not only the device
+        // the role was granted on (cast-fpxw: E, made a producer on one
+        // device, could not start the call from another).
+        let person = seat.person.as_ref().map(castcorder_link::person::person_id);
+        let producer = trusted
+            && (rec.is_some_and(|d| d.producer)
+                || person.as_deref().is_some_and(|p| self.person_producer(p)));
         if !self.saved.open && !producer && !self.producer_present() {
             return Ok(Admission::Wait);
         }

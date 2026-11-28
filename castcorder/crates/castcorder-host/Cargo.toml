@@ -56,6 +56,7 @@ castcorder-port-capture.workspace = true
 castcorder-recorder.workspace = true
 # Ctrl+C finalises an in-progress take (host microphone, safety tracks) before exit.
 ctrlc = "3"
+if-addrs = "0.15"
 
 [features]
 native-capture = ["dep:castcorder-capture-gst"]
