@@ -11,21 +11,26 @@ use super::Ui;
 pub(super) fn Transcript(ui: Ui) -> impl IntoView {
     let view = move || {
         let lines = ui.transcript.get();
+        let drafts = ui.transcript_drafts.get();
         let query = ui.transcript_query.get();
         let total = lines.len();
-        let takes: Vec<(u32, Vec<(String, String)>)> = crate::transcript::view(&lines, &query)
-            .into_iter()
-            .map(|(t, v)| {
-                (
-                    t,
-                    v.into_iter()
-                        .map(|l| (l.name.clone(), l.text.clone()))
-                        .collect(),
-                )
-            })
-            .collect();
-        let shown: usize = takes.iter().map(|(_, v)| v.len()).sum();
-        let summary = if total == 0 {
+        let takes: Vec<(u32, Vec<(String, String, bool)>)> =
+            crate::transcript::view(&lines, &drafts, &query)
+                .into_iter()
+                .map(|(t, v)| {
+                    (
+                        t,
+                        v.into_iter()
+                            .map(|(l, draft)| (l.name.clone(), l.text.clone(), draft))
+                            .collect(),
+                    )
+                })
+                .collect();
+        let shown: usize = takes
+            .iter()
+            .map(|(_, v)| v.iter().filter(|l| !l.2).count())
+            .sum();
+        let summary = if total == 0 && drafts.is_empty() {
             "Nothing yet. What people say while a take records appears here.".to_string()
         } else if query.trim().is_empty() {
             format!("{total} lines")
@@ -39,8 +44,8 @@ pub(super) fn Transcript(ui: Ui) -> impl IntoView {
                     <section class="transcript-take" data-take=take>
                         <h4>{format!("Take {take}")}</h4>
                         <ul>
-                            {lines.into_iter().map(|(name, text)| view! {
-                                <li class="transcript-line">
+                            {lines.into_iter().map(|(name, text, draft)| view! {
+                                <li class="transcript-line" class:draft=draft>
                                     <strong class="who">{name}</strong>" "
                                     <span class="said">{text}</span>
                                 </li>

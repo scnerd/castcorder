@@ -1068,21 +1068,44 @@ impl Call {
         }
     }
 
-    /// File and send the transcript lines heard since the last turn.
+    /// File and send the transcript lines heard since the last turn, and
+    /// send the drafts among them (cast-veeq), in the order they were made.
     fn publish_transcript(&mut self) {
         let Some(t) = &self.transcripts else { return };
-        let lines = t.lines();
-        if lines.is_empty() {
+        let heard = t.heard();
+        if heard.is_empty() {
             return;
         }
-        if let Some(dir) = &self.call_dir
+        let mut events: Vec<Event> = Vec::new();
+        let mut lines: Vec<castcorder_protocol::TranscriptLine> = Vec::new();
+        for h in heard {
+            match h {
+                crate::transcript::Heard::Line(l) => {
+                    if let Some(Event::Transcript(run)) = events.last_mut() {
+                        run.push(l.clone());
+                    } else {
+                        events.push(Event::Transcript(vec![l.clone()]));
+                    }
+                    lines.push(l);
+                }
+                crate::transcript::Heard::Draft(l) => events.push(Event::TranscriptDraft(l)),
+            }
+        }
+        if !lines.is_empty()
+            && let Some(dir) = &self.call_dir
             && let Err(e) = crate::transcript::append(dir, &lines)
         {
             warn!(error = %e, "transcript lines not saved");
         }
         for (id, rpc) in &mut self.rpc {
-            if self.names.contains_key(id) && rpc.emit(Event::Transcript(lines.clone())).is_err() {
-                warn!(guest = id.0, "transcript not sent: channel closed");
+            if !self.names.contains_key(id) {
+                continue;
+            }
+            for e in &events {
+                if rpc.emit(e.clone()).is_err() {
+                    warn!(guest = id.0, "transcript not sent: channel closed");
+                    break;
+                }
             }
         }
         self.transcript.extend(lines);

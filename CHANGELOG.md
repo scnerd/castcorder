@@ -8,6 +8,11 @@ moves them under the new version (docs/release.md).
 
 ## [Unreleased]
 
+### Changed
+
+- The live transcript shows what someone is saying while they are still talking, as a draft that
+  their finished line replaces, and drops a line the transcription engine repeats word for word.
+
 ## [0.1.0] - 2026-11-28
 
 First release. Castcorder is a free app for recording podcasts: everyone talks over a live

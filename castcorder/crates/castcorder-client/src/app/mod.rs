@@ -441,6 +441,8 @@ struct Ui {
     contact_offer: RwSignal<Option<contact_offer::Offer>>,
     /// The call's live transcript, in spoken order (cast-7hm.3).
     transcript: RwSignal<Vec<castcorder_protocol::TranscriptLine>>,
+    /// What each person is still saying, one draft each (cast-veeq).
+    transcript_drafts: RwSignal<Vec<castcorder_protocol::TranscriptLine>>,
     /// What the Transcript panel searches for.
     transcript_query: RwSignal<String>,
     /// The last producer request's result.
