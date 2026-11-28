@@ -13,6 +13,7 @@
 // The Worker needs castcorder/worker built (task worker:build) and wrangler
 // installed (task worker:tools); under CASTCORDER_CI a missing one fails.
 
+import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -57,6 +58,15 @@ async function ready(st, re, what, timeout) {
     if (st.exited !== undefined) throw new Error(what + ': ' + st.name + ' exited with ' + st.exited + '\n' + (st.out + st.err).slice(-2000));
     return re.test(st.out + st.err);
   }, what, timeout, 250);
+}
+
+// Under sudo, hand `paths` (if there) back to the user who ran it.
+function giveBack(paths) {
+  const [uid, gid] = [process.env.SUDO_UID, process.env.SUDO_GID];
+  if (!uid || !gid) return;
+  for (const p of paths.filter((x) => existsSync(x))) {
+    try { execFileSync('chown', ['-R', uid + ':' + gid, p]); } catch { /* best effort */ }
+  }
 }
 
 function kill(st) {
@@ -115,9 +125,10 @@ async function worker({ start, ns, ip, port, stunPort, dist, version, http }) {
     async stop() {
       kill(st); kill(stun);
       rmSync(state, { recursive: true, force: true });
-      // The journey runs as root: leave no root-owned assets behind for the
-      // next Worker test (test:system:worker) to trip over.
+      // The journey runs as root (sudo): leave nothing root-owned in the
+      // Worker's directory for the next Worker test (test:system:worker).
       rmSync(assets, { recursive: true, force: true });
+      giveBack([join(WORKER_DIR, 'assets'), join(WORKER_DIR, '.wrangler')]);
     },
   };
 }
