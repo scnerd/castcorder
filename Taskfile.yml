@@ -192,7 +192,7 @@ tasks:
       Worker a failure rather than a skip.
     dir: castcorder
     env:
-      CASTCORDER_CONFORMANCE_WORKER: '1'
+      CASTCORDER_CONFORMANCE_WORKER: "1"
     cmds:
       - task: worker:build
       - cargo test --release --locked -p castcorder-rendezvous --test conformance -- --nocapture
