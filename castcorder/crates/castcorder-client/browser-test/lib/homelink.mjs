@@ -171,6 +171,9 @@ export async function homeLinkChecks() {
   await P.click('#create-room');
   await waitFor(async () => (await text(P, '#rooms')).includes('after-the-link'),
     'the home still takes clicks after "Rooms you joined"', 10000);
+  // cast-4imd: a status message clears itself; it used to stay up for good.
+  await waitFor(async () => (await text(P, '#home-message')) === '',
+    'the home status message clears on its own', 25000);
 
   // cast-66n: rename a room, then archive it and bring it back.
   const junk = P.locator('#rooms li[data-room="after-the-link"]');

@@ -334,10 +334,11 @@ impl GstCapture {
         sink.set_max_buffers(32);
         let opus = Self::assemble(&pipeline, &parse, &sink, live)?;
         tracing::info!(path = %path.display(), teed = live.is_some(), "capture source chosen: wavparse file");
-        Ok((
-            Self::start(pipeline, sink, None, Duration::from_secs(10))?,
-            opus,
-        ))
+        let cap = Self::start(pipeline, sink, None, Duration::from_secs(10))?;
+        if let Some(live) = &opus {
+            live.arm();
+        }
+        Ok((cap, opus))
     }
 
     /// Link `src` straight into `sink`, or through a tee with a live branch.
@@ -475,10 +476,11 @@ impl GstCapture {
             last_data: Instant::now(),
             got_data: false,
         };
-        Ok((
-            Self::start(pipeline, sink, Some(live), watchdog.first_data)?,
-            opus,
-        ))
+        let cap = Self::start(pipeline, sink, Some(live), watchdog.first_data)?;
+        if let Some(live) = &opus {
+            live.arm();
+        }
+        Ok((cap, opus))
     }
 
     fn start(
@@ -529,6 +531,14 @@ impl GstCapture {
             "caps negotiated"
         );
         cap.pending = Some(sample_bytes(&sample)?);
+        // The first sample can come before every element is playing; the live
+        // branch is only armed (see `LiveOpus::arm`) once they are.
+        let (_, state, _) = cap.pipeline.state(gst::ClockTime::from_seconds(10));
+        if state != gst::State::Playing {
+            return Err(err(format!(
+                "pipeline did not reach PLAYING (at {state:?})"
+            )));
+        }
         if let Some(live) = cap.live.as_mut() {
             live.last_data = Instant::now();
             live.got_data = true;

@@ -12,6 +12,7 @@
 use serde::Deserialize;
 
 use super::native::NATIVE_HEADER;
+use super::person::flash;
 use super::view::{Icon, Mark};
 use super::*;
 
@@ -63,6 +64,9 @@ struct HomeRoom {
 struct HomeData {
     rooms: Vec<HomeRoom>,
     lan: Vec<String>,
+    /// The host's reachability self-check: "yes", "no", or empty (unknown).
+    #[serde(default)]
+    reachable: String,
 }
 
 /// One `/rooms` or `/folder/open` request; the answer's text, or the host's
@@ -351,9 +355,9 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             data.set(d)
                         }
                     }
-                    Err(e) => message.set(format!("rooms not readable: {e}")),
+                    Err(e) => flash(message, format!("rooms not readable: {e}")),
                 },
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
             if let Ok(t) = home_request("GET", "/contacts", None).await
                 && let Ok(v) = serde_json::from_str::<Invites>(&t)
@@ -452,8 +456,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     let act = move |path: &'static str, body: serde_json::Value, done: &'static str| {
         spawn_local(async move {
             match home_request("POST", path, Some(body.to_string())).await {
-                Ok(_) => message.set(done.into()),
-                Err(e) => message.set(e),
+                Ok(_) => flash(message, done.into()),
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -483,19 +487,22 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                             failed.push(e);
                         }
                     }
-                    message.set(match (people.len(), failed.is_empty()) {
-                        (0, _) => "Room made.".into(),
-                        (n, true) => format!(
-                            "Room made; it trusts {n} {}.",
-                            if n == 1 { "person" } else { "people" }
-                        ),
-                        (_, false) => format!(
-                            "Room made, but not every person was trusted: {}",
-                            failed.join("; ")
-                        ),
-                    });
+                    flash(
+                        message,
+                        match (people.len(), failed.is_empty()) {
+                            (0, _) => "Room made.".into(),
+                            (n, true) => format!(
+                                "Room made; it trusts {n} {}.",
+                                if n == 1 { "person" } else { "people" }
+                            ),
+                            (_, false) => format!(
+                                "Room made, but not every person was trusted: {}",
+                                failed.join("; ")
+                            ),
+                        },
+                    );
                 }
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -523,7 +530,11 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     };
     // Through the rendezvous once any room has a link there; else the LAN.
     let reach = move || {
-        if data.get().rooms.iter().any(|r| r.link.is_some()) {
+        let d = data.get();
+        if d.reachable == "no" {
+            // The self-check found the rendezvous does not deliver to it.
+            "Others can't reach this computer right now"
+        } else if d.rooms.iter().any(|r| r.link.is_some()) {
             "Reachable from anywhere"
         } else {
             "Reachable on this network only"
@@ -714,7 +725,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 }
                                 // The link opens the app's call window; say so, and what
                                 // an empty answer means, where the click happened.
-                                message.set("Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
+                                flash(message, "Rooms you joined opens in the app's call window; it lists calls once this app has joined one.".into());
                                 super::person::show_element("home-message");
                             }>"Rooms you joined"</a></span>
                         </div>

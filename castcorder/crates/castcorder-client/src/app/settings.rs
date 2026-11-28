@@ -18,6 +18,12 @@ struct Health {
     relay: String,
     #[serde(default)]
     relay_detail: String,
+    /// The reachability self-check: "yes", "no" (see `reachable_detail`),
+    /// or empty while unknown.
+    #[serde(default)]
+    reachable: String,
+    #[serde(default)]
+    reachable_detail: String,
 }
 
 /// `GET /settings`.
@@ -171,6 +177,15 @@ pub(super) fn SettingsPage(ui: Ui) -> impl IntoView {
     let reach = move || {
         let v = data.get();
         match (&v.rendezvous, v.health.connected) {
+            (Some(_), true) if v.health.reachable == "no" => status_row(
+                "status-reach",
+                Tone::Warn,
+                "Others can't reach this computer right now".into(),
+                format!(
+                    "Connected to the rendezvous, but it does not deliver to this computer, so call links and contacts can't reach it. It checks again shortly. ({})",
+                    v.health.reachable_detail
+                ),
+            ),
             (Some(_), true) => status_row(
                 "status-reach",
                 Tone::Ok,

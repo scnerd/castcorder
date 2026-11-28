@@ -61,6 +61,12 @@ struct SimTurn {
     forgotten: Vec<SocketAddr>,
     /// Datagrams dropped because their flow was forgotten.
     dropped_idle: usize,
+    /// cast-9h00: Refresh requests are dropped unanswered (Cloudflare never
+    /// answered a Refresh, so its allocations closed 30 minutes after they
+    /// were made).
+    drop_refresh: bool,
+    /// Refresh requests dropped.
+    refreshes_dropped: usize,
 }
 
 impl SimTurn {
@@ -88,6 +94,8 @@ impl SimTurn {
             last_seen: vec![],
             forgotten: vec![],
             dropped_idle: 0,
+            drop_refresh: false,
+            refreshes_dropped: 0,
         }
     }
 
@@ -182,6 +190,10 @@ impl SimTurn {
             }
             // A STUN request's type: method bits with class 00.
             if p.len() >= 20 && p[0] & 0xC0 == 0 {
+                if self.drop_refresh && u16::from_be_bytes([p[0], p[1]]) == 0x0004 {
+                    self.refreshes_dropped += 1;
+                    continue;
+                }
                 match u16::from_be_bytes([p[0], p[1]]) {
                     0x0003 => self.allocates += 1,
                     0x0004 => self.refreshes += 1,
@@ -780,7 +792,12 @@ fn init_log() {
 /// Returns the world and (frames sent, frames B heard).
 fn expiring_call(ttl: Duration, renew: bool, minutes: u64) -> (World, usize, usize) {
     init_log();
-    let mut w = World::expiring(ttl, renew);
+    call_for(World::expiring(ttl, renew), minutes, |_| {})
+}
+
+/// Join two guests to `w`, then run the call for `minutes` (`setup` runs once
+/// the call is up), A sending 50 audio frames a second to B.
+fn call_for(mut w: World, minutes: u64, setup: impl FnOnce(&mut World)) -> (World, usize, usize) {
     w.run_until(Duration::from_secs(5), |w| w.host.relayed().is_some());
     w.join("A");
     w.join("B");
@@ -791,6 +808,7 @@ fn expiring_call(ttl: Duration, renew: bool, minutes: u64) -> (World, usize, usi
             && w.g(0).channels_open()
             && w.g(1).channels_open()
     });
+    setup(&mut w);
     w.step = Duration::from_millis(20);
     let end = w.time.now() + Duration::from_secs(minutes * 60);
     let mut sent = 0;
@@ -879,5 +897,62 @@ fn an_idle_allocation_keeps_its_flow_alive_and_is_refreshed() {
     assert!(
         stats.keepalives >= 70 * 60 / 15 - 2 && stats.keepalives_answered >= stats.keepalives - 1,
         "keepalives sent and answered: {stats:?}"
+    );
+}
+
+#[test]
+fn a_relay_whose_refresh_is_never_answered_moves_to_a_new_allocation_before_it_lapses() {
+    // cast-9h00: Cloudflare never answered the allocation's Refresh, so every
+    // allocation closed exactly 30 minutes after it was made and a relayed call
+    // lost its path. With a spare socket the host sees the Refresh go
+    // unanswered and makes the next allocation beside the live one, switching
+    // the guests over while the old one still carries them.
+    init_log();
+    let (w, sent, heard) = call_for(
+        World::expiring(Duration::from_secs(3 * 3600), false),
+        45,
+        |w| {
+            w.turn.drop_refresh = true;
+        },
+    );
+    let stats = w.host.relay_stats();
+    assert!(w.turn.refreshes_dropped > 0, "refreshes went unanswered");
+    assert!(stats.allocations >= 2, "a second allocation: {stats:?}");
+    assert_eq!(stats.failures, 0, "no allocation lapsed: {stats:?}");
+    assert!(
+        !w.events
+            .iter()
+            .any(|e| matches!(e, HostEvent::GuestGone { .. })),
+        "no guest dropped: {:?}",
+        w.events
+    );
+    assert!(
+        heard * 100 >= sent * 99,
+        "B heard {heard} of {sent} frames across the 30 minute mark"
+    );
+}
+
+#[test]
+fn a_relay_that_lapses_offers_guests_its_new_allocation() {
+    // cast-9h00: with no spare socket to allocate beside, the allocation lapses
+    // 30 minutes in and a new one is made 5 seconds later. The guests are
+    // offered the new relayed address and ICE restarts, so the call comes
+    // back instead of staying on the dead address for good.
+    init_log();
+    let (w, sent, heard) = call_for(World::new(), 45, |w| {
+        w.turn.drop_refresh = true;
+    });
+    let stats = w.host.relay_stats();
+    assert!(stats.failures >= 1 && stats.allocations >= 2, "{stats:?}");
+    assert!(
+        !w.events
+            .iter()
+            .any(|e| matches!(e, HostEvent::GuestGone { .. })),
+        "no guest dropped: {:?}",
+        w.events
+    );
+    assert!(
+        heard * 100 >= sent * 97,
+        "B heard {heard} of {sent} frames across the lapse"
     );
 }
