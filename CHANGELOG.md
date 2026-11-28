@@ -8,6 +8,8 @@ moves them under the new version (docs/release.md).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-28
+
 First release. Castcorder is a free app for recording podcasts: everyone talks over a live
 call while each machine records its own microphone (and camera) locally at full quality, then
 hands the files to the host.
@@ -68,4 +70,5 @@ hands the files to the host.
   "Show device names" offer appeared), so a quick click on Join is no longer lost on the space
   around it.
 
-[unreleased]: https://github.com/scnerd/castcorder/commits/main
+[0.1.0]: https://github.com/scnerd/castcorder/releases/tag/v0.1.0
+[unreleased]: https://github.com/scnerd/castcorder/compare/v0.1.0...HEAD

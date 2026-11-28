@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-align"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "castcorder-core",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-core",
  "castcorder-host",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-capture-gst"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-port-capture",
  "gstreamer",
@@ -842,7 +842,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-core",
  "castcorder-link",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-port-clock",
  "castcorder-port-disk",
@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-host"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-align",
  "castcorder-capture-gst",
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-link"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-mailbox"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "castcorder-link",
@@ -938,33 +938,33 @@ dependencies = [
 
 [[package]]
 name = "castcorder-port-capture"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "castcorder-port-clock"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "castcorder-port-disk"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "fs4",
 ]
 
 [[package]]
 name = "castcorder-port-net"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-port-clock",
 ]
 
 [[package]]
 name = "castcorder-port-transcribe"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "castcorder-protocol"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-recorder"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-port-capture",
  "castcorder-port-disk",
@@ -983,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-rendezvous"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "axum",
  "castcorder-link",
@@ -999,11 +999,11 @@ dependencies = [
 
 [[package]]
 name = "castcorder-testalloc"
-version = "0.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "castcorder-transcribe"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-port-capture",
  "castcorder-port-transcribe",
@@ -1013,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-transfer"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "bao-tree",
  "blake3",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "castcorder-transport"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "castcorder-core",
  "castcorder-link",
