@@ -154,13 +154,72 @@ fn prune<K>(map: &mut HashMap<K, Bucket>, rate: Rate, now: Millis) {
     map.retain(|_, b| refill(b, rate, now) < f64::from(rate.burst));
 }
 
+/// How a connection is closed: the WebSocket close code and reason both
+/// wrappers send, so a client sees the same close from either (ADR 0004:
+/// the Worker's semantics are the protocol).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closing {
+    /// The WebSocket close code.
+    pub code: u16,
+    /// The close reason.
+    pub reason: &'static str,
+}
+
+impl Closing {
+    /// The rendezvous is done with the connection (a newer one replaced it).
+    pub const NORMAL: Self = Self {
+        code: 1000,
+        reason: "closed by the rendezvous",
+    };
+    /// The connection was refused, after an error frame saying why.
+    pub const REFUSED: Self = Self {
+        code: 1008,
+        reason: "refused",
+    };
+}
+
 /// What the wrapper must do after a mailbox call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Out {
     /// Send this frame on that connection.
     Send(ConnId, ServerMsg),
-    /// Close that connection (after sending anything queued before).
-    Close(ConnId),
+    /// Close that connection this way (after sending anything queued before).
+    Close(ConnId, Closing),
+}
+
+/// A connection not let in: send `frame` (an error), then close it with
+/// `close`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// The error frame, in place of the hello.
+    pub frame: ServerMsg,
+    /// How to close the connection after it.
+    pub close: Closing,
+}
+
+/// The refusal of a connection from an address over its connection rate
+/// (by the mailbox, or by the Worker's per-IP limit at the edge).
+pub fn rate_limited() -> Refusal {
+    Refusal {
+        frame: ServerMsg::Error {
+            code: code::RATE_LIMITED.into(),
+            message: "too many connections from this address".into(),
+        },
+        close: Closing::REFUSED,
+    }
+}
+
+/// The refusal of a connection whose URL names no host's mailbox (see
+/// [`mailbox_of`]). The Worker cannot even pick a Durable Object for it, so
+/// it refuses before the mailbox; [`Mailbox::open`] refuses the same way.
+pub fn no_mailbox() -> Refusal {
+    Refusal {
+        frame: ServerMsg::Error {
+            code: code::BAD_MESSAGE.into(),
+            message: "name the host's mailbox: /ws?mailbox=HOST_ID".into(),
+        },
+        close: Closing::REFUSED,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -346,9 +405,28 @@ impl Mailbox {
         }
     }
 
+    /// A new connection whose URL query is `query`, as both wrappers take
+    /// one: scoped to the mailbox it names ([`mailbox_of`]), refused when it
+    /// names none ([`no_mailbox`]). Otherwise as [`Self::open`].
+    pub fn open_url(
+        &mut self,
+        ip: IpAddr,
+        peer: SocketAddr,
+        nonce: [u8; 32],
+        query: &str,
+        now: Millis,
+    ) -> Result<ConnId, Refusal> {
+        let Some(scope) = mailbox_of(query) else {
+            warn!(ip = %ip, "connection refused: names no host's mailbox");
+            return Err(no_mailbox());
+        };
+        self.open(ip, peer, nonce, Some(scope), now)
+    }
+
     /// A new connection from `peer` (whose rate-limited address is `ip`,
     /// which differs from the peer's only behind a trusted proxy), scoped to
-    /// `scope`'s mailbox if given. `nonce` is the random challenge sent in its
+    /// `scope`'s mailbox if given (wrappers always give one: see
+    /// [`Self::open_url`]). `nonce` is the random challenge sent in its
     /// hello. Refused when `ip` is over its rate.
     pub fn open(
         &mut self,
@@ -357,14 +435,11 @@ impl Mailbox {
         nonce: [u8; 32],
         scope: Option<HostId>,
         now: Millis,
-    ) -> Result<ConnId, ServerMsg> {
+    ) -> Result<ConnId, Refusal> {
         self.maybe_prune(now);
         if !take(&mut self.ip_buckets, ip, self.limits.ip, now) {
             warn!(ip = %ip, "connection refused: rate limited");
-            return Err(ServerMsg::Error {
-                code: code::RATE_LIMITED.into(),
-                message: "too many connections from this address".into(),
-            });
+            return Err(rate_limited());
         }
         let id = self.next;
         self.next += 1;
@@ -546,7 +621,7 @@ impl Mailbox {
                     code::BAD_MESSAGE,
                     "this connection is for another host's mailbox",
                 ),
-                Out::Close(conn),
+                Out::Close(conn, Closing::REFUSED),
             ];
         }
         let ok = match (&id, unb64(sig)) {
@@ -557,7 +632,7 @@ impl Mailbox {
             warn!(conn, ip = %ip, "host registration refused: bad signature");
             return vec![
                 error(conn, code::AUTH_FAILED, "registration signature invalid"),
-                Out::Close(conn),
+                Out::Close(conn, Closing::REFUSED),
             ];
         };
         let mut out = vec![];
@@ -568,7 +643,7 @@ impl Mailbox {
                 o.role = Role::New;
             }
             out.push(error(old, code::REPLACED, "replaced by a newer connection"));
-            out.push(Out::Close(old));
+            out.push(Out::Close(old, Closing::NORMAL));
         }
         if let Some(c) = self.conns.get_mut(&conn) {
             c.role = Role::Host(id);
@@ -812,7 +887,7 @@ mod tests {
             },
         );
         assert_eq!(err_code(&out).as_deref(), Some(code::AUTH_FAILED));
-        assert!(out.contains(&Out::Close(c)));
+        assert!(out.contains(&Out::Close(c, Closing::REFUSED)));
         assert_eq!(t.mb.hosts_online(), 0);
     }
 
@@ -848,7 +923,7 @@ mod tests {
         let key = HostKey::from_secret([1; 32]);
         let (h1, _) = t.host(1, &key);
         let (h2, out) = t.host(3, &key);
-        assert!(out.contains(&Out::Close(h1)));
+        assert!(out.contains(&Out::Close(h1, Closing::NORMAL)));
         assert_eq!(err_code(&out).as_deref(), Some(code::REPLACED));
         // The replaced connection closing does not unregister the newer one.
         assert!(t.mb.close(h1).is_empty());
@@ -1016,6 +1091,22 @@ mod scope_restore_relay_tests {
     }
 
     #[test]
+    fn a_connection_naming_no_mailbox_is_refused_and_one_naming_a_host_is_scoped() {
+        let mut mb = Mailbox::new(Limits::default());
+        let refused = mb.open_url(addr(1).ip(), addr(1), [1; 32], "x=1", NOW);
+        assert_eq!(refused, Err(no_mailbox()));
+        assert_eq!(no_mailbox().close, Closing::REFUSED);
+        let key = HostKey::from_secret([1; 32]);
+        let other = HostKey::from_secret([2; 32]);
+        let q = format!("host={}", key.id().encode());
+        let g = mb
+            .open_url(addr(2).ip(), addr(2), [2; 32], &q, NOW)
+            .unwrap();
+        let out = mb.receive(g, &offer(&other), NOW);
+        assert_eq!(err_code(&out), Some(code::BAD_MESSAGE), "{out:?}");
+    }
+
+    #[test]
     fn query_names_the_mailbox_and_the_relay_host() {
         let id = HostKey::from_secret([1; 32]).id();
         let other = HostKey::from_secret([2; 32]).id();
@@ -1040,7 +1131,7 @@ mod scope_restore_relay_tests {
         // Registering as another host than the mailbox named is refused.
         let (c, out) = register(&mut mb, 1, &other, Some(key.id()));
         assert_eq!(err_code(&out), Some(code::BAD_MESSAGE));
-        assert!(out.contains(&Out::Close(c)));
+        assert!(out.contains(&Out::Close(c, Closing::REFUSED)));
         assert!(!mb.is_online(other.id()));
         // Its own host registers on a scoped connection as on a bare one.
         let (h, out) = register(&mut mb, 2, &key, Some(key.id()));
@@ -1121,7 +1212,10 @@ mod scope_restore_relay_tests {
             }),
             NOW,
         );
-        assert!(out.contains(&Out::Close(h)), "{out:?}");
+        assert!(
+            out.iter().any(|o| matches!(o, Out::Close(c, _) if *c == h)),
+            "{out:?}"
+        );
         assert_eq!(mb.host_of(fresh), Some(key.id()));
         // New ids continue past the restored ones, or from a chosen start.
         let next = mb.open(addr(8).ip(), addr(8), [8; 32], None, NOW).unwrap();

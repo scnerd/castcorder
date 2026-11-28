@@ -6,7 +6,7 @@
 //! client cannot tell the two apart.
 //!
 //! Black box only: real processes on loopback ports, raw WebSocket clients,
-//! the wire types of castcorder-link. Each case runs against each backend; a
+//! the wire types of castcorder-link. Close codes are part of the contract. Each case runs against each backend; a
 //! backend's cases run in one test so its process is started once (cases that
 //! restart it get their own).
 //!
@@ -266,8 +266,9 @@ enum Seen {
     Msg(ServerMsg),
     Ping,
     Pong,
-    /// The connection ended (close frame, reset or EOF).
-    Gone,
+    /// The connection ended: a close frame (its code), or a reset or EOF
+    /// (`None`).
+    Gone(Option<u16>),
     /// Nothing within the wait.
     Quiet,
 }
@@ -308,7 +309,7 @@ impl Client {
                 }
                 Ok(Message::Ping(_)) => return Seen::Ping,
                 Ok(Message::Pong(_)) => return Seen::Pong,
-                Ok(Message::Close(_)) => return Seen::Gone,
+                Ok(Message::Close(f)) => return Seen::Gone(f.map(|f| u16::from(f.code))),
                 Ok(_) => continue,
                 Err(tungstenite::Error::Io(e))
                     if matches!(
@@ -318,7 +319,7 @@ impl Client {
                 {
                     return Seen::Quiet;
                 }
-                Err(_) => return Seen::Gone,
+                Err(_) => return Seen::Gone(None),
             }
         }
     }
@@ -426,9 +427,16 @@ fn unscoped_connection_is_refused(b: &mut dyn Backend) -> Result<(), String> {
     let mut c = Client::open(b.addr(), "");
     let code = error_code(c.msg(Duration::from_secs(10)))?;
     expect(code == code::BAD_MESSAGE, format!("code {code}"))?;
+    closed_with(&mut c, 1008, "after the refusal")
+}
+
+/// The connection is closed next, with close code `code`.
+fn closed_with(c: &mut Client, code: u16, when: &str) -> Result<(), String> {
     match c.next(Duration::from_secs(5)) {
-        Seen::Gone => Ok(()),
-        other => Err(format!("not closed after the refusal: {other:?}")),
+        Seen::Gone(Some(got)) if got == code => Ok(()),
+        other => Err(format!(
+            "{when}: expected a close with {code}, saw {other:?}"
+        )),
     }
 }
 
@@ -469,9 +477,26 @@ fn registration(b: &mut dyn Backend) -> Result<(), String> {
     });
     let code = error_code(bad.msg(Duration::from_secs(10)))?;
     expect(code == code::AUTH_FAILED, format!("code {code}"))?;
-    match bad.next(Duration::from_secs(5)) {
-        Seen::Gone => Ok(()),
-        other => Err(format!("not closed after a bad signature: {other:?}")),
+    closed_with(&mut bad, 1008, "after a bad signature")
+}
+
+/// A newer registration of the same host key replaces the older: the old
+/// connection is told (replaced) and closed normally, and offers go to the
+/// new one.
+fn a_newer_registration_replaces_the_older(b: &mut dyn Backend) -> Result<(), String> {
+    let mut old = Client::mailbox(b.addr(), 12);
+    old.register(12)?;
+    let mut new = Client::mailbox(b.addr(), 12);
+    new.register(12)?;
+    let code = error_code(old.msg(Duration::from_secs(10)))?;
+    expect(code == code::REPLACED, format!("code {code}"))?;
+    closed_with(&mut old, 1000, "the replaced connection")?;
+    let mut g = Client::open(b.addr(), &format!("host={}", id(12)));
+    g.hello()?;
+    g.offer(12, "AA");
+    match new.msg(Duration::from_secs(10))? {
+        ServerMsg::Offer { .. } => Ok(()),
+        other => Err(format!("the new connection got {other:?}, not the offer")),
     }
 }
 
@@ -545,7 +570,7 @@ fn restart_drops_connections_and_hosts_register_again(b: &mut dyn Backend) -> Re
     host.register(11)?;
     b.restart();
     match host.next(Duration::from_secs(10)) {
-        Seen::Gone => {}
+        Seen::Gone(_) => {}
         other => return Err(format!("the old connection was not ended: {other:?}")),
     }
     let mut g = Client::open(b.addr(), &format!("host={}", id(11)));
@@ -570,6 +595,10 @@ const CASES: &[(&str, Case)] = &[
         host_param_scopes_the_connection,
     ),
     ("registration", registration),
+    (
+        "a_newer_registration_replaces_the_older",
+        a_newer_registration_replaces_the_older,
+    ),
     ("offer_and_answer", offer_and_answer),
     ("offer_to_offline_host", offer_to_offline_host),
     ("garbage_frame", garbage_frame),
