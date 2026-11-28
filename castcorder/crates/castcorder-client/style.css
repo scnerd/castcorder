@@ -70,7 +70,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
 body { background: var(--bg); color: var(--text); font-size: 14px; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -104,7 +104,7 @@ input[type="text"], input[type="password"], input:not([type]), select {
 /* App shell */
 /* 100dvh where supported: on a phone 100vh reaches under the browser's own bars,
    which would hide the dock (and Leave call) below the fold (cast-abe). */
-.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+.app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 .call { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 /* Lobby */
@@ -394,7 +394,7 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .linkbar[hidden] { display: none; }
 
 /* The host machine's home: rooms, their links and calls. */
-.home-main { width: 100%; max-width: 880px; margin: 0 auto; padding: 8px 24px 32px; box-sizing: border-box;
+.home-main { width: 100%; padding: 8px max(24px, calc((100% - 832px) / 2)) 32px; box-sizing: border-box;
   display: flex; flex-direction: column; gap: 16px; }
 .home-head { display: flex; flex-direction: column; gap: 4px; }
 .home-head h1 { margin: 0; font-size: 26px; }
@@ -455,11 +455,13 @@ details.diag dd { margin: 0; overflow-wrap: anywhere; }
 .invite-list { gap: 4px; }
 .past-calls[open] > summary { margin-bottom: 6px; }
 
-/* The nav is pinned: the home page itself does not scroll, the nav and the place
-   beside it each scroll on their own (cast-n56.1). */
+/* The nav is pinned: the window never scrolls, the nav and the place beside it each
+   scroll on their own (cast-n56.1). .home-main spans its whole grid cell (the 880px
+   reading column is padding), so its scrollbar sits at the window's edge, and the
+   single grid row is capped at the viewport so a long list cannot grow the shell. */
 @media (min-width: 761px) {
   .lobby.home:has(> .home-shell) { overflow: hidden; }
-  .home-shell { height: 100%; flex: 1 1 auto; }
+  .home-shell { height: 100%; flex: 1 1 auto; grid-template-rows: minmax(0, 1fr); }
   .home-nav { position: static; min-height: 0; height: 100%; overflow-y: auto; }
   .home-shell > :not(.home-nav) { min-height: 0; overflow-y: auto; }
 }
