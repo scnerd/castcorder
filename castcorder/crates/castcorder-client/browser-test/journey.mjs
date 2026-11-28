@@ -5,8 +5,14 @@
 // runs as root; CI uses sudo). Their browsers run inside their computers'
 // namespaces, so each home is that computer's own localhost page.
 //
+//  0. The rendezvous behaves as the production one (the Cloudflare Worker,
+//     ADR 0004) does: it never pings a connection (--no-ping), so each host
+//     must keep its own registration alive and notice when it dies.
 //  1. Dana (D) makes a contact link on Dana's home; Eli (E) pastes it on Eli's.
-//     Each lists the other, online.
+//     Each lists the other, online. Then the rendezvous is redeployed
+//     (restarted) while Dana's connection is quiet and cut: Dana's install
+//     must notice on its own and register again, or nobody can reach it
+//     (cast-eb15: contacts saw Dana online but every ask got host_offline).
 //  2. Dana adds Eli to Dana's room "Show" as a producer. Eli sees "Show" on Eli's
 //     home, shared by Dana, and asks Dana's install for the rooms
 //     they share over a contact link (it crosses both routers).
@@ -98,8 +104,9 @@ const api = (p, path, body) => p.evaluate(async ([path, body]) => {
 let failed = null;
 try {
   net.setup();
-  const rv = start(net.NS.inet, RV_EXE, ['--listen', net.INET_IP + ':8080', '--stun', net.INET_IP + ':3478',
-    '--client', VERSION + '=' + dist], 'rendezvous');
+  const RV_ARGS = ['--listen', net.INET_IP + ':8080', '--stun', net.INET_IP + ':3478',
+    '--client', VERSION + '=' + dist, '--no-ping'];
+  let rv = start(net.NS.inet, RV_EXE, RV_ARGS, 'rendezvous');
   await waitFor(() => rv.out.match(/RENDEZVOUS_READY/), 'rendezvous ready', 20000);
   const RV = 'http://' + net.INET_IP + ':8080';
   const host = (ns, who, room) => start(ns, HOST_EXE, ['--dist', dist, '--library', join(RESULTS, 'library-' + who),
@@ -138,6 +145,25 @@ try {
   await waitFor(async () => (await api(E, '/contacts')).contacts.some((c) => c.id === dana.id && c.online.length > 0), 'Eli sees Dana online', 30000, 500);
   await waitFor(async () => (await api(D, '/contacts')).contacts.some((c) => c.id === eli.id && c.online.length > 0), 'Dana sees Eli online', 30000, 500);
   check(true, 'each sees the other online across the two routers');
+
+  // A redeploy of the rendezvous during which Dana's connection dies
+  // quietly: the old server forgets Dana and nothing ever reaches Dana's
+  // install about it. Dana's install must find out by itself (its own
+  // pings go unanswered) and register again; Eli's, which saw the restart,
+  // registers again at once.
+  const registrations = (st) => st.err.split('registered with the rendezvous').length - 1;
+  const [dBefore, eBefore] = [registrations(hd), registrations(he)];
+  const flows = [...hd.err.matchAll(/registered with the rendezvous.*observed=(\S+):(\d+)/g)];
+  const [, dIp, dPort] = flows[flows.length - 1];
+  net.blackhole(dIp, dPort);
+  rv.p.kill('SIGKILL');
+  await waitFor(() => rv.exited !== undefined, 'the old rendezvous gone', 10000);
+  rv = start(net.NS.inet, RV_EXE, RV_ARGS, 'rendezvous-2');
+  await waitFor(() => rv.out.match(/RENDEZVOUS_READY/), 'the redeployed rendezvous ready', 20000);
+  await waitFor(() => registrations(he) > eBefore, 'Eli registers with the redeployed rendezvous', 40000);
+  const back = await waitFor(() => registrations(hd) > dBefore, 'Dana notices the dead connection and registers again', 90000).catch(() => false);
+  check(!!back, 'after a redeploy Dana\x27s install registers again by itself (it pings a rendezvous that never pings)');
+  await waitFor(async () => (await api(E, '/contacts')).contacts.some((c) => c.id === dana.id && c.online.length > 0), 'Eli sees Dana online again', 60000, 500).catch(() => null);
 
   // 2. Dana makes Eli a producer in "Show"; Eli asks for the rooms they share.
   await api(D, '/rooms/trust', { room: 'Show', person: eli.id, trust: true, producer: true });

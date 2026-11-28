@@ -55,6 +55,10 @@ pub struct Config {
     pub turn: Option<TurnConfig>,
     /// Relay usage accounting and budgets, if any.
     pub metering: Option<Metering>,
+    /// Never ping connections, as the Worker rendezvous (ADR 0004) does not:
+    /// a host must keep its own connection alive and notice when it dies
+    /// (tests run the journey this way).
+    pub no_ping: bool,
 }
 
 /// Relay metering: where coturn's usage comes from, where it is kept, the
@@ -90,6 +94,7 @@ struct Hub {
     clients: HashMap<String, PathBuf>,
     public_host: Option<String>,
     trust_forwarded_for: bool,
+    no_ping: bool,
     turn: Option<TurnConfig>,
     /// The credential last minted for each (client address, host) hello, so a
     /// client that reconnects within its lifetime reuses it and counts once.
@@ -170,6 +175,7 @@ pub async fn bind(cfg: Config) -> io::Result<Bound> {
         clients: cfg.clients.into_iter().collect(),
         public_host: cfg.public_host,
         trust_forwarded_for: cfg.trust_forwarded_for,
+        no_ping: cfg.no_ping,
         turn: cfg.turn,
         minted: Mutex::new(HashMap::new()),
         meter: meter.clone(),
@@ -608,7 +614,7 @@ async fn connection(
                     }
                 }
             }
-            _ = ping.tick() => {
+            _ = ping.tick(), if !hub.no_ping => {
                 if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
                 }
