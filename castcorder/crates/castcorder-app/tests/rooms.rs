@@ -165,6 +165,14 @@ fn rooms_route_joins_to_their_current_call_one_live_at_a_time() {
         .map(|r| r["name"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["Late-night", "show"]);
+    // It shows the name as typed, not its folder name (cast-e29x).
+    let titles: Vec<&str> = listed["rooms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Late night", "show"]);
     assert_eq!(live_room(&host), None);
     assert!(host.current_call().is_none(), "no call opens before a join");
 

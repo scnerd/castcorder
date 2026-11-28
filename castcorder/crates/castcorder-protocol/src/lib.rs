@@ -316,6 +316,9 @@ pub struct RoomInvite {
     pub link: String,
     /// Who is in its call now, by display name (empty: nobody yet).
     pub in_call: Vec<String>,
+    /// The name the inviting host machine gave the room, if any (cast-e29x,
+    /// appended); else [`Self::room`] is what it shows.
+    pub title: Option<String>,
 }
 
 /// One room a contact shares, as the answering install sees it (answer to
@@ -717,6 +720,10 @@ pub enum Event {
         /// What to change.
         change: SourceChange,
     },
+    /// The name the host machine gave this call's room (cast-e29x,
+    /// appended), sent with [`Event::Call`] and again when it is renamed;
+    /// empty: none, [`CallRef::room`] is what it shows.
+    RoomTitle(String),
 }
 
 /// One line of the live transcript: what one participant said in one
@@ -976,6 +983,7 @@ mod tests {
                 room: "show".into(),
                 link: "https://example.test/v/1.2.3/#k".into(),
                 in_call: vec!["Ann".into()],
+                title: Some("The show".into()),
             }),
             Request::OfferContact {
                 to: ParticipantId(3),
@@ -1148,6 +1156,7 @@ mod tests {
                 by: "Ann".into(),
                 change: SourceChange::AddBackup("dev-2".into()),
             }),
+            CoreMessage::Event(Event::RoomTitle("Friday pod".into())),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,

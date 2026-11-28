@@ -416,7 +416,7 @@ fn ping_leaving(
     cert: DeviceCert,
     now: u64,
 ) -> Result<castcorder_link::wire::PresenceAnswer, String> {
-    ping_full(to, key, cert, Vec::new(), true, now)
+    ping_full(to, key, cert, Vec::new(), true, "Bob", now)
 }
 
 /// [`ping_as`], the ping carrying the revocations `revoked`.
@@ -427,7 +427,7 @@ fn ping_with(
     revoked: Vec<castcorder_link::person::Revocation>,
     now: u64,
 ) -> Result<castcorder_link::wire::PresenceAnswer, String> {
-    ping_full(to, key, cert, revoked, false, now)
+    ping_full(to, key, cert, revoked, false, "Bob", now)
 }
 
 fn ping_full(
@@ -436,12 +436,13 @@ fn ping_full(
     cert: DeviceCert,
     revoked: Vec<castcorder_link::person::Revocation>,
     leaving: bool,
+    name: &str,
     now: u64,
 ) -> Result<castcorder_link::wire::PresenceAnswer, String> {
     let me = crate::presence::Me {
         key: HostKey::from_secret(key.secret()),
         cert,
-        name: "Bob".into(),
+        name: name.into(),
         device: "Laptop".into(),
         revoked,
         sync: None,
@@ -488,6 +489,45 @@ fn a_contact_is_answered_and_both_sides_learn_who_is_online() {
     let v = b.contacts.view(now + 1);
     assert!(v.contacts[0].presence.online.is_empty());
     assert_eq!(v.contacts[0].presence.last_seen_ms, Some(now));
+}
+
+#[test]
+fn a_contact_who_names_themselves_later_is_shown_by_that_name() {
+    // Bob added Ann before either had a name (as a fresh install does).
+    let (a, b) = (install("", 60), install("", 61));
+    let code = a.contacts.new_code(crate::wall_ms()).unwrap();
+    pair(&a, &b, &code).unwrap();
+    let now = crate::wall_ms();
+    assert_eq!(b.contacts.get(&a.persons.id()).unwrap().name, "");
+    // Ann names herself; Bob's next ping brings the name back.
+    a.persons.set_names(Some("Ann"), None).unwrap();
+    let got = ping_as(&a, &b.host, b.persons.cert(), now).unwrap();
+    let dev = device_id(&a.host.id().0);
+    b.contacts
+        .presence_result(&dev, &a.persons.id(), Ok(got), now);
+    assert_eq!(b.contacts.get(&a.persons.id()).unwrap().name, "Ann");
+    // Bob, renamed, pings Ann: she learns his new name from the ping.
+    let bob = b.persons.cert();
+    ping_full(
+        &a,
+        &b.host,
+        bob.clone(),
+        Vec::new(),
+        false,
+        "Robert",
+        now + 1,
+    )
+    .unwrap();
+    assert_eq!(a.contacts.get(&b.persons.id()).unwrap().name, "Robert");
+    // An empty name (an install not yet named) never blanks a known one,
+    // and the nickname stays the local choice.
+    a.contacts.set_nickname(&b.persons.id(), "Bobby").unwrap();
+    ping_full(&a, &b.host, bob, Vec::new(), false, "", now + 2).unwrap();
+    let c = a.contacts.get(&b.persons.id()).unwrap();
+    assert_eq!((c.name.as_str(), c.nickname.as_str()), ("Robert", "Bobby"));
+    // Kept on disk: a restart shows the learned name.
+    let again = Contacts::load(&a.dir, &a.host, a.persons.clone(), now).unwrap();
+    assert_eq!(again.get(&b.persons.id()).unwrap().name, "Robert");
 }
 
 #[test]
@@ -696,6 +736,7 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
         room: "show".into(),
         link: link.into(),
         in_call: vec!["Bob".into()],
+        title: Some("The  show".into()),
     };
     let script = format!("javascript:alert(1)//{}", &link[link.find('#').unwrap()..]);
     for bad in ["https://rv.test/no-fragment", script.as_str(), ""] {
@@ -712,6 +753,11 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
     assert_eq!(
         (shown[0].from.as_str(), shown[0].link.as_str()),
         ("Bob", link.as_str())
+    );
+    // The room by its name on Bob's host machine, cleaned (cast-e29x).
+    assert_eq!(
+        (shown[0].room.as_str(), shown[0].title.as_str()),
+        ("show", "The show")
     );
     // Removed since: not shown, and what was shown goes with them.
     a.contacts.remove(&b.persons.id()).unwrap();

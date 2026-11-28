@@ -127,6 +127,20 @@ impl Contact {
     }
 }
 
+/// The name `c`'s person now goes by, as one of their installs told it in a
+/// presence ping or answer: kept when it is not empty and differs, so a
+/// contact added before they named themselves, or who renamed, shows the
+/// new name. Whether it changed.
+fn learn_name(c: &mut Contact, name: &str, now_ms: u64) -> bool {
+    let name = crate::http::clean_label(name);
+    if name.is_empty() || name == c.name {
+        return false;
+    }
+    c.name = name;
+    c.updated_ms = c.updated_ms.max(now_ms);
+    true
+}
+
 /// Keep the revocations in `list` that `c`'s person key signed: record them
 /// and drop those installs from `c`'s devices. The device ids newly revoked.
 fn learn_revoked(c: &mut Contact, list: &[Revocation]) -> Vec<String> {
@@ -395,11 +409,12 @@ impl Contacts {
             .iter()
             .find(|c| c.id == peer.person)
             .ok_or("not a contact")?;
-        let from = if c.nickname.is_empty() {
-            c.name.clone()
-        } else {
-            c.nickname.clone()
-        };
+        // As the contacts list labels them (never an empty "from").
+        let from = [&c.nickname, &c.name]
+            .into_iter()
+            .find(|n| !n.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "Someone without a name".into());
         let invite = castcorder_protocol::RoomInvite {
             room: crate::http::clean_label(&invite.room),
             in_call: invite
@@ -409,6 +424,10 @@ impl Contacts {
                 .map(|n| crate::http::clean_label(n))
                 .collect(),
             link: invite.link,
+            title: invite
+                .title
+                .map(|t| crate::http::clean_label(&t))
+                .filter(|t| !t.is_empty()),
         };
         info!(person = %peer.person, room = %invite.room, "invited to a call");
         g.invites.receive(&peer.person, &from, invite, now_ms);
@@ -768,16 +787,16 @@ impl Contacts {
         }
         match r {
             Ok(a) => {
-                let new = g
+                let (new, renamed) = g
                     .saved
                     .contacts
                     .iter_mut()
                     .find(|c| c.id == person)
-                    .map(|c| learn_revoked(c, &a.revoked))
+                    .map(|c| (learn_revoked(c, &a.revoked), learn_name(c, &a.name, now_ms)))
                     .unwrap_or_default();
-                if !new.is_empty() {
+                if !new.is_empty() || renamed {
                     if let Err(e) = g.save() {
-                        warn!(error = %e, "could not save a contact's revocations");
+                        warn!(error = %e, "could not save what a contact's answer told");
                     }
                     self.persons.note_revoked(new);
                 }
@@ -845,7 +864,8 @@ impl Contacts {
             c.devices.push(cert);
             info!(person = %id, device = %device_id(&key), "learned another install of a contact");
         }
-        if (learned || !new.is_empty())
+        let renamed = learn_name(c, &o.name, now_ms);
+        if (learned || renamed || !new.is_empty())
             && let Err(e) = g.save()
         {
             warn!(error = %e, "could not save the contact");

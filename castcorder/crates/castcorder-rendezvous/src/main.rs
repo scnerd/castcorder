@@ -38,7 +38,7 @@ use castcorder_rendezvous::turn::TurnConfig;
 use castcorder_rendezvous::usage::{LEDGER_FILE, Ledger, parse_bytes};
 
 const USAGE: &str = "usage: castcorder-rendezvous [--listen ADDR] [--stun ADDR|off] \
-[--client VERSION=DIR]... [--public-host NAME] [--trust-forwarded-for] \
+[--client VERSION=DIR]... [--public-host NAME] [--trust-forwarded-for] [--no-ping] \
 [--ip-rate PER_MIN/BURST] [--host-rate PER_MIN/BURST] [--turn URL]... \
 [--turn-secret SECRET] [--turn-ttl SECS] [--turn-metrics URL] \
 [--turn-metrics-interval SECS] [--data-dir DIR] [--relay-budget BYTES] [--admin ADDR]\n\
@@ -64,6 +64,7 @@ fn parse_args() -> Config {
         trust_forwarded_for: false,
         turn: None,
         metering: None,
+        no_ping: false,
     };
     let mut turn_urls: Vec<String> = vec![];
     let mut turn_secret = std::env::var("CASTCORDER_TURN_SECRET").ok();
@@ -101,6 +102,7 @@ fn parse_args() -> Config {
             }
             "--public-host" => cfg.public_host = Some(value()),
             "--trust-forwarded-for" => cfg.trust_forwarded_for = true,
+            "--no-ping" => cfg.no_ping = true,
             "--ip-rate" => cfg.limits.ip = rate(&value()),
             "--host-rate" => cfg.limits.host = rate(&value()),
             "--turn" => {

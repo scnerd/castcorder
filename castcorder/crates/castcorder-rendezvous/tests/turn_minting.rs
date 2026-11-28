@@ -43,6 +43,7 @@ fn start_with(metering: Option<Metering>) -> (SocketAddr, Option<SocketAddr>) {
                 limits: Limits::default(),
                 public_host: None,
                 trust_forwarded_for: false,
+                no_ping: false,
                 turn: Some(TurnConfig {
                     urls: vec!["turn:turn.test:3478?transport=udp".into()],
                     secret: "test-secret".into(),

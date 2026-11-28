@@ -81,6 +81,16 @@ export function setup() {
   home(NS.re, NS.e, '203.0.113.12', '10.2.0');
 }
 
+// Black-hole one TCP flow at the internet end, both ways, for good: every
+// packet between INET_IP and the home's public `ip`:`port` (its router's
+// mapping of that connection) is dropped, so neither end ever hears from
+// the other again, not even a FIN or a reset. A connection that died
+// quietly, as one to a redeployed Worker rendezvous can.
+export function blackhole(ip, port) {
+  inNs(NS.inet, 'iptables', '-I', 'INPUT', '-p', 'tcp', '-s', ip, '--sport', String(port), '-j', 'DROP');
+  inNs(NS.inet, 'iptables', '-I', 'OUTPUT', '-p', 'tcp', '-d', ip, '--dport', String(port), '-j', 'DROP');
+}
+
 export function teardown() {
   for (const ns of Object.values(NS)) {
     try { run('ip', 'netns', 'del', ns); } catch { /* not there */ }

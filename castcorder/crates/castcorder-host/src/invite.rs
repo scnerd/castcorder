@@ -39,6 +39,8 @@ pub struct Incoming {
     pub link: String,
     /// Who was in its call when sent.
     pub in_call: Vec<String>,
+    /// The room as the inviting host machine names it (else `room`).
+    pub title: String,
     /// When it arrived (ms since the Unix epoch).
     pub at_ms: u64,
 }
@@ -107,9 +109,10 @@ impl Invites {
             id,
             person: person.to_string(),
             from: from.to_string(),
-            room: invite.room,
             link: invite.link,
             in_call: invite.in_call,
+            room: invite.room.clone(),
+            title: invite.title.unwrap_or_else(|| invite.room.clone()),
             at_ms: now_ms,
         });
         id
@@ -217,6 +220,7 @@ impl Invites {
 pub fn make(
     links: &crate::rendezvous::Links,
     room: &str,
+    title: Option<String>,
     in_call: Vec<String>,
 ) -> Result<RoomInvite, String> {
     let link = links
@@ -226,6 +230,7 @@ pub fn make(
         room: room.to_string(),
         link,
         in_call,
+        title,
     })
 }
 
@@ -238,6 +243,7 @@ mod tests {
             room: room.into(),
             link: format!("https://rv.test/v/1/#h.{room}"),
             in_call: vec!["Ann".into()],
+            title: None,
         }
     }
 

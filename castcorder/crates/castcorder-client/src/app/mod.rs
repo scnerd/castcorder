@@ -413,6 +413,9 @@ struct Ui {
     calls: RwSignal<Vec<castcorder_protocol::CallSummary>>,
     /// The room this page joins (`?room=` on a LAN or host machine page).
     room_name: RwSignal<String>,
+    /// The name the host machine gave the call's room (`Event::RoomTitle`;
+    /// empty: none).
+    room_title: RwSignal<String>,
     /// The host's take status, as text ("idle", "recording take N").
     take: RwSignal<String>,
     /// How much room each device has for recording (producers only).
@@ -500,6 +503,19 @@ enum Panel {
 }
 
 impl Ui {
+    /// The room as people see it: its name from the host machine, else its
+    /// folder name from the call, else the page's `?room=`.
+    fn shown_room(self) -> String {
+        let t = self.room_title.get();
+        if !t.is_empty() {
+            return t;
+        }
+        self.call_ref
+            .get()
+            .map(|c| c.room)
+            .unwrap_or_else(|| self.room_name.get())
+    }
+
     fn error(&self, context: &str, e: &JsValue) {
         let s = format!("{context}: {}", describe(e));
         warn!(error = %s, "guest error");

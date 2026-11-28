@@ -381,30 +381,60 @@ fn connect(t: &Target) -> io::Result<Box<dyn Stream>> {
 }
 
 fn read_msg(ws: &mut WebSocket<Box<dyn Stream>>) -> Result<ServerMsg, String> {
-    read_msg_until(ws, None, None)?.ok_or_else(|| "no message".into())
+    read_msg_until(ws, None, None, &mut Liveness::new())?.ok_or_else(|| "no message".into())
 }
 /// The next text frame, or `None` once `until` has passed with nothing to
 /// read. Silence for [`READ_TIMEOUT`] is a dead connection (the server pings);
 /// `stop` being set ends the wait with an error.
+/// How long a connection has been silent, across reads: the host's
+/// registration reads in short slices (to look at its relay gates every
+/// [`GATE_CHECK`]), so the silence must outlive each one, or the host never
+/// pings a Worker rendezvous that sends none and never notices a connection
+/// that died quietly (cast-eb15: contacts and guests then got `host_offline`
+/// from a host that thought it was registered).
+struct Liveness {
+    quiet: Instant,
+    pinged: bool,
+    ping_after: Duration,
+    timeout: Duration,
+}
+
+impl Liveness {
+    fn new() -> Self {
+        Self::with(PING_AFTER, READ_TIMEOUT)
+    }
+
+    fn with(ping_after: Duration, timeout: Duration) -> Self {
+        Self {
+            quiet: Instant::now(),
+            pinged: false,
+            ping_after,
+            timeout,
+        }
+    }
+
+    fn heard(&mut self) {
+        self.quiet = Instant::now();
+        self.pinged = false;
+    }
+}
+
 fn read_msg_until(
     ws: &mut WebSocket<Box<dyn Stream>>,
     until: Option<Instant>,
     stop: Option<&AtomicBool>,
+    live: &mut Liveness,
 ) -> Result<Option<ServerMsg>, String> {
-    let mut quiet = Instant::now();
-    let mut pinged = false;
     loop {
         match ws.read() {
             Ok(Message::Text(t)) => {
+                live.heard();
                 return from_json(t.as_str())
                     .map(Some)
                     .ok_or_else(|| format!("unrecognised frame {t}"));
             }
             Ok(Message::Close(_)) => return Err("closed by the rendezvous".into()),
-            Ok(_) => {
-                quiet = Instant::now();
-                pinged = false;
-            }
+            Ok(_) => live.heard(),
             Err(tungstenite::Error::Io(e))
                 if matches!(
                     e.kind(),
@@ -417,13 +447,13 @@ fn read_msg_until(
                 if until.is_some_and(|u| Instant::now() >= u) {
                     return Ok(None);
                 }
-                if quiet.elapsed() >= READ_TIMEOUT {
+                if live.quiet.elapsed() >= live.timeout {
                     return Err("no traffic from the rendezvous".into());
                 }
-                if !pinged && quiet.elapsed() >= PING_AFTER {
-                    // A failed ping shows up as silence, then READ_TIMEOUT.
+                if !live.pinged && live.quiet.elapsed() >= live.ping_after {
+                    // A failed ping shows up as silence, then the timeout.
                     let _ = ws.send(Message::Ping(Vec::new().into()));
-                    pinged = true;
+                    live.pinged = true;
                 }
             }
             Err(e) => return Err(e.to_string()),
@@ -467,7 +497,7 @@ pub fn exchange_within(
     )?;
     let until = Instant::now() + wait;
     loop {
-        match read_msg_until(&mut ws, Some(until), None)? {
+        match read_msg_until(&mut ws, Some(until), None, &mut Liveness::new())? {
             Some(ServerMsg::Answer { sealed }) => {
                 let _ = ws.close(None);
                 return unb64(&sealed).ok_or_else(|| "the answer is not base64url".into());
@@ -660,10 +690,13 @@ fn session(
             gates: gates.clone(),
         },
     )?;
+    // Kept across the short reads below, so the host pings when quiet and
+    // notices a dead connection.
+    let mut live = Liveness::new();
     loop {
         let check = Instant::now() + GATE_CHECK;
         let until = renew_at.map_or(check, |r| r.min(check));
-        let Some(msg) = read_msg_until(&mut ws, Some(until), Some(stop))? else {
+        let Some(msg) = read_msg_until(&mut ws, Some(until), Some(stop), &mut live)? else {
             if renew_at.is_some_and(|r| Instant::now() >= r) {
                 info!("renewing relay credentials: reconnecting to the rendezvous");
                 return Ok(());
@@ -921,6 +954,107 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WebSocket client of a server on a thread: the server accepts, then
+    /// runs `serve` on its side. The client reads in short slices, as the
+    /// registration does.
+    fn ws_pair(
+        serve: impl FnOnce(&mut WebSocket<TcpStream>) + Send + 'static,
+    ) -> WebSocket<Box<dyn Stream>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let mut ws = tungstenite::accept(tcp).unwrap();
+            serve(&mut ws);
+        });
+        let tcp = TcpStream::connect(addr).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let stream: Box<dyn Stream> = Box::new(tcp);
+        tungstenite::client(format!("ws://{addr}/"), stream)
+            .unwrap()
+            .0
+    }
+
+    /// Read as the registration loop does: slices of `slice`, the silence
+    /// kept in `live`, until an error or `give_up`.
+    fn hold(
+        ws: &mut WebSocket<Box<dyn Stream>>,
+        live: &mut Liveness,
+        slice: Duration,
+        give_up: Duration,
+    ) -> Option<String> {
+        let end = Instant::now() + give_up;
+        while Instant::now() < end {
+            match read_msg_until(ws, Some(Instant::now() + slice), None, live) {
+                Ok(_) => {}
+                Err(e) => return Some(e),
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_quiet_rendezvous_is_pinged_across_short_reads_and_a_dead_one_noticed() {
+        // A Worker rendezvous sends nothing while the host is idle; the
+        // runtime only answers pings. Reads slice every 50 ms (shorter than
+        // the ping delay, as GATE_CHECK is): the host must still ping.
+        let pings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = pings.clone();
+        let mut ws = ws_pair(move |ws| {
+            ws.get_mut()
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            let end = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < end {
+                match ws.read() {
+                    Ok(Message::Ping(_)) => {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(e))
+                        if e.kind() == io::ErrorKind::WouldBlock
+                            || e.kind() == io::ErrorKind::TimedOut => {}
+                    Err(_) => return,
+                }
+                let _ = ws.flush();
+            }
+        });
+        let mut live = Liveness::with(Duration::from_millis(200), Duration::from_millis(600));
+        let ended = hold(
+            &mut ws,
+            &mut live,
+            Duration::from_millis(50),
+            Duration::from_millis(1500),
+        );
+        assert_eq!(
+            ended, None,
+            "a rendezvous that answers pings stays connected"
+        );
+        assert!(
+            pings.load(Ordering::SeqCst) >= 2,
+            "the host pinged a quiet rendezvous"
+        );
+
+        // A connection that died quietly: nothing comes back, not even a
+        // pong. The host gives up after the timeout and reconnects.
+        let mut dead = ws_pair(|_| thread::sleep(Duration::from_secs(5)));
+        let mut live = Liveness::with(Duration::from_millis(200), Duration::from_millis(600));
+        let t0 = Instant::now();
+        let ended = hold(
+            &mut dead,
+            &mut live,
+            Duration::from_millis(50),
+            Duration::from_secs(3),
+        );
+        assert_eq!(ended.as_deref(), Some("no traffic from the rendezvous"));
+        assert!(
+            t0.elapsed() < Duration::from_millis(1500),
+            "noticed in {:?}",
+            t0.elapsed()
+        );
+    }
 
     fn test_persons() -> crate::person::Persons {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

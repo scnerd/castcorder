@@ -100,6 +100,20 @@ pub(super) async fn home_request(
     }
 }
 
+/// The name the host machine gave `room` (empty: none), for its lobby on
+/// the host machine's own page, before the call says it.
+pub(super) async fn local_room_title(room: &str) -> String {
+    let Ok(t) = home_request("GET", "/rooms", None).await else {
+        return String::new();
+    };
+    serde_json::from_str::<HomeData>(&t)
+        .ok()
+        .and_then(|d| d.rooms.into_iter().find(|r| r.name == room))
+        .map(|r| r.title)
+        .filter(|t| t != room)
+        .unwrap_or_default()
+}
+
 /// `GET /person`, as far as the nav's foot needs it.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 struct Who {
@@ -123,6 +137,9 @@ struct InviteIn {
     link: String,
     #[serde(default)]
     in_call: Vec<String>,
+    /// The room as the inviting host machine names it (cast-e29x).
+    #[serde(default)]
+    title: String,
 }
 
 /// An invite this install sent (`GET /contacts`, `invited`).
@@ -512,8 +529,23 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
             "Reachable on this network only"
         }
     };
+    // Rooms to invite a contact to, by name and the name they show; not
+    // archived ones.
     let room_names = leptos::prelude::Signal::derive(move || {
-        data.with(|d| d.rooms.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
+        data.with(|d| {
+            d.rooms
+                .iter()
+                .filter(|r| !r.archived)
+                .map(|r| {
+                    let shown = if r.title.is_empty() {
+                        &r.name
+                    } else {
+                        &r.title
+                    };
+                    (r.name.clone(), shown.clone())
+                })
+                .collect::<Vec<_>>()
+        })
     });
     let nav = move |p: Place, id: &'static str, label: &'static str, icon: &'static str| {
         view! {
@@ -576,7 +608,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 view! {
                                     <li class="room-card invite" data-room=i.room.clone()>
                                         <div class="room-head">
-                                            <div class="room-title"><h2>{format!("{} invites you to {}", i.from, i.room)}</h2></div>
+                                            <div class="room-title"><h2>{format!("{} invites you to {}", i.from, if i.title.is_empty() { &i.room } else { &i.title })}</h2></div>
                                             <span class="small muted room-line">{in_call_line(&i.in_call)}</span>
                                             <span class="room-actions">
                                                 <button class="btn dismiss-invite" on:click=move |_| act("/contacts/invite/dismiss", serde_json::json!({ "id": id }), "Dismissed.")>"Dismiss"</button>
