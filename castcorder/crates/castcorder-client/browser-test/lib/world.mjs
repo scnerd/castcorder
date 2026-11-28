@@ -112,6 +112,12 @@ async function worker({ start, ns, ip, port, stunPort, dist, version, http }) {
     kind: 'worker',
     http,
     async restart() { kill(st); await gone(st); st = await up(); },
-    async stop() { kill(st); kill(stun); rmSync(state, { recursive: true, force: true }); },
+    async stop() {
+      kill(st); kill(stun);
+      rmSync(state, { recursive: true, force: true });
+      // The journey runs as root: leave no root-owned assets behind for the
+      // next Worker test (test:system:worker) to trip over.
+      rmSync(assets, { recursive: true, force: true });
+    },
   };
 }
