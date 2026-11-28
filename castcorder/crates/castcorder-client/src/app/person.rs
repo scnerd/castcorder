@@ -145,9 +145,9 @@ pub(super) fn PersonCard() -> impl IntoView {
                             data.set(v);
                         }
                     }
-                    Err(e) => message.set(format!("person not readable: {e}")),
+                    Err(e) => flash(message, format!("person not readable: {e}")),
                 },
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
         })
     };
@@ -161,8 +161,8 @@ pub(super) fn PersonCard() -> impl IntoView {
     let post = move |path: &'static str, body: serde_json::Value, done: &'static str| {
         spawn_local(async move {
             match person_request(path, Some(body.to_string())).await {
-                Ok(_) => message.set(done.into()),
-                Err(e) => message.set(e),
+                Ok(_) => flash(message, done.into()),
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -189,16 +189,19 @@ pub(super) fn PersonCard() -> impl IntoView {
                         .unwrap_or_default();
                     let none = l.is_empty();
                     links.set(l);
-                    message.set(if none {
-                        "No link to share: this app has no network address another device can reach."
+                    flash(
+                        message,
+                        if none {
+                            "No link to share: this app has no network address another device can reach."
                             .into()
-                    } else {
-                        "Open this link on the new device within 10 minutes, then approve it here."
+                        } else {
+                            "Open this link on the new device within 10 minutes, then approve it here."
                             .into()
-                    });
+                        },
+                    );
                     show_element("person-message");
                 }
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
         })
     };
@@ -631,9 +634,9 @@ pub(super) fn ContactsCard(
                             data.set(v);
                         }
                     }
-                    Err(e) => message.set(format!("contacts not readable: {e}")),
+                    Err(e) => flash(message, format!("contacts not readable: {e}")),
                 },
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
         })
     };
@@ -647,8 +650,8 @@ pub(super) fn ContactsCard(
     let post = move |path: &'static str, body: serde_json::Value, done: &'static str| {
         spawn_local(async move {
             match person_request(path, Some(body.to_string())).await {
-                Ok(_) => message.set(done.into()),
-                Err(e) => message.set(e),
+                Ok(_) => flash(message, done.into()),
+                Err(e) => flash(message, e),
             }
             refresh();
         })
@@ -681,13 +684,16 @@ pub(super) fn ContactsCard(
                     } else {
                         "Everyone who uses it becomes your contact"
                     };
-                    message.set(format!(
-                        "Copied. Send it to the person you want to add: it works for {}. {who}, with nothing to accept.",
-                        lifetime_label(minutes)
-                    ));
+                    flash(
+                        message,
+                        format!(
+                            "Copied. Send it to the person you want to add: it works for {}. {who}, with nothing to accept.",
+                            lifetime_label(minutes)
+                        ),
+                    );
                     refresh();
                 }
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
         })
     };
@@ -1017,7 +1023,8 @@ pub(super) fn RoomTrust(
                 body["producer"] = p.into();
             }
             match person_request("/rooms/trust", Some(body.to_string())).await {
-                Ok(_) => message.set(
+                Ok(_) => flash(
+                    message,
                     match (trust, producer) {
                         (false, _) => "Taken out of the room.",
                         (true, Some(true)) => "Producer here: each of their devices joins as one.",
@@ -1026,7 +1033,7 @@ pub(super) fn RoomTrust(
                     }
                     .into(),
                 ),
-                Err(e) => message.set(e),
+                Err(e) => flash(message, e),
             }
         })
     };
@@ -1132,6 +1139,28 @@ pub(super) fn RoomTrust(
 
 /// Scroll the element with `id` into view once it is drawn, so a click's
 /// result is never left below the fold.
+/// How long a status message stays up before it clears itself (cast-4imd).
+/// Long enough to read a sentence, short enough not to linger.
+pub(crate) const FLASH_MS: i32 = 12_000;
+
+/// Show `text` in a status line, and clear it again after a while unless a
+/// newer message replaced it first. Status lines (Rooms you joined, Saved.,
+/// Copied) otherwise stayed up for good (cast-4imd).
+pub(super) fn flash(message: RwSignal<String>, text: String) {
+    message.set(text.clone());
+    if text.is_empty() {
+        return;
+    }
+    let cb = Closure::once_into_js(move || {
+        // Only the message this timer was set for: a newer one has its own.
+        if message.try_get_untracked().is_some_and(|now| now == text) {
+            message.set(String::new());
+        }
+    });
+    let _ = window()
+        .set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), FLASH_MS);
+}
+
 pub(super) fn show_element(id: &'static str) {
     let cb = Closure::once_into_js(move || {
         if let Some(el) = window().document().and_then(|d| d.get_element_by_id(id)) {
