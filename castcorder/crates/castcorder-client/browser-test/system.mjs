@@ -340,7 +340,11 @@ try {
   check(cErr.includes('wrong call secret') && (await text(C, '#participant')) === '' && !(await C.isEnabled('#leave')),
     'a wrong call secret is rejected and the guest stops retrying: ' + cErr);
   await sleep(3000);
-  check((rvLog().match(/offer relayed/g) || []).length === 1, 'the rejected guest sent exactly one offer');
+  // Guests' offers carry an SDP (kilobytes); the host's own reachability
+  // self-checks (castcorder-host reach) are a nonce of ~100 bytes.
+  const guestOffers = (rvLog().match(/offer relayed.*?bytes=(\d+)/g) || [])
+    .filter((l) => Number(l.match(/bytes=(\d+)/)[1]) >= 400);
+  check(guestOffers.length === 1, 'the rejected guest sent exactly one offer');
 
   for (const [n, p] of [['A', A], ['B', B]]) {
     await p.click('#join');

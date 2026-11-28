@@ -1030,6 +1030,8 @@ fn handle(app: &App, req: &Request, producer: bool) -> Response {
                 serde_json::json!({
                     "rooms": rooms,
                     "lan": app.lan_links,
+                    // The reachability self-check (castcorder-host `reach`).
+                    "reachable": app.call_links.health.lock().map(|h| h.reachable.clone()).unwrap_or_default(),
                     "library": std::path::absolute(&app.library)
                         .unwrap_or_else(|_| app.library.clone())
                         .display()
@@ -1431,6 +1433,8 @@ mod tests {
             connected: true,
             relay: "unavailable".into(),
             relay_detail: "relay_quota: over budget".into(),
+            reachable: "no".into(),
+            reachable_detail: "host_offline: that host is not online".into(),
             stun: None,
         };
         let library = std::env::temp_dir();
@@ -1476,6 +1480,7 @@ mod tests {
             v["health"]["relay_detail"], "relay_quota: over budget",
             "{body}"
         );
+        assert_eq!(v["health"]["reachable"], "no", "{body}");
         assert_eq!(v["lan"][0], "https://10.0.0.2:1/", "{body}");
         stop.store(true, Ordering::SeqCst);
     }
