@@ -6,13 +6,20 @@
 //! per participant it decodes them (libopus), takes them to 16 kHz
 //! ([`Downsampler`]), cuts them at pauses ([`Segmenter`]) and transcribes
 //! each utterance with the engine. The call thread collects the lines with
-//! [`Transcripts::lines`], appends them to `<call>/transcript.jsonl` and
-//! sends them to everyone ([`castcorder_protocol::Event::Transcript`]).
+//! [`Transcripts::heard`], appends the lines to `<call>/transcript.jsonl`
+//! and sends them to everyone ([`castcorder_protocol::Event::Transcript`]).
+//!
+//! Near-realtime (cast-veeq): while someone is still talking, and the engine
+//! has nothing finished to do, it transcribes what they have said so far
+//! and sends that as a draft ([`castcorder_protocol::Event::TranscriptDraft`])
+//! that their finished line replaces. Drafts come about once a second of new
+//! speech, less often when the engine is slower than that (audio waiting to
+//! be read means it is behind), and finished lines always go first.
 //!
 //! Only audio sent while a take records is given to it, so nothing said
 //! between takes is transcribed (guests are told when a take records).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -84,6 +91,27 @@ enum In {
 /// participant's stream stopped, rather than a packet or two going missing.
 const MAX_GAP: u64 = 48_000;
 
+/// A draft is made once this much more of an utterance (16 kHz samples)
+/// has been said since the last one.
+const DRAFT_STEP: usize = SAMPLE_RATE as usize;
+
+/// A finished line with the same words as the speaker's previous one, this
+/// soon after it (microseconds) and at least [`REPEAT_WORDS`] long, is the
+/// engine repeating itself, not the speaker: it is dropped.
+const REPEAT_WITHIN_US: i64 = 30_000_000;
+/// See [`REPEAT_WITHIN_US`]; a short "yeah" said twice is real.
+const REPEAT_WORDS: usize = 3;
+
+/// What the transcript thread heard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Heard {
+    /// A finished line: file it and send it.
+    Line(TranscriptLine),
+    /// A draft of what someone is still saying (empty text: none any more):
+    /// send it, never file it.
+    Draft(TranscriptLine),
+}
+
 /// One participant's audio on its way to text.
 struct Speaker {
     name: String,
@@ -99,6 +127,10 @@ struct Speaker {
     pcm48: Vec<f32>,
     /// 16 kHz audio, reused.
     pcm16: Vec<f32>,
+    /// How much of the open utterance the last draft covered.
+    drafted: usize,
+    /// A draft of theirs is showing (until their next finished line).
+    shown: bool,
 }
 
 impl Speaker {
@@ -114,6 +146,8 @@ impl Speaker {
             next_rtp: rtp_time,
             pcm48: vec![0.0; 5_760],
             pcm16: Vec::new(),
+            drafted: 0,
+            shown: false,
         })
     }
 
@@ -154,19 +188,19 @@ impl Speaker {
 /// The transcript thread, as the call thread sees it.
 pub struct Transcripts {
     tx: mpsc::Sender<In>,
-    lines: mpsc::Receiver<TranscriptLine>,
+    heard: mpsc::Receiver<Heard>,
 }
 
 impl Transcripts {
     /// Start the transcript thread with `engine` (opened and warmed up there).
     pub fn spawn(engine: Engine) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
-        let (line_tx, lines) = mpsc::channel();
+        let (heard_tx, heard) = mpsc::channel();
         thread::Builder::new()
             .name("transcript".into())
-            .spawn(move || run(&engine, &rx, &line_tx))
+            .spawn(move || run(&engine, &rx, &heard_tx))
             .map_err(|e| format!("transcript thread: {e}"))?;
-        Ok(Transcripts { tx, lines })
+        Ok(Transcripts { tx, heard })
     }
 
     /// One Opus frame of participant `who` (named `name`) while `take`
@@ -200,9 +234,10 @@ impl Transcripts {
         let _ = self.tx.send(In::Flush);
     }
 
-    /// The lines transcribed since the last call.
-    pub fn lines(&self) -> Vec<TranscriptLine> {
-        self.lines.try_iter().collect()
+    /// The lines and drafts transcribed since the last call, in the order
+    /// they were made (a draft's line follows it).
+    pub fn heard(&self) -> Vec<Heard> {
+        self.heard.try_iter().collect()
     }
 }
 
@@ -215,7 +250,7 @@ struct Pending {
     pcm: Vec<f32>,
 }
 
-fn run(engine: &Engine, rx: &mpsc::Receiver<In>, out: &mpsc::Sender<TranscriptLine>) {
+fn run(engine: &Engine, rx: &mpsc::Receiver<In>, out: &mpsc::Sender<Heard>) {
     let mut t = match engine.open() {
         Ok(t) => t,
         Err(e) => {
@@ -228,10 +263,12 @@ fn run(engine: &Engine, rx: &mpsc::Receiver<In>, out: &mpsc::Sender<TranscriptLi
     }
     info!(?engine, "live transcript ready");
     let mut speakers: BTreeMap<u64, Speaker> = BTreeMap::new();
-    let mut queue: std::collections::VecDeque<Pending> = Default::default();
+    let mut queue: VecDeque<Pending> = Default::default();
+    let mut last: BTreeMap<u64, (TakeId, i64, Vec<String>)> = BTreeMap::new();
     loop {
         // Take everything waiting; block only when there is nothing to do.
-        let first = if queue.is_empty() {
+        let idle = queue.is_empty() && draft_due(&speakers).is_none();
+        let first = if idle {
             match rx.recv() {
                 Ok(m) => Some(m),
                 Err(_) => return,
@@ -246,29 +283,135 @@ fn run(engine: &Engine, rx: &mpsc::Receiver<In>, out: &mpsc::Sender<TranscriptLi
         for m in first.into_iter().chain(rx.try_iter()) {
             take_in(m, &mut speakers, &mut queue);
         }
-        if let Some(p) = queue.pop_front() {
-            match t.transcribe(&p.pcm) {
-                Ok(segs) => {
-                    for s in segs {
-                        let line = TranscriptLine {
-                            participant: ParticipantId(p.who),
-                            name: p.name.clone(),
-                            take: p.take,
-                            host_us: p.host_us + s.start_ms as i64 * 1000,
-                            text: s.text,
-                        };
-                        if out.send(line).is_err() {
-                            return;
-                        }
-                    }
-                }
-                Err(e) => warn!(error = %e, "an utterance was not transcribed"),
-            }
+        let sent = if let Some(p) = queue.pop_front() {
+            finished(&mut *t, p, &mut speakers, &mut last, out)
+        } else if let Some(who) = draft_due(&speakers) {
+            draft(&mut *t, who, &mut speakers, out)
+        } else {
+            true
+        };
+        if !sent {
+            return;
         }
     }
 }
 
-fn finish(who: u64, s: &mut Speaker, queue: &mut std::collections::VecDeque<Pending>) {
+/// Transcribe a finished utterance and send its lines; false: nobody is
+/// listening any more.
+fn finished(
+    t: &mut dyn Transcriber,
+    p: Pending,
+    speakers: &mut BTreeMap<u64, Speaker>,
+    last: &mut BTreeMap<u64, (TakeId, i64, Vec<String>)>,
+    out: &mpsc::Sender<Heard>,
+) -> bool {
+    let segs = t.transcribe(&p.pcm).unwrap_or_else(|e| {
+        warn!(error = %e, "an utterance was not transcribed");
+        Vec::new()
+    });
+    let mut said = false;
+    for s in segs {
+        let host_us = p.host_us + s.start_ms as i64 * 1000;
+        let words = castcorder_port_transcribe::words(&s.text);
+        if let Some((take, at, prev)) = last.get(&p.who)
+            && *take == p.take
+            && host_us - at < REPEAT_WITHIN_US
+            && words.len() >= REPEAT_WORDS
+            && *prev == words
+        {
+            info!(participant = p.who, "a repeated line dropped");
+            continue;
+        }
+        last.insert(p.who, (p.take, host_us, words));
+        let line = TranscriptLine {
+            participant: ParticipantId(p.who),
+            name: p.name.clone(),
+            take: p.take,
+            host_us,
+            text: s.text,
+        };
+        said = true;
+        if out.send(Heard::Line(line)).is_err() {
+            return false;
+        }
+    }
+    // Any draft shown was of this utterance (drafts wait for finished
+    // work): a line replaces it, and with no line it must be taken back.
+    let drafted = speakers
+        .get_mut(&p.who)
+        .map(|s| std::mem::take(&mut s.shown))
+        .unwrap_or(true);
+    if !said && drafted {
+        let none = TranscriptLine {
+            participant: ParticipantId(p.who),
+            name: p.name,
+            take: p.take,
+            host_us: p.host_us,
+            text: String::new(),
+        };
+        return out.send(Heard::Draft(none)).is_ok();
+    }
+    true
+}
+
+/// Whose utterance in progress has grown the most since its last draft, if
+/// any has grown by [`DRAFT_STEP`].
+fn draft_due(speakers: &BTreeMap<u64, Speaker>) -> Option<u64> {
+    speakers
+        .iter()
+        .filter_map(|(who, s)| {
+            let (_, pcm) = s.seg.open()?;
+            let grown = pcm.len().saturating_sub(s.drafted);
+            (grown >= DRAFT_STEP).then_some((grown, *who))
+        })
+        .max()
+        .map(|(_, who)| who)
+}
+
+/// Transcribe what `who` has said so far and send it as a draft; false:
+/// nobody is listening any more.
+fn draft(
+    t: &mut dyn Transcriber,
+    who: u64,
+    speakers: &mut BTreeMap<u64, Speaker>,
+    out: &mpsc::Sender<Heard>,
+) -> bool {
+    let Some(s) = speakers.get_mut(&who) else {
+        return true;
+    };
+    let Some((start, pcm)) = s.seg.open() else {
+        return true;
+    };
+    let len = pcm.len();
+    let segs = match t.transcribe(pcm) {
+        Ok(segs) => segs,
+        Err(e) => {
+            warn!(error = %e, "a draft was not transcribed");
+            Vec::new()
+        }
+    };
+    let host_us = s.host_us(start);
+    s.drafted = len;
+    let text = segs
+        .iter()
+        .map(|g| g.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return true;
+    }
+    s.shown = true;
+    let line = TranscriptLine {
+        participant: ParticipantId(who),
+        name: s.name.clone(),
+        take: s.take,
+        host_us,
+        text,
+    };
+    out.send(Heard::Draft(line)).is_ok()
+}
+
+fn finish(who: u64, s: &mut Speaker, queue: &mut VecDeque<Pending>) {
     if let Some(u) = s.seg.finish() {
         queue.push_back(pending(who, s, u));
     }
@@ -284,11 +427,7 @@ fn pending(who: u64, s: &Speaker, u: Utterance) -> Pending {
     }
 }
 
-fn take_in(
-    m: In,
-    speakers: &mut BTreeMap<u64, Speaker>,
-    queue: &mut std::collections::VecDeque<Pending>,
-) {
+fn take_in(m: In, speakers: &mut BTreeMap<u64, Speaker>, queue: &mut VecDeque<Pending>) {
     match m {
         In::Audio {
             who,
@@ -318,6 +457,8 @@ fn take_in(
             }
             let s = speakers.get_mut(&who).expect("just made");
             for u in s.frame(rtp_time, &opus) {
+                // The next utterance's drafts start afresh.
+                s.drafted = 0;
                 queue.push_back(pending(who, s, u));
             }
         }
@@ -406,54 +547,153 @@ mod tests {
             .collect()
     }
 
+    /// The finished lines, until there are `n`.
     fn wait_lines(t: &Transcripts, n: usize) -> Vec<TranscriptLine> {
         let mut got = Vec::new();
         let end = std::time::Instant::now() + Duration::from_secs(20);
         while got.len() < n {
             assert!(std::time::Instant::now() < end, "only {got:?}");
-            got.extend(t.lines());
+            got.extend(lines(t.heard()));
             thread::sleep(Duration::from_millis(5));
         }
         got
     }
 
-    #[test]
-    fn two_speakers_are_heard_through_opus_with_their_times() {
-        let t = Transcripts::spawn(Engine::Simulated).unwrap();
-        let take = TakeId(2);
-        // Bea starts at host time 10 s with RTP 5000; a lost frame is
-        // concealed. Cy speaks from 11 s.
-        for (i, f) in frames("hello there").iter().enumerate() {
-            if i == 20 {
-                continue;
+    fn lines(heard: Vec<Heard>) -> Vec<TranscriptLine> {
+        heard
+            .into_iter()
+            .filter_map(|h| match h {
+                Heard::Line(l) => Some(l),
+                Heard::Draft(_) => None,
+            })
+            .collect()
+    }
+
+    /// Everything heard until the first finished line, that line included.
+    fn until_a_line(t: &Transcripts) -> Vec<Heard> {
+        let mut got = Vec::new();
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        while !got.iter().any(|h| matches!(h, Heard::Line(_))) {
+            assert!(std::time::Instant::now() < end, "only {got:?}");
+            got.extend(t.heard());
+            thread::sleep(Duration::from_millis(5));
+        }
+        got
+    }
+
+    fn send(t: &Transcripts, who: u64, frames: &[Vec<u8>], host_us: i64) {
+        for (i, f) in frames.iter().enumerate() {
+            t.audio(
+                who,
+                "Al",
+                TakeId(1),
+                i as u64 * 960,
+                f,
+                host_us + i as i64 * 20_000,
+            );
+        }
+    }
+
+    /// The next draft (a line before it fails the test).
+    fn next_draft(t: &Transcripts) -> TranscriptLine {
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(std::time::Instant::now() < end, "no draft");
+            if let Some(h) = t.heard().into_iter().next() {
+                match h {
+                    Heard::Draft(l) => return l,
+                    Heard::Line(l) => panic!("a line before the pause: {l:?}"),
+                }
             }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn drafts_show_what_is_being_said_before_the_pause() {
+        let t = Transcripts::spawn(Engine::Simulated).unwrap();
+        let said = "the quick brown fox jumps";
+        let f = frames(said);
+        // The speech in two parts, as it is said, and none of the pause
+        // after it: no line yet, only drafts of what was said so far, timed
+        // from its start.
+        let speech = f.len() - 45;
+        let half = speech / 2;
+        let mut sent = 0;
+        let mut drafts = Vec::new();
+        for upto in [half, speech] {
+            for (i, fr) in f.iter().enumerate().take(upto).skip(sent) {
+                t.audio(
+                    1,
+                    "Al",
+                    TakeId(1),
+                    i as u64 * 960,
+                    fr,
+                    5_000_000 + i as i64 * 20_000,
+                );
+            }
+            sent = upto;
+            drafts.push(next_draft(&t));
+        }
+        assert!(drafts[0].text.starts_with("the qu"), "{drafts:?}");
+        assert!(drafts[1].text.starts_with("the quick brown"), "{drafts:?}");
+        assert!(
+            drafts
+                .iter()
+                .all(|d| d.host_us.abs_diff(5_000_000) < 30_000)
+        );
+        // The pause finishes the line; no draft comes after it.
+        for (i, fr) in f.iter().enumerate().skip(sent) {
             t.audio(
-                7,
-                "Bea",
-                take,
-                5_000 + i as u64 * 960,
-                f,
-                10_000_000 + i as i64 * 20_000,
+                1,
+                "Al",
+                TakeId(1),
+                i as u64 * 960,
+                fr,
+                5_000_000 + i as i64 * 20_000,
             );
         }
-        for (i, f) in frames("zebra").iter().enumerate() {
-            t.audio(
-                9,
-                "Cy",
-                take,
-                77 + i as u64 * 960,
-                f,
-                11_000_000 + i as i64 * 20_000,
-            );
+        let rest = until_a_line(&t);
+        assert!(
+            matches!(rest.last(), Some(Heard::Line(l)) if l.text == said),
+            "{rest:?}"
+        );
+        thread::sleep(Duration::from_millis(100));
+        assert!(t.heard().is_empty());
+    }
+
+    #[test]
+    fn a_line_the_engine_repeats_is_dropped_and_its_draft_taken_back() {
+        let t = Transcripts::spawn(Engine::Simulated).unwrap();
+        let f = frames("one two three");
+        send(&t, 1, &f, 0);
+        assert_eq!(wait_lines(&t, 1)[0].text, "one two three");
+        // The same words again, word for word, 4 s later: drafted while
+        // said, then dropped as a repeat, and the draft taken back.
+        let speech = f.len() - 45;
+        send(&t, 1, &f[..speech], 4_000_000);
+        assert_eq!(next_draft(&t).text, "one two three");
+        t.flush();
+        let end = std::time::Instant::now() + Duration::from_secs(20);
+        let mut heard = Vec::new();
+        while heard.is_empty() {
+            assert!(std::time::Instant::now() < end, "nothing after the flush");
+            heard.extend(t.heard());
+            thread::sleep(Duration::from_millis(5));
         }
-        let mut got = wait_lines(&t, 2);
-        got.sort_by_key(|l| l.participant);
-        assert_eq!(got[0].text, "hello there");
-        assert_eq!((got[0].participant.0, got[0].name.as_str()), (7, "Bea"));
-        assert_eq!(got[0].take, take);
-        assert!(got[0].host_us.abs_diff(10_000_000) < 30_000, "{got:?}");
-        assert_eq!(got[1].text, "zebra");
-        assert!(got[1].host_us.abs_diff(11_000_000) < 30_000, "{got:?}");
+        assert!(
+            matches!(heard.as_slice(), [Heard::Draft(l)] if l.text.is_empty()),
+            "{heard:?}"
+        );
+        // A short line said twice is real, though.
+        let yes = frames("yes");
+        send(&t, 1, &yes, 8_000_000);
+        send(&t, 1, &yes, 10_000_000);
+        let got = wait_lines(&t, 2);
+        assert_eq!(
+            got.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+            ["yes", "yes"]
+        );
     }
 
     #[test]
@@ -466,7 +706,7 @@ mod tests {
             t.audio(1, "Al", TakeId(1), i as u64 * 960, fr, 0);
         }
         thread::sleep(Duration::from_millis(100));
-        assert!(t.lines().is_empty());
+        assert!(lines(t.heard()).is_empty());
         t.flush();
         assert_eq!(wait_lines(&t, 1)[0].text, "hey you");
         for (i, fr) in f.iter().take(speech).enumerate() {
@@ -510,6 +750,6 @@ mod tests {
         }
         t.flush();
         thread::sleep(Duration::from_millis(200));
-        assert!(t.lines().is_empty());
+        assert!(t.heard().is_empty());
     }
 }

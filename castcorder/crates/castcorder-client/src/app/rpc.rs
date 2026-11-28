@@ -386,7 +386,13 @@ pub(super) fn pump_rpc(ui: Ui) {
                 }
                 Event::Transcript(lines) => {
                     info!(call = %ctx.call, lines = lines.len(), "transcript lines");
+                    ui.transcript_drafts
+                        .update(|d| crate::transcript::finished(d, &lines));
                     ui.transcript.update(|t| crate::transcript::merge(t, lines));
+                }
+                Event::TranscriptDraft(d) => {
+                    ui.transcript_drafts
+                        .update(|v| crate::transcript::draft(v, d));
                 }
                 Event::JoinRefusedLocked { name } => {
                     info!(call = %ctx.call, device = %ctx.device, name = %name, "someone tried to join the locked call");

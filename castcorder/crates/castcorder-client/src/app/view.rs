@@ -1187,6 +1187,7 @@ pub(super) fn App() -> impl IntoView {
         persons: RwSignal::new(Vec::new()),
         contact_offer: RwSignal::new(None),
         transcript: RwSignal::new(Vec::new()),
+        transcript_drafts: RwSignal::new(Vec::new()),
         transcript_query: RwSignal::new(String::new()),
         producer_result: RwSignal::new(String::new()),
         debug_result: RwSignal::new(String::new()),

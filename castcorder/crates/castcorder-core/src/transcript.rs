@@ -195,6 +195,16 @@ impl Segmenter {
         self.close(open)
     }
 
+    /// The utterance still being said, so far: its first sample and its
+    /// audio, once it holds enough speech to be kept (cast-veeq: a live
+    /// draft of it is shown before the talker pauses).
+    pub fn open(&self) -> Option<(u64, &[f32])> {
+        self.open
+            .as_ref()
+            .filter(|o| o.speech >= self.frames(self.cfg.min_speech_ms))
+            .map(|o| (o.start, o.pcm.as_slice()))
+    }
+
     fn frame_in(&mut self, frame: &[f32], out: &mut Vec<Utterance>) {
         let db = level_db(frame);
         self.recent.push_back(db);
@@ -307,6 +317,27 @@ mod tests {
 
     fn silence(rate: u32, ms: u32) -> Vec<f32> {
         vec![0.0; (rate * ms / 1000) as usize]
+    }
+
+    #[test]
+    fn the_utterance_being_said_can_be_seen_before_it_ends() {
+        let rate = 16_000;
+        let mut s = Segmenter::new(SegmenterConfig::default());
+        assert!(s.push(&silence(rate, 500)).is_empty());
+        assert_eq!(s.open(), None, "nothing said yet");
+        // Too little speech to keep yet: not shown.
+        assert!(s.push(&tone(440.0, rate, 100, 0.3)).is_empty());
+        assert_eq!(s.open(), None, "a click is not shown");
+        assert!(s.push(&tone(440.0, rate, 900, 0.3)).is_empty());
+        let (start, pcm) = s.open().expect("speech in progress");
+        let (start, len) = (start, pcm.len());
+        assert!(len >= rate as usize, "{len} samples so far");
+        // It ends at a pause as the same utterance, with nothing open after.
+        let done = s.push(&silence(rate, 1_000));
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].start, start);
+        assert!(done[0].pcm.len() >= len);
+        assert_eq!(s.open(), None);
     }
 
     #[test]

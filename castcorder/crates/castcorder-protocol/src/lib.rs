@@ -724,6 +724,12 @@ pub enum Event {
     /// appended), sent with [`Event::Call`] and again when it is renamed;
     /// empty: none, [`CallRef::room`] is what it shows.
     RoomTitle(String),
+    /// A live draft of what a participant is saying right now, before they
+    /// pause (cast-veeq, appended): sent to everyone while a take records.
+    /// It replaces that participant's earlier draft. Their next
+    /// [`Event::Transcript`] line, or a draft with empty text, clears it.
+    /// `host_us` is when the utterance began. Drafts are never filed.
+    TranscriptDraft(TranscriptLine),
 }
 
 /// One line of the live transcript: what one participant said in one
@@ -1157,6 +1163,13 @@ mod tests {
                 change: SourceChange::AddBackup("dev-2".into()),
             }),
             CoreMessage::Event(Event::RoomTitle("Friday pod".into())),
+            CoreMessage::Event(Event::TranscriptDraft(TranscriptLine {
+                participant: ParticipantId(2),
+                name: "Bea Smith".into(),
+                take: TakeId(3),
+                host_us: 12_345_678,
+                text: "And now for".into(),
+            })),
             CoreMessage::Event(Event::Role(Role {
                 producer: true,
                 host_machine: false,
