@@ -122,9 +122,9 @@ impl HostMailbox {
                         let _ = ws.send_with_str(to_json(&m));
                     }
                 }
-                Out::Close(c) => {
+                Out::Close(c, how) => {
                     if let Some(ws) = self.socket(c) {
-                        let _ = ws.close(Some(1000), Some("closed by the rendezvous"));
+                        let _ = ws.close(Some(how.code), Some(how.reason));
                     }
                     queue.extend(self.mb.borrow_mut().close(c));
                 }
@@ -292,22 +292,17 @@ impl DurableObject for HostMailbox {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let query = req.url()?.query().unwrap_or_default().to_string();
-        // The Worker routed here on this; it is this object's host key.
-        let scope = castcorder_mailbox::mailbox_of(&query);
+        // The Worker routed here on the mailbox it names (this object's host
+        // key); `open_url` scopes the connection to it.
         let ip = crate::client_ip(&req);
         let peer = std::net::SocketAddr::new(ip, 0);
         let nonce = nonce()?;
         let pair = WebSocketPair::new()?;
         let now = now();
-        let opened = self.mb.borrow_mut().open(ip, peer, nonce, scope, now);
+        let opened = self.mb.borrow_mut().open_url(ip, peer, nonce, &query, now);
         let id = match opened {
             Ok(id) => id,
-            Err(refusal) => {
-                pair.server.accept()?;
-                pair.server.send_with_str(to_json(&refusal))?;
-                pair.server.close(Some(1008), Some("refused"))?;
-                return Response::from_websocket(pair.client);
-            }
+            Err(refusal) => return crate::refuse(refusal),
         };
         self.state
             .accept_websocket_with_tags(&pair.server, &[&id.to_string()]);

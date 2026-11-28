@@ -14,7 +14,7 @@
 //!   coturn with a shared secret, minted for a host and its guests under a
 //!   per-host-key daily cap kept in the Durable Object's storage.
 
-use castcorder_link::wire::{ServerMsg, code, to_json};
+use castcorder_link::wire::to_json;
 use worker::{Context, Env, Request, Response, Result, WebSocketPair, event};
 
 mod log;
@@ -55,16 +55,15 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     }
 }
 
-/// A WebSocket that only says why it is refused, then closes; the mailbox
-/// clients read the error frame where they expect the hello.
-fn refuse(c: &str, message: &str) -> Result<Response> {
+/// A WebSocket that only says why it is refused (`refusal`'s error frame,
+/// then its close), as the mailbox refuses; the mailbox clients read the
+/// error frame where they expect the hello.
+pub(crate) fn refuse(refusal: castcorder_mailbox::Refusal) -> Result<Response> {
     let pair = WebSocketPair::new()?;
     pair.server.accept()?;
-    pair.server.send_with_str(to_json(&ServerMsg::Error {
-        code: c.into(),
-        message: message.into(),
-    }))?;
-    pair.server.close(Some(1008), Some(c))?;
+    pair.server.send_with_str(to_json(&refusal.frame))?;
+    pair.server
+        .close(Some(refusal.close.code), Some(refusal.close.reason))?;
     Response::from_websocket(pair.client)
 }
 
@@ -86,11 +85,9 @@ async fn ws(req: Request, env: Env) -> Result<Response> {
     // Only a valid host id names a Durable Object, so a client cannot create
     // one per made-up id.
     let Some(host) = castcorder_mailbox::mailbox_of(&query) else {
+        // No Durable Object to hand it to: refuse here, as the mailbox would.
         tracing::warn!("connection refused: names no host's mailbox");
-        return refuse(
-            code::BAD_MESSAGE,
-            "name the host's mailbox: /ws?mailbox=HOST_ID",
-        );
+        return refuse(castcorder_mailbox::no_mailbox());
     };
     let ip = client_ip(&req);
     // Per IP at the edge, across every host's mailbox; each Durable Object
@@ -99,7 +96,7 @@ async fn ws(req: Request, env: Env) -> Result<Response> {
         && !limiter.limit(ip.to_string()).await?.success
     {
         tracing::warn!(ip = %ip, "connection refused: rate limited at the edge");
-        return refuse(code::RATE_LIMITED, "too many connections from this address");
+        return refuse(castcorder_mailbox::rate_limited());
     }
     let stub = env
         .durable_object(MAILBOX_BINDING)?

@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
-use castcorder_link::wire::{IceServer, ServerMsg, b64, code, to_json};
+use castcorder_link::wire::{IceServer, ServerMsg, b64, to_json};
 use castcorder_link::{HostId, stun};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::mailbox::{
-    ConnId, Limits, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered, mailbox_of, relay_host,
+    Closing, ConnId, Limits, Mailbox, Millis, Out, Rate, RelayAsk, fill_registered, relay_host,
     relay_proof,
 };
 use crate::turn::{TurnConfig, mint};
@@ -460,13 +460,13 @@ async fn ws(
     // The host relay credentials are asked for, with the guest's proof of a
     // call link it admits.
     let host = relay_host(query).map(|h| (h, relay_proof(query).map(str::to_string)));
-    // As the Worker routes: the mailbox a connection is for (`?mailbox=`, else
-    // a guest's `?host=`); one that names none is refused once upgraded.
-    let scope = mailbox_of(query);
+    // The mailbox decides the connection's scope from its URL, as on the
+    // Worker; one that names none is refused once upgraded.
+    let query = query.to_string();
     upgrade
         .max_message_size(MAX_FRAME)
         .max_frame_size(MAX_FRAME)
-        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice, host, scope))
+        .on_upgrade(move |socket| connection(hub, socket, ip, peer, ice, host, query))
 }
 
 fn unix_now() -> u64 {
@@ -474,6 +474,14 @@ fn unix_now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// The close frame for `how` (the same code and reason the Worker sends).
+fn close_frame(how: Closing) -> Message {
+    Message::Close(Some(CloseFrame {
+        code: how.code,
+        reason: how.reason.into(),
+    }))
 }
 
 fn dispatch(senders: &HashMap<ConnId, mpsc::UnboundedSender<Message>>, outs: Vec<Out>) {
@@ -484,9 +492,9 @@ fn dispatch(senders: &HashMap<ConnId, mpsc::UnboundedSender<Message>>, outs: Vec
                     let _ = tx.send(Message::Text(to_json(&m).into()));
                 }
             }
-            Out::Close(c) => {
+            Out::Close(c, how) => {
                 if let Some(tx) = senders.get(&c) {
-                    let _ = tx.send(Message::Close(None));
+                    let _ = tx.send(close_frame(how));
                 }
             }
         }
@@ -522,18 +530,8 @@ async fn connection(
     peer: SocketAddr,
     mut ice: Vec<IceServer>,
     host: Option<(HostId, Option<String>)>,
-    scope: Option<HostId>,
+    query: String,
 ) {
-    let Some(scope) = scope else {
-        warn!(ip = %ip, "connection refused: names no host's mailbox");
-        let refusal = ServerMsg::Error {
-            code: code::BAD_MESSAGE.into(),
-            message: "name the host's mailbox: /ws?mailbox=HOST_ID".into(),
-        };
-        let _ = socket.send(Message::Text(to_json(&refusal).into())).await;
-        let _ = socket.send(Message::Close(None)).await;
-        return;
-    };
     let mut nonce = [0u8; 32];
     if getrandom::fill(&mut nonce).is_err() {
         warn!("no randomness for the nonce; connection dropped");
@@ -544,7 +542,7 @@ async fn connection(
     let opened = {
         let mut g = hub.mailbox.lock().expect("mailbox lock");
         let now = hub.now();
-        let r = g.0.open(ip, peer, nonce, Some(scope), now);
+        let r = g.0.open_url(ip, peer, nonce, &query, now);
         if let Ok(id) = r {
             g.1.insert(id, tx.clone());
             if let (Some(turn), Some((host, proof))) = (&hub.turn, host) {
@@ -574,8 +572,10 @@ async fn connection(
     let id = match opened {
         Ok(id) => id,
         Err(refusal) => {
-            let _ = socket.send(Message::Text(to_json(&refusal).into())).await;
-            let _ = socket.send(Message::Close(None)).await;
+            let _ = socket
+                .send(Message::Text(to_json(&refusal.frame).into()))
+                .await;
+            let _ = socket.send(close_frame(refusal.close)).await;
             return;
         }
     };
