@@ -252,12 +252,112 @@ impl Whisper {
                 text,
             });
         }
-        Ok(out)
+        Ok(squash_repeats(out))
     }
+}
+
+/// Words of `text` for comparing repeats: lowercase, punctuation dropped.
+fn words(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Collapse a phrase the model repeats in a loop (greedy decoding at
+/// temperature 0 can get stuck: "Thank you. Thank you. Thank you. ...") to one
+/// occurrence. A run of the same 1..=12 words is only a loop from 3 repeats on
+/// (or 2 for 3 words or more, which people do not say twice by accident).
+fn squash_text(text: &str) -> String {
+    let toks: Vec<&str> = text.split_whitespace().collect();
+    let keys: Vec<String> = toks.iter().map(|w| words(w).concat()).collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        let mut skipped = false;
+        for n in 1..=12usize.min((toks.len() - i) / 2) {
+            let mut reps = 1;
+            while i + (reps + 1) * n <= toks.len()
+                && keys[i..i + n] == keys[i + reps * n..i + (reps + 1) * n]
+            {
+                reps += 1;
+            }
+            if reps >= if n >= 3 { 2 } else { 3 } {
+                out.extend(&toks[i..i + n]);
+                i += reps * n;
+                skipped = true;
+                break;
+            }
+        }
+        if !skipped {
+            out.push(toks[i]);
+            i += 1;
+        }
+    }
+    out.join(" ")
+}
+
+/// Loops within a segment collapsed, and a segment that says what the one
+/// before it said dropped (its time joins the earlier one).
+fn squash_repeats(segs: Vec<Segment>) -> Vec<Segment> {
+    let mut out: Vec<Segment> = Vec::new();
+    for mut s in segs {
+        s.text = squash_text(&s.text);
+        if s.text.is_empty() {
+            continue;
+        }
+        match out.last_mut() {
+            Some(prev) if words(&prev.text) == words(&s.text) => prev.end_ms = s.end_ms,
+            _ => out.push(s),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{Segment, squash_repeats, squash_text};
+
+    #[test]
+    fn a_looping_phrase_is_said_once_and_real_repeats_stay() {
+        assert_eq!(
+            squash_text("Thank you. Thank you. Thank you. Thank you."),
+            "Thank you."
+        );
+        assert_eq!(squash_text("No no no no no way"), "No way");
+        assert_eq!(
+            squash_text("Well, I think so. I think so. Maybe."),
+            "Well, I think so. Maybe."
+        );
+        // Said twice on purpose, or just a stutter: untouched.
+        assert_eq!(squash_text("very very good"), "very very good");
+        assert_eq!(
+            squash_text("Hello there, welcome back"),
+            "Hello there, welcome back"
+        );
+    }
+
+    #[test]
+    fn a_segment_repeating_the_one_before_is_dropped() {
+        let seg = |a, b, t: &str| Segment {
+            start_ms: a,
+            end_ms: b,
+            text: t.into(),
+        };
+        let got = squash_repeats(vec![
+            seg(0, 1000, "Thank you."),
+            seg(1000, 2000, "thank you"),
+            seg(2000, 3000, "Thank you."),
+            seg(3000, 4000, "Next topic."),
+        ]);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].start_ms, got[0].end_ms), (0, 3000));
+    }
     #[test]
     fn the_gpu_model_is_tried_first_and_either_rather_than_none() {
         let dir = std::env::temp_dir().join(format!("castcorder-pick-{}", std::process::id()));
