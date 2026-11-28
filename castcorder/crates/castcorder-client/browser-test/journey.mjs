@@ -32,6 +32,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as net from './lib/netns.mjs';
 import { check, checks, sleep, text, waitFor } from './lib/helpers.mjs';
+import { VERSION } from './lib/version.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CRATE = join(HERE, '..');
@@ -43,7 +44,6 @@ const bin = (n) => join(process.env.CARGO_TARGET_DIR || join(WORKSPACE, 'target'
 const HOST_EXE = bin('castcorder-host');
 const RV_EXE = bin('castcorder-rendezvous');
 const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
-const VERSION = '0.0.0';
 
 const problem = net.available();
 if (problem) {
