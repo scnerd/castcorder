@@ -54,6 +54,13 @@ pub const ALLOCATE_TIMEOUT: Duration = Duration::from_secs(15);
 /// routers (30 s is common) and of the server's edge.
 pub const KEEPALIVE: Duration = Duration::from_secs(15);
 
+/// How long a Refresh may go unanswered before the host makes the next
+/// allocation beside this one (cast-9h00). The library sends its Refresh a
+/// minute before the allocation lapses and retries it for that minute; waiting
+/// this long leaves the rest of the minute for the new allocation to be made
+/// and the guests moved onto it.
+pub const REFRESH_PATIENCE: Duration = Duration::from_secs(20);
+
 /// Keepalives unanswered in a row before the relay says the server stopped
 /// answering.
 const KEEPALIVE_SILENT: u32 = 4;
@@ -145,6 +152,9 @@ pub(crate) struct Relay {
     keepalive_at: Duration,
     keepalive: Option<castcorder_link::stun::TxId>,
     keepalive_seq: u64,
+    /// When the Refresh that no server answer has confirmed yet was first sent
+    /// (cast-9h00).
+    refresh_sent_at: Option<Duration>,
     /// Keepalives in a row that went unanswered.
     unanswered: u32,
     pub(crate) stats: RelayStats,
@@ -308,6 +318,17 @@ impl Relay {
         self.exhausted && self.relayed.is_none()
     }
 
+    /// A held allocation's Refresh has gone unanswered for [`REFRESH_PATIENCE`]:
+    /// the server may never answer it (Cloudflare's did not, and its
+    /// allocations closed 30 minutes after they were made), so the host should
+    /// make the next allocation before this one lapses.
+    pub(crate) fn refresh_overdue(&self, now: Duration) -> bool {
+        self.relayed.is_some()
+            && self
+                .refresh_sent_at
+                .is_some_and(|t| now >= t + REFRESH_PATIENCE)
+    }
+
     /// The relayed address, once the server has granted the allocation.
     pub(crate) fn relayed(&self) -> Option<SocketAddr> {
         self.relayed
@@ -408,13 +429,23 @@ impl Relay {
     }
 
     fn fail(&mut self, now: Duration, why: &str) {
-        warn!(server = ?self.server(), relayed = ?self.relayed.map(|r| r.to_string()), last_error = ?self.stats.last_error, retry_s = RETRY.as_secs(), "{why}");
+        // An allocation that lapsed after being held (its Refresh went
+        // unanswered, cast-9h00) is made again at once: guests are declared
+        // gone after a few seconds of silence, less than [`RETRY`]. One that
+        // never got granted waits [`RETRY`], so a refusing server is not hammered.
+        let wait = if self.relayed.is_some() {
+            Duration::ZERO
+        } else {
+            RETRY
+        };
+        warn!(server = ?self.server(), relayed = ?self.relayed.map(|r| r.to_string()), last_error = ?self.stats.last_error, retry_s = wait.as_secs(), "{why}");
         self.client = None;
         self.deadline = None;
         self.relayed = None;
+        self.refresh_sent_at = None;
         self.requested.clear();
         self.stats.failures += 1;
-        self.retry_at = now + RETRY;
+        self.retry_at = now + wait;
     }
 
     /// Send the client's pending datagrams and act on its events.
@@ -426,7 +457,10 @@ impl Relay {
             let data = t.data.as_ref();
             if self.relayed.is_some() {
                 match stun_type(data) {
-                    Some(REFRESH_REQUEST) => info!(server = %t.to, "turn allocation refresh sent"),
+                    Some(REFRESH_REQUEST) => {
+                        self.refresh_sent_at.get_or_insert(now);
+                        info!(server = %t.to, "turn allocation refresh sent");
+                    }
                     Some(CREATE_PERMISSION_REQUEST) => debug!("turn permission refresh sent"),
                     _ => {}
                 }
@@ -450,6 +484,7 @@ impl Relay {
                 TurnEvent::AllocationCreated(_, relayed) => {
                     info!(relayed = %relayed, server = %c.remote_addr(), "turn allocation created");
                     self.relayed = Some(relayed);
+                    self.refresh_sent_at = None;
                     self.keepalive_at = now + KEEPALIVE;
                     self.deadline = None;
                     self.stats.last_error = None;
@@ -508,7 +543,10 @@ impl Relay {
             self.stats.last_error = Some(format!("{m} {code} {reason}"));
         }
         match stun_type(&payload) {
-            Some(REFRESH_SUCCESS) => info!(server = %source, "turn allocation refreshed"),
+            Some(REFRESH_SUCCESS) => {
+                self.refresh_sent_at = None;
+                info!(server = %source, "turn allocation refreshed");
+            }
             Some(REFRESH_ERROR) => warn!(server = %source, "turn allocation refresh refused"),
             Some(CREATE_PERMISSION_ERROR) => {
                 warn!(server = %source, "turn permission request refused");
