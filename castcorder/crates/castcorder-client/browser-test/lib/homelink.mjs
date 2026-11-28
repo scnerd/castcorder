@@ -146,6 +146,15 @@ export async function homeLinkChecks() {
   const navTop = () => P.evaluate(() => Math.round(document.querySelector('.home-nav').getBoundingClientRect().top));
   await P.evaluate(() => { const m = document.querySelector('.home-main'); m.scrollTop = m.scrollHeight; window.scrollTo(0, document.body.scrollHeight); });
   check((await navTop()) === 0, 'the left nav stays pinned at the top while the page scrolls');
+  // Only inner areas scroll: the window itself has nowhere to go (a second, outer
+  // scrollbar ran past the nav into empty space), and the place's own scrollbar sits
+  // at the window's right edge instead of floating inside a centred column.
+  const outer = await P.evaluate(() => ({
+    docH: document.documentElement.scrollHeight, winH: window.innerHeight, y: window.scrollY,
+    mainRight: Math.round(document.querySelector('.home-main').getBoundingClientRect().right), winW: window.innerWidth,
+  }));
+  check(outer.docH <= outer.winH && outer.y === 0, 'the home window itself never scrolls: ' + JSON.stringify(outer));
+  check(outer.mainRight === outer.winW, 'the place beside the nav scrolls at the window\x27s edge: ' + JSON.stringify(outer));
 
   // Last: in Firefox a custom-scheme link leaves the page deaf to later clicks.
   // "Rooms you joined": say what it does, where the click happened.
