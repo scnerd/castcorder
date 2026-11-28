@@ -491,9 +491,11 @@ pub fn exchange_within(
     let stream = connect(&t).map_err(|e| format!("connect {}:{}: {e}", t.host, t.port))?;
     let url = castcorder_link::wire::mailbox_url(&t.ws_url, to);
     let (mut ws, _) = tungstenite::client(url.as_str(), stream).map_err(|e| e.to_string())?;
-    let ServerMsg::Hello { .. } = read_msg(&mut ws)? else {
-        return Err("expected hello".into());
-    };
+    match read_msg(&mut ws)? {
+        ServerMsg::Hello { .. } => {}
+        ServerMsg::Error { code, message } => return Err(format!("{code}: {message}")),
+        _ => return Err("expected hello".into()),
+    }
     send(
         &mut ws,
         &ClientMsg::Offer {
