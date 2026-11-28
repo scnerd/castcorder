@@ -378,6 +378,7 @@ pub(super) fn pump_rpc(ui: Ui) {
                 }
                 Event::DeviceSources(list) => ui.sources.set(list),
                 Event::ChangeSource { by, change } => changes.push((by, change)),
+                Event::RoomTitle(t) => ui.room_title.set(t),
                 Event::ContactOffer { from, name, code } => {
                     info!(call = %ctx.call, from = from.0, "offered to become contacts");
                     ui.contact_offer

@@ -63,6 +63,7 @@ export async function roomsChecks() {
   await P.click('#create-room');
   const card = P.locator('#rooms li[data-room="' + ROOM + '"]');
   await waitFor(async () => (await card.count()) === 1, 'the new room appears on the home', 10000);
+  check((await card.locator('h2').textContent()) === 'Late show', 'the new room shows the name as typed, not its folder name');
   check((await card.locator('.call-row').count()) === 0 && (await text(P, '#rooms li[data-room="' + ROOM + '"] .next-call')).includes('starts a new call'),
     'a new room has no calls yet; joining starts one');
   const link = (await card.locator('.room-link').textContent()).trim();
@@ -90,13 +91,16 @@ export async function roomsChecks() {
   // The producer joins the room from the home; the guest gets in.
   await card.locator('.join-room').click();
   await P.waitForSelector('#join');
-  check((await text(P, '#lobby-room')) === ROOM, 'Join on the home opens that room\x27s lobby');
+  // The lobby shows the name as typed, not the folder name (cast-e29x).
+  await waitFor(async () => (await text(P, '#lobby-room')) === 'Late show', 'Join on the home opens that room\x27s lobby, by its name', 10000);
+  check(true, 'Join on the home opens that room\x27s lobby, named as typed');
   // No person name set on this home: the lobby asks for one (cast-n56.3).
   await P.fill('#name', 'Pat');
   await P.click('#join');
   await waitFor(async () => (await text(G, '#state')) === 'connected', 'G gets in once the producer opened the room', 40000);
   check((await rooms()).find((r) => r.name === ROOM).waiting.length === 0, 'once in, the guest is no longer listed as waiting');
   await waitFor(async () => (await text(P, '#current-call')).length > 0, 'the producer sees which call this is', 15000);
+  check((await text(G, '#call-room')) === 'Late show', 'the guest\x27s call shows the room as typed: ' + (await text(G, '#call-room')));
   const first = await text(P, '#current-call');
   const startTake = async (n) => {
     await waitFor(async () => P.isEnabled('#take-start'), 'P can start a take', 15000);

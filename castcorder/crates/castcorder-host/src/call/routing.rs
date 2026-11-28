@@ -527,6 +527,7 @@ impl Call {
             room: self.room_name.clone(),
             call: call.clone(),
         });
+        let title = Event::RoomTitle(self.room.title().unwrap_or_default().to_string());
         for id in ids {
             // In this call from now on: its tracks of this call are accepted
             // whichever call it delivers them from.
@@ -537,7 +538,7 @@ impl Call {
                 warn!(call = %call, device = %device, error = %e, "device not recorded in the call");
             }
             if let Some(rpc) = self.rpc.get_mut(id)
-                && rpc.emit(event.clone()).is_err()
+                && (rpc.emit(event.clone()).is_err() || rpc.emit(title.clone()).is_err())
             {
                 warn!(guest = id.0, "call not sent: channel closed");
             }
@@ -669,6 +670,11 @@ impl Call {
     pub(super) fn rename_room(&mut self, room: &str, title: &str) -> Result<(), String> {
         self.edit_room(room, |r| r.set_title(title))?;
         info!(room = %room, title = %title, "room renamed");
+        // Everyone in its call sees the new name at once.
+        if room == self.room_name {
+            let ids: Vec<GuestId> = self.rpc.keys().copied().collect();
+            self.send_call(&ids);
+        }
         Ok(())
     }
 

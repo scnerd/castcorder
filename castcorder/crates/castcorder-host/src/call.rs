@@ -90,7 +90,7 @@ pub enum Command {
     /// Who is in `room`'s call now, by name (empty unless it is live).
     InCall {
         room: String,
-        reply: mpsc::Sender<Vec<String>>,
+        reply: mpsc::Sender<(Vec<String>, Option<String>)>,
     },
     /// A contact link (castcorder-host `contact_link`): an admitted offer
     /// from a contact's app install, accepted as a sync-only connection.
@@ -2155,7 +2155,8 @@ impl Call {
                 let _ = reply.send(self.stop_take());
             }
             Command::InCall { room, reply } => {
-                let _ = reply.send(self.in_call(&room));
+                let title = self.judge(&room, |r| r.title().map(str::to_string));
+                let _ = reply.send((self.in_call(&room), title));
             }
             Command::ContactLink {
                 peer,
@@ -2218,7 +2219,18 @@ impl Call {
                 }
             }
             Command::CreateRoom { name, reply } => {
-                let _ = reply.send(self.rooms.create_room(&name));
+                // The room shows the name as typed ("Friday pod"), not its
+                // folder name ("Friday-pod"), wherever it is shown.
+                let made = self.rooms.create_room(&name).map(|slug| {
+                    let typed = name.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if typed != slug
+                        && let Err(e) = self.rename_room(&slug, &typed)
+                    {
+                        warn!(room = %slug, error = %e, "room made without its typed name");
+                    }
+                    slug
+                });
+                let _ = reply.send(made);
             }
             Command::ChooseCall { room, call, reply } => {
                 let _ = reply.send(self.choose_call(&room, call));

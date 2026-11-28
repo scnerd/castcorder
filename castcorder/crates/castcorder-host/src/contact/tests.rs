@@ -736,6 +736,7 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
         room: "show".into(),
         link: link.into(),
         in_call: vec!["Bob".into()],
+        title: Some("The  show".into()),
     };
     let script = format!("javascript:alert(1)//{}", &link[link.find('#').unwrap()..]);
     for bad in ["https://rv.test/no-fragment", script.as_str(), ""] {
@@ -752,6 +753,11 @@ fn an_invite_is_shown_only_from_a_contact_and_only_with_a_call_link() {
     assert_eq!(
         (shown[0].from.as_str(), shown[0].link.as_str()),
         ("Bob", link.as_str())
+    );
+    // The room by its name on Bob's host machine, cleaned (cast-e29x).
+    assert_eq!(
+        (shown[0].room.as_str(), shown[0].title.as_str()),
+        ("show", "The show")
     );
     // Removed since: not shown, and what was shown goes with them.
     a.contacts.remove(&b.persons.id()).unwrap();

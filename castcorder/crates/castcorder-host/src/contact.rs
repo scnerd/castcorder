@@ -424,6 +424,10 @@ impl Contacts {
                 .map(|n| crate::http::clean_label(n))
                 .collect(),
             link: invite.link,
+            title: invite
+                .title
+                .map(|t| crate::http::clean_label(&t))
+                .filter(|t| !t.is_empty()),
         };
         info!(person = %peer.person, room = %invite.room, "invited to a call");
         g.invites.receive(&peer.person, &from, invite, now_ms);

@@ -496,7 +496,8 @@ impl Running {
             .ok()
             .and_then(|_| rx.recv_timeout(std::time::Duration::from_secs(10)).ok())
             .unwrap_or_default();
-        let invite = invite::make(&self.call_links, room, in_call)?;
+        let (in_call, title) = in_call;
+        let invite = invite::make(&self.call_links, room, title, in_call)?;
         self.contacts.invite(person, invite, wall_ms())
     }
 

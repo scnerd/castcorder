@@ -438,8 +438,20 @@ fn Lobby(ui: Ui) -> impl IntoView {
     let last_error = move || ui.errors.get().last().cloned().unwrap_or_default();
     let testing = move || test.state.get() != "off";
     let video_shown = move || test.state.get() == "on" && ui.camera.get();
+    // On the host machine's own page the home knows the room's name.
+    if home::is_local_page() {
+        let room = ui.room_name.get_untracked();
+        if !room.is_empty() {
+            spawn_local(async move {
+                let t = home::local_room_title(&room).await;
+                if !t.is_empty() && ui.room_title.get_untracked().is_empty() {
+                    ui.room_title.set(t);
+                }
+            });
+        }
+    }
     let room_title = move || {
-        let r = ui.room_name.get();
+        let r = ui.shown_room();
         if r.is_empty() {
             "A Castcorder call".to_string()
         } else {
@@ -491,7 +503,7 @@ fn Lobby(ui: Ui) -> impl IntoView {
                             <h1>{move || if ui.room_name.get().is_empty() {
                                 room_title().into_any()
                             } else {
-                                view! { <span id="lobby-room">{move || ui.room_name.get()}</span> }.into_any()
+                                view! { <span id="lobby-room">{room_title}</span> }.into_any()
                             }}</h1>
                         </Show>
                         <Show when=home::is_local_page>
@@ -763,11 +775,7 @@ fn Call(ui: Ui) -> impl IntoView {
     super::popups::register_flag("more", ".more-wrap", more_open);
     super::popups::register_flag("phone-more", ".more-dock", phone_more);
     let top_title = move || {
-        let r = ui
-            .call_ref
-            .get()
-            .map(|c| c.room)
-            .unwrap_or_else(|| ui.room_name.get());
+        let r = ui.shown_room();
         if r.is_empty() {
             "Castcorder".to_string()
         } else {
@@ -813,7 +821,7 @@ fn Call(ui: Ui) -> impl IntoView {
             <header class="topbar" class:recording=take_rec>
                 <div class="top-left">
                     // One h1 in the page at a time (tests click it as a user gesture).
-                    <Show when=move || ui.joined.get() fallback=move || view! { <strong>{top_title}</strong> }><h1>{top_title}</h1></Show>
+                    <Show when=move || ui.joined.get() fallback=move || view! { <strong>{top_title}</strong> }><h1 id="call-room">{top_title}</h1></Show>
                     <span class="chip role-chip" id="role-chip">{role_word}</span>
                     {move || rollup().map(|(text, short)| view! {
                         <button id="track-rollup" class="chip" class:warn=short title="Whose machines are recording this take"
@@ -1123,6 +1131,7 @@ pub(super) fn App() -> impl IntoView {
         call_ref: RwSignal::new(None),
         calls: RwSignal::new(Vec::new()),
         room_name: RwSignal::new(room_param.clone()),
+        room_title: RwSignal::new(String::new()),
         take: RwSignal::new(String::new()),
         disk: RwSignal::new(Vec::new()),
         take_started_us: RwSignal::new(None),
