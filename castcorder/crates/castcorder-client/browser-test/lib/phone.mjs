@@ -55,8 +55,8 @@ export async function phoneLeaveChecks(page, n) {
   // The side panel opens as a sheet below the header: the REC pill stays uncovered.
   const wasOpen = (await page.getAttribute('#dock-people', 'aria-pressed')) === 'true';
   if (!wasOpen) await page.click('#dock-people');
-  await page.waitForSelector('.side:not(.transcript-side)', { timeout: 5000 });
-  const side = await page.locator('.side:not(.transcript-side)').boundingBox();
+  await page.waitForSelector('.side', { timeout: 5000 });
+  const side = await page.locator('.side').boundingBox();
   const pillFree = await page.evaluate(() => {
     const r = document.querySelector('.rec-slot').getBoundingClientRect();
     const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);

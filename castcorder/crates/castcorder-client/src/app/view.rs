@@ -1015,7 +1015,7 @@ fn Call(ui: Ui) -> impl IntoView {
                         </details>
                     </div>
                 </aside>
-                <aside class="side transcript-side" id="transcript-side" hidden=move || !transcript_shown()>
+                <aside class="transcript-side" id="transcript-side" hidden=move || !transcript_shown()>
                     <div class="side-head">
                         <h2>"Transcript"</h2>
                         <button class="btn tiny outline" aria-label="Close transcript" on:click=move |_| ui.transcript_open.set(Some(false))>
