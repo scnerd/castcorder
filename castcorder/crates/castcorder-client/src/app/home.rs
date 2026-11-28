@@ -64,6 +64,9 @@ struct HomeRoom {
 struct HomeData {
     rooms: Vec<HomeRoom>,
     lan: Vec<String>,
+    /// The host's reachability self-check: "yes", "no", or empty (unknown).
+    #[serde(default)]
+    reachable: String,
 }
 
 /// One `/rooms` or `/folder/open` request; the answer's text, or the host's
@@ -527,7 +530,11 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
     };
     // Through the rendezvous once any room has a link there; else the LAN.
     let reach = move || {
-        if data.get().rooms.iter().any(|r| r.link.is_some()) {
+        let d = data.get();
+        if d.reachable == "no" {
+            // The self-check found the rendezvous does not deliver to it.
+            "Others can't reach this computer right now"
+        } else if d.rooms.iter().any(|r| r.link.is_some()) {
             "Reachable from anywhere"
         } else {
             "Reachable on this network only"
