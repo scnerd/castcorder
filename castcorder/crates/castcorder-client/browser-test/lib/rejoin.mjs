@@ -58,7 +58,10 @@ export async function rejoinChecks({ rendezvous } = {}) {
   const leave = async (p) => {
     await p.click('#leave');
     await waitFor(async () => (await state(p)) === 'left', 'left', 15000);
-    if (await p.locator('#left-stay').isVisible()) await p.click('#left-stay');
+    // The note around Stay here is hidden while recordings are on their way,
+    // yet the page still counts down to the home once they are sent (20 s):
+    // press it whether or not it shows, or a slow run is sent home (cast-ej4).
+    if (await p.locator('#left-stay').count()) await p.locator('#left-stay').dispatchEvent('click');
   };
 
   // The producer at the host machine opens the room; two guests join by link.
