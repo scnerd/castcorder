@@ -80,6 +80,20 @@ pub struct LiveOpus {
 }
 
 impl LiveOpus {
+    /// Let the live sink hold back frames nobody has pulled, and an end of
+    /// stream until they are (cast-c6s). Call it once the pipeline is playing.
+    ///
+    /// Until then the sink drops frames and does not wait at the end of the
+    /// stream: a sink that waits for a puller does so holding its preroll
+    /// lock, the pipeline's change to PLAYING needs that lock, and a short
+    /// file could play through to its end before that change came (a 43
+    /// minute CI hang: the pipeline never played, and the dropped
+    /// `GstCapture` waited on the same locks for good).
+    pub(crate) fn arm(&self) {
+        self.sink.set_drop(false);
+        self.sink.set_wait_on_eos(true);
+    }
+
     /// Mute (true) or unmute the live stream: the encoder gets silence while
     /// muted; the recording branch never changes. False if the branch has no
     /// volume element.
@@ -190,7 +204,7 @@ pub(crate) fn build_tee(
          ! capsfilter name=live_caps caps=audio/x-raw,format=S16LE,rate=48000,channels=1 \
          {dsp}! audioconvert ! audio/x-raw,format=S16LE,rate=48000,channels=1 \
          ! volume name=live_mute mute={} ! opusenc name=live_enc bitrate={} frame-size=20 \
-         ! appsink name=live_sink sync=false async=false max-buffers=1 drop=false",
+         ! appsink name=live_sink sync=false async=false max-buffers=1 drop=true wait-on-eos=false",
         opts.muted, opts.bitrate
     );
     let bin = gst::parse::bin_from_description(&desc, true)
@@ -304,5 +318,54 @@ pub fn raise_current_thread_priority() -> String {
     #[cfg(not(any(windows, unix)))]
     {
         "unchanged (not supported on this platform)".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cast-c6s: frames reach the live sink while the pipeline is still
+    /// PAUSED and nobody pulls them; the pipeline must still reach PLAYING.
+    /// (The live sink used to wait for a puller holding its preroll lock, so
+    /// the change to PLAYING never came.)
+    #[test]
+    fn the_pipeline_plays_although_nobody_pulls_the_live_branch() {
+        crate::init().unwrap();
+        let pipeline = gst::Pipeline::new();
+        let src = gst::ElementFactory::make("audiotestsrc")
+            .property("num-buffers", 300i32)
+            .property("samplesperbuffer", 960i32)
+            .build()
+            .unwrap();
+        let caps = gst::ElementFactory::make("capsfilter")
+            .property(
+                "caps",
+                gst::Caps::builder("audio/x-raw")
+                    .field("format", "S16LE")
+                    .field("rate", 48_000i32)
+                    .field("channels", 2i32)
+                    .build(),
+            )
+            .build()
+            .unwrap();
+        pipeline.add_many([&src, &caps]).unwrap();
+        src.link(&caps).unwrap();
+        let sink = crate::build_sink(&["S16LE"]).unwrap();
+        let live = build_tee(&pipeline, &caps, &sink, &LiveOptions::default()).unwrap();
+        pipeline.set_state(gst::State::Paused).unwrap();
+        // Long enough for the encoder to hand the live sink several frames.
+        std::thread::sleep(Duration::from_millis(1500));
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let (_, state, _) = pipeline.state(gst::ClockTime::from_seconds(10));
+        if state != gst::State::Playing {
+            // Stopping it would wait on the same lock: leave it.
+            std::mem::forget((pipeline, live));
+            panic!(
+                "the pipeline did not reach PLAYING (at {state:?}) with an unpulled live branch"
+            );
+        }
+        live.arm();
+        pipeline.set_state(gst::State::Null).unwrap();
     }
 }
