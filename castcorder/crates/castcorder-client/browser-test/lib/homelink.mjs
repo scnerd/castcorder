@@ -40,6 +40,7 @@ export async function homeLinkChecks() {
   await P.setViewportSize({ width: 1000, height: 500 });
   // Nothing joined yet: no "Rooms you joined" heading, and no contacts means
   // an empty-state line, not "Online 0 / Offline 0" (cast-zf2a).
+  await P.goto(HTTP11 + '/');
   await P.waitForSelector('#contact-list', { state: 'attached', timeout: 15000 });
   check(!(await text(P, '#home-main, .home-main')).includes('Rooms you joined'), 'home: no "Rooms you joined" while nothing is joined');
   check((await text(P, '#contact-list')).includes('No contacts yet') && !(await text(P, '#contact-list')).includes('Offline'),
