@@ -1099,7 +1099,9 @@ mod scope_restore_relay_tests {
         let key = HostKey::from_secret([1; 32]);
         let other = HostKey::from_secret([2; 32]);
         let q = format!("host={}", key.id().encode());
-        let g = mb.open_url(addr(2).ip(), addr(2), [2; 32], &q, NOW).unwrap();
+        let g = mb
+            .open_url(addr(2).ip(), addr(2), [2; 32], &q, NOW)
+            .unwrap();
         let out = mb.receive(g, &offer(&other), NOW);
         assert_eq!(err_code(&out), Some(code::BAD_MESSAGE), "{out:?}");
     }

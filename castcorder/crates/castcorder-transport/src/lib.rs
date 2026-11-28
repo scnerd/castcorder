@@ -385,6 +385,10 @@ pub struct Host<S, C> {
     rotating: Option<usize>,
     /// The replaced relay and when to delete its allocation.
     draining: Option<(usize, Duration)>,
+    /// The relayed address the guests were last offered (cast-9h00): when the
+    /// active relay's allocation is replaced without a rotation (it lapsed and
+    /// was made again), the guests are offered the new address.
+    offered: Option<SocketAddr>,
     local_tracks: Vec<Arc<TrackIn>>,
     guest_audio: Option<VecDeque<GuestAudio>>,
 }
@@ -437,6 +441,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             active: 0,
             rotating: None,
             draining: None,
+            offered: None,
             local_tracks: Vec::new(),
             guest_audio: None,
         }
@@ -555,6 +560,24 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         }
     }
 
+    /// Move every guest from the relayed address `old` to `new` (on `server`)
+    /// and restart their ICE.
+    fn offer_relayed(&mut self, old: Option<SocketAddr>, new: SocketAddr, server: SocketAddr) {
+        let dest = self.destination_for(server);
+        self.offered = Some(new);
+        for g in &mut self.guests {
+            if let Some(o) = old
+                && let Ok(c) = Candidate::relayed(o, dest, "udp")
+            {
+                g.rtc.direct_api().invalidate_candidate(&c);
+            }
+            if let Ok(c) = Candidate::relayed(new, dest, "udp") {
+                g.rtc.add_local_candidate(c);
+            }
+            g.restart_ice();
+        }
+    }
+
     /// Tick both relays and the rotation; returns when to look again.
     fn rotation(&mut self, now_d: Duration) -> Duration {
         let mut next = self.relays[0].tick(&self.socket, now_d);
@@ -614,6 +637,30 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.active = b;
             next = now_d;
         }
+        // The active allocation's Refresh went unanswered (Cloudflare never
+        // answered one, cast-9h00): make the next allocation beside it now,
+        // with the credentials it has, and switch the guests over before it
+        // lapses.
+        let a = self.active;
+        if self.rotating.is_none()
+            && self.draining.is_none()
+            && self.relays[a].refresh_overdue(now_d)
+            && (a == 1 || self.spare.is_some())
+            && let Some(server) = self.relays[a].credentials().cloned()
+        {
+            let b = 1 - a;
+            let sock = if b == 0 {
+                &self.socket
+            } else {
+                self.spare.as_ref().expect("checked")
+            };
+            let local = self.destination_for(server.addr);
+            let working = self.relays[a].working();
+            info!("turn refresh unanswered: allocating again beside the live allocation");
+            self.relays[b].set_server(Some(server), working, local, sock, now_d);
+            self.rotating = Some(b);
+            next = now_d;
+        }
         if let Some(b) = self.rotating
             && self.relays[b].relayed().is_some()
         {
@@ -632,19 +679,21 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
             self.draining = Some((a, now_d + RELAY_DRAIN));
             let new = self.relays[b].relayed().expect("checked");
             let server = self.relays[b].server().expect("allocated");
-            let dest = self.destination_for(server);
             info!(old = ?old.map(|o| o.to_string()), new = %new, guests = self.guests.len(), "relayed address switched to the renewed allocation; restarting ICE");
-            for g in &mut self.guests {
-                if let Some(o) = old
-                    && let Ok(c) = Candidate::relayed(o, dest, "udp")
-                {
-                    g.rtc.direct_api().invalidate_candidate(&c);
-                }
-                if let Ok(c) = Candidate::relayed(new, dest, "udp") {
-                    g.rtc.add_local_candidate(c);
-                }
-                g.restart_ice();
-            }
+            self.offer_relayed(old, new, server);
+            next = now_d;
+        }
+        // The active allocation was replaced without a rotation (it lapsed, or
+        // a retry moved it to another socket): the guests still hold the old
+        // relayed address, so offer them the new one.
+        if self.rotating.is_none()
+            && let Some(old) = self.offered
+            && let Some(new) = self.relays[self.active].relayed()
+            && old != new
+            && let Some(server) = self.relays[self.active].server()
+        {
+            info!(old = %old, new = %new, guests = self.guests.len(), "the relayed address changed: offering the new one; restarting ICE");
+            self.offer_relayed(Some(old), new, server);
             next = now_d;
         }
         if let Some((i, at)) = self.draining {
@@ -818,6 +867,7 @@ impl<S: DatagramSocket, C: Clock> Host<S, C> {
         ) {
             match Candidate::relayed(relayed, self.destination_for(server), "udp") {
                 Ok(c) => {
+                    self.offered = Some(relayed);
                     if rtc.add_local_candidate(c).is_none() {
                         debug!(relayed = %relayed, "relay candidate redundant, not added");
                     }
