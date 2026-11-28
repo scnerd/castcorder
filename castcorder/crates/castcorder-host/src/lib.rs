@@ -25,6 +25,7 @@ mod native;
 mod participant;
 pub mod person;
 pub mod presence;
+pub mod reach;
 mod recorders;
 mod rendezvous;
 mod room;
@@ -737,6 +738,18 @@ impl Running {
         self.call_links.link(&room)
     }
 
+    /// Whether others can reach this install through the rendezvous, as the
+    /// self-check found ([`reach`]): `"yes"`, `"no"` with why, or empty
+    /// while unknown or not registered.
+    pub fn reachable(&self) -> (String, String) {
+        let h = self
+            .call_links
+            .health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        (h.reachable.clone(), h.reachable_detail.clone())
+    }
+
     /// A room's call link, once registered with the rendezvous.
     pub fn room_link(&self, room: &str) -> Option<String> {
         self.call_links.link(room)
@@ -1161,6 +1174,12 @@ pub fn start(
         threads.push(presence::spawn(
             contacts.clone(),
             cfg.base.clone(),
+            stop.clone(),
+        ));
+        threads.push(reach::spawn(
+            cfg.base.clone(),
+            castcorder_link::HostKey::from_secret(cfg.key.secret()),
+            call_links.health.clone(),
             stop.clone(),
         ));
         let registered = call_links.registered.clone();

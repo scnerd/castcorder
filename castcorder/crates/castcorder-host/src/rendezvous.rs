@@ -187,6 +187,12 @@ pub struct Health {
     pub relay: String,
     /// Why the relay is unavailable (the rendezvous's reason).
     pub relay_detail: String,
+    /// Whether others can reach this install through the rendezvous, as the
+    /// self-check found (castcorder-host `reach`): `"yes"`, `"no"` (see
+    /// `reachable_detail`), or empty while unknown or not registered.
+    pub reachable: String,
+    /// Why the last self-checks failed.
+    pub reachable_detail: String,
     /// The STUN server the rendezvous named: contact links learn their
     /// server-reflexive address from it, so a contact behind another router
     /// can reach them (or their relay can).
@@ -848,6 +854,10 @@ fn answer(cfg: &Config, tx: &mpsc::Sender<Command>, from: u64, sealed: &str) -> 
         );
         return None;
     };
+    // This host's own reachability self-check (castcorder-host `reach`).
+    if let Some(a) = crate::reach::answer(&plain) {
+        return Some(b64(&reply.seal(to_json(&a).as_bytes())));
+    }
     let parsed =
         serde_json::from_slice::<OfferPlain>(&plain).map(|o| (cfg.secrets().room_of(&o.secret), o));
     let result = match parsed {
