@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use castcorder_host::presence::Timing;
 use castcorder_host::{Config, Running};
-use castcorder_rendezvous::mailbox::Limits;
+use castcorder_rendezvous::mailbox::{Limits, Rate};
 use castcorder_rendezvous::server::{Config as RvConfig, bind};
 
 fn wait(what: &str, mut f: impl FnMut() -> bool) {
@@ -40,7 +40,17 @@ fn rendezvous() -> SocketAddr {
                 listen: "127.0.0.1:0".parse().unwrap(),
                 stun: None,
                 clients: vec![],
-                limits: Limits::default(),
+                // Four installs on one loopback address, pinging each other
+                // seconds apart (the timing is shortened to that): far more
+                // than the default per-address allowance, which under a loaded
+                // CPU answered the leave notice with rate_limited (cast-zu8l).
+                limits: Limits {
+                    ip: Rate {
+                        per_minute: 6000,
+                        burst: 600,
+                    },
+                    ..Limits::default()
+                },
                 public_host: None,
                 trust_forwarded_for: false,
                 turn: None,
