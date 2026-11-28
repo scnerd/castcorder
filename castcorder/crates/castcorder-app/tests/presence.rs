@@ -43,6 +43,7 @@ fn rendezvous() -> SocketAddr {
                 limits: Limits::default(),
                 public_host: None,
                 trust_forwarded_for: false,
+                no_ping: false,
                 turn: None,
                 metering: None,
             })
