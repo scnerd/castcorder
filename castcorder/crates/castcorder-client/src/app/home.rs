@@ -705,6 +705,8 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 </button>
                             })
                         }}
+                        // Nothing to list, nothing to show: the section appears once this app has joined a room.
+                        <Show when=move || !joined.get().is_empty()>
                         <div class="home-head joined">
                             <h2>"Rooms you joined"</h2>
                             // The rooms this app joined on other hosts live in its
@@ -727,6 +729,7 @@ pub(super) fn Home(ui: Ui) -> impl IntoView {
                                 {joined_card(r)}
                             </For>
                         </ul>
+                        </Show>
                     </section>
                     <section id="home-contacts" class="home-place" hidden=move || place.get() != Place::Contacts>
                         <super::person::ContactsCard list=contacts rooms=room_names/>
