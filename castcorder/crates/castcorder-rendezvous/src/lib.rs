@@ -12,9 +12,12 @@
 //!   The mailbox logic (routing, limits, relay decisions) lives in the
 //!   I/O-free castcorder-mailbox crate, shared with the Cloudflare Worker
 //!   (`castcorder/worker`, ADR 0004); this crate wraps it in axum.
-//! - A connection may name the host whose mailbox it is for
-//!   (`/ws?mailbox=HOST_ID`); it may then only register as, or offer to, that
-//!   host. The Worker routes on it; here it only narrows the connection.
+//! - It behaves on the wire as the Worker does (ADR 0004: the Worker's
+//!   semantics are the protocol; tests/conformance.rs runs one contract
+//!   against both). A connection must name the host whose mailbox it is for
+//!   (`/ws?mailbox=HOST_ID`, else a guest's `?host=`), and may then only
+//!   register as, or offer to, that host; one naming none is refused. The
+//!   server never pings: a client keeps its own connection alive.
 //! - A STUN responder on its own UDP port tells hosts (and guests) their
 //!   server-reflexive address.
 //! - It also serves static client builds at `/v/<version>/`, standing in for
