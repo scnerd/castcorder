@@ -113,7 +113,13 @@ async function worker({ start, ns, ip, port, stunPort, dist, version, http }) {
   const up = async () => {
     n += 1;
     const st = start(ns, process.execPath, args, n === 1 ? 'rendezvous' : 'rendezvous-' + n,
-      { cwd: WORKER_DIR, detached: true, env: { WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1' } });
+      { cwd: WORKER_DIR, detached: true, env: {
+        WRANGLER_SEND_METRICS: 'false', NO_COLOR: '1',
+        // wrangler keeps a dev registry in ~/.config/.wrangler; as root
+        // (sudo -E keeps HOME) that would leave it root-owned for the next
+        // Worker test, so it lives with this run's state instead.
+        XDG_CONFIG_HOME: join(state, 'config'),
+      } });
     await ready(st, /Ready on http/, 'wrangler dev ready', 120000);
     return st;
   };
