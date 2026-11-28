@@ -278,16 +278,17 @@ jobs:
 
   # The journey (two installs on two home networks, the Worker under wrangler dev) with
   # seeded faults at every step: rendezvous redeploys, a home's uplink cut for seconds,
-  # packet loss (browser-test/lib/world.mjs, nemesis). New seeds every night; a failing
-  # seed replays exactly with CASTCORDER_NEMESIS_SEED (or the nemesis_seed input).
+  # packet loss, jitter and reordering, NAT rebinding (browser-test/lib/world.mjs,
+  # nemesis). Twenty new seeds every night, four per job; a failing seed replays exactly
+  # with CASTCORDER_NEMESIS_SEED (or the nemesis_seed input, which runs just that one).
   nemesis:
-    name: journey with faults (seed ${{ matrix.slot }})
+    name: journey with faults (seeds ${{ matrix.slot }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3]
+        slot: [1, 2, 3, 4, 5]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -329,17 +330,35 @@ jobs:
           pactl load-module module-null-sink sink_name=ci
           pactl set-default-sink ci
 
-      - name: Pick the seed
+      - name: Install conntrack (the NAT rebinding fault)
+        run: sudo apt-get install -y --no-install-recommends conntrack
+
+      - name: Journeys with faults
         env:
           ASKED: ${{ github.event.inputs.nemesis_seed }}
           SLOT: ${{ matrix.slot }}
         run: |
-          if [ -n "$ASKED" ]; then seed="$ASKED"; else seed=$(( GITHUB_RUN_NUMBER * 10 + SLOT )); fi
-          echo "CASTCORDER_NEMESIS_SEED=$seed" >> "$GITHUB_ENV"
-          echo "::notice::nemesis seed $seed (replay: CASTCORDER_NEMESIS_SEED=$seed task test:journey)"
-
-      - name: Journey with faults
-        run: task test:journey
+          if [ -n "$ASKED" ]; then
+            [ "$SLOT" = 1 ] || exit 0
+            seeds="$ASKED"
+          else
+            seeds=""
+            for i in 0 1 2 3; do seeds="$seeds $(( GITHUB_RUN_NUMBER * 100 + SLOT * 10 + i ))"; done
+          fi
+          failed=""
+          for seed in $seeds; do
+            echo "::group::nemesis seed $seed"
+            if CASTCORDER_NEMESIS_SEED=$seed task test:journey; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::journey failed with nemesis seed $seed (replay: CASTCORDER_NEMESIS_SEED=$seed task test:journey)"
+              failed="$failed $seed"
+              sudo cp -r castcorder/crates/castcorder-client/browser-test/test-results/journey \
+                "castcorder/crates/castcorder-client/browser-test/test-results/journey-seed-$seed"
+            fi
+          done
+          [ -z "$failed" ] || { echo "failed seeds:$failed"; exit 1; }
 
       - name: Upload journey logs
         if: failure()

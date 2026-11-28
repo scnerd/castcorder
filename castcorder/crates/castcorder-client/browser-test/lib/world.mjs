@@ -126,7 +126,15 @@ async function worker({ start, ns, ip, port, stunPort, dist, version, http }) {
 //
 // - redeploy: the rendezvous killed outright and started again;
 // - partition: one home's uplink cut for 3 to 10 s, then restored;
-// - loss: one home's uplink drops 2 to 8 % of packets until the next step.
+// - loss: one home's uplink drops 2 to 8 % of packets until the next step;
+// - jitter: one home's uplink delays packets 20 to 120 ms (+- half) and
+//   reorders 1 to 10 % of them until the next step (needs tc netem);
+// - rebind: one home's NAT gives every UDP flow a new public port (needs
+//   conntrack), and again at the next step.
+//
+// A fault whose tool is missing here is logged as skipped; the seed's
+// sequence stays the same, so CI (which has both) replays a seed exactly.
+// Not yet: clock skew between the installs.
 //
 // The journey's checks are invariants with a time budget: they must hold
 // once faults heal. A step whose precondition a fault would break (a take
@@ -166,7 +174,7 @@ export function nemesis({ net, rv, log = console.log }) {
       await heal();
       if (rnd() < 0.35) { log('nemesis before ' + name + ': none'); return; }
       const home = pick(['d', 'e']);
-      const fault = pick(['redeploy', 'partition', 'loss']);
+      const fault = pick(['redeploy', 'partition', 'loss', 'jitter', 'rebind']);
       if (fault === 'redeploy') {
         log('nemesis before ' + name + ': redeploy the rendezvous');
         await rv.restart();
@@ -182,10 +190,20 @@ export function nemesis({ net, rv, log = console.log }) {
         }
         pending.push(undo);
         timers.push(setTimeout(() => { const i = pending.indexOf(undo); if (i >= 0) pending.splice(i, 1); undo(); }, ms));
-      } else {
+      } else if (fault === 'loss') {
         const p = Math.round((0.02 + rnd() * 0.06) * 100) / 100;
         log('nemesis before ' + name + ': home ' + home + ' loses ' + Math.round(p * 100) + '% of packets');
         pending.push(net.lossy(home, p));
+      } else if (fault === 'jitter') {
+        const ms = 20 + Math.floor(rnd() * 100);
+        const reorder = 1 + Math.floor(rnd() * 10);
+        if (!net.can('netem')) { log('nemesis before ' + name + ': jitter skipped (no tc netem here)'); return; }
+        log('nemesis before ' + name + ': home ' + home + ' delays ' + ms + ' ms +- ' + Math.floor(ms / 2) + ', reorders ' + reorder + '%');
+        pending.push(net.jitter(home, ms, Math.floor(ms / 2), reorder));
+      } else {
+        if (!net.can('conntrack')) { log('nemesis before ' + name + ': rebind skipped (no conntrack here)'); return; }
+        log('nemesis before ' + name + ': home ' + home + ' NAT rebinds every UDP flow');
+        pending.push(net.rebind(home));
       }
     },
   };

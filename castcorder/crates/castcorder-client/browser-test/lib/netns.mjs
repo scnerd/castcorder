@@ -98,12 +98,57 @@ export const ROUTER = { d: NS.rd, e: NS.re };
 // nemesis). Each returns the function that undoes it.
 // - cut: nothing passes either way (a dropped uplink, a partition).
 // - lossy: each packet either way is dropped with probability `p`.
+// - jitter: packets out of the home are delayed `ms` +- `spread` ms and
+//   `reorder` % of them overtake others (tc netem; see can('netem')).
+// - rebind: the router's NAT gives every UDP flow a new public port (a
+//   carrier-grade NAT or a router restart; needs conntrack, see
+//   can('conntrack')). The undo rebinds once more, back to the usual ports.
 export function cut(home) {
   return routerRules(home, [['-j', 'DROP']]);
 }
 export function lossy(home, p) {
   return routerRules(home, [['-m', 'statistic', '--mode', 'random', '--probability', String(p), '-j', 'DROP']]);
 }
+export function jitter(home, ms, spread, reorder) {
+  const ns = ROUTER[home];
+  inNs(ns, 'tc', 'qdisc', 'add', 'dev', 'wan', 'root', 'netem',
+    'delay', ms + 'ms', spread + 'ms', 'reorder', reorder + '%', '25%');
+  return () => { try { inNs(ns, 'tc', 'qdisc', 'del', 'dev', 'wan', 'root'); } catch { /* gone */ } };
+}
+export function rebind(home) {
+  const ns = ROUTER[home];
+  // Not --random: that would make the NAT symmetric (a new port per
+  // destination), which no direct connection survives; this one keeps one
+  // mapping per flow, only on a new port.
+  const rule = ['POSTROUTING', '-o', 'wan', '-p', 'udp', '-j', 'MASQUERADE', '--to-ports', '40000-49999'];
+  inNs(ns, 'iptables', '-t', 'nat', '-I', ...rule);
+  inNs(ns, 'conntrack', '-F');
+  return () => {
+    try { inNs(ns, 'iptables', '-t', 'nat', '-D', ...rule); inNs(ns, 'conntrack', '-F'); } catch { /* gone */ }
+  };
+}
+
+// Whether a fault's tool works here ('netem', 'conntrack'), probed once on
+// home d's router (after make()).
+const probed = {};
+export function can(tool) {
+  if (tool in probed) return probed[tool];
+  try {
+    if (tool === 'netem') {
+      inNs(NS.rd, 'tc', 'qdisc', 'add', 'dev', 'wan', 'root', 'netem', 'delay', '1ms');
+      inNs(NS.rd, 'tc', 'qdisc', 'del', 'dev', 'wan', 'root');
+    } else if (tool === 'conntrack') {
+      inNs(NS.rd, 'conntrack', '-L');
+    } else {
+      throw new Error('unknown tool ' + tool);
+    }
+    probed[tool] = true;
+  } catch {
+    probed[tool] = false;
+  }
+  return probed[tool];
+}
+
 function routerRules(home, matches) {
   const ns = ROUTER[home];
   const rules = [];
