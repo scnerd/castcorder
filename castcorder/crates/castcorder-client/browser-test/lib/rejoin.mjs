@@ -193,7 +193,14 @@ export async function rejoinChecks({ rendezvous } = {}) {
   check((await card(U).locator('.link-changed-note').innerText()).includes('ask the host for the new link'), 'the room says to ask the host for the new link');
   check(await card(U).locator('.rejoin-room').isHidden(), 'no Rejoin is offered with a link that no longer works');
   await K.reload();
-  await K.waitForSelector('#join');
+  try {
+    await K.waitForSelector('#join');
+  } catch (e) {
+    // cast-ej4 follow-up: say what K's page shows instead of the join button.
+    console.log('rejoin: K url=' + K.url() + ' state=' + (await state(K).catch(() => '?')) + ' body=' +
+      (await K.locator('body').innerText().catch(() => '?')).replaceAll('\n', ' | ').slice(0, 900));
+    throw e;
+  }
   await waitFor(async () => (await card(K).count()) === 1 && (await chip(K)) === 'Live', 'K (trusted) still lists the room live', 40000);
   check(await card(K).locator('.rejoin-room').isVisible(), 'a trusted device is sent the new link and can still Rejoin');
 
