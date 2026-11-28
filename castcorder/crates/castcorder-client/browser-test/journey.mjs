@@ -23,14 +23,20 @@
 //     A second take: Eli leaves while it records; the track arrives after it stops.
 //  5. Both leave and press "Back to your rooms" to get home.
 //
+// The rendezvous comes from lib/world.mjs (the Worker under wrangler dev by
+// default; CASTCORDER_RENDEZVOUS=native for castcorder-rendezvous), never
+// started here.
+//
 // Needs: target/release/castcorder-host and castcorder-rendezvous, the
-// client's trunk build in ../dist. Everything printed is ASCII.
+// client's trunk build in ../dist, and for the Worker castcorder/worker built
+// with wrangler installed. Everything printed is ASCII.
 
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as net from './lib/netns.mjs';
+import * as world from './lib/world.mjs';
 import { check, checks, sleep, text, waitFor } from './lib/helpers.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -41,7 +47,6 @@ process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 const { chromium } = await import('playwright');
 const bin = (n) => join(process.env.CARGO_TARGET_DIR || join(WORKSPACE, 'target'), 'release', n);
 const HOST_EXE = bin('castcorder-host');
-const RV_EXE = bin('castcorder-rendezvous');
 const dist = process.env.CASTCORDER_DIST || join(CRATE, 'dist');
 const VERSION = '0.0.0';
 
@@ -51,16 +56,19 @@ if (problem) {
   console.log('SKIP journey: ' + problem);
   process.exit(0);
 }
-for (const f of [HOST_EXE, RV_EXE, join(dist, 'index.html')]) {
+for (const f of [HOST_EXE, join(dist, 'index.html')]) {
   if (!existsSync(f)) { console.log('FAIL missing ' + f); process.exit(1); }
 }
+const rvKind = world.rendezvousKind();
+if (rvKind.missing) { console.log('FAIL the ' + rvKind.kind + ' rendezvous is missing: ' + rvKind.missing); process.exit(1); }
 rmSync(RESULTS, { recursive: true, force: true });
 mkdirSync(RESULTS, { recursive: true });
 
 const procs = [];
-function start(ns, exe, args, name) {
+function start(ns, exe, args, name, opts = {}) {
   const p = spawn('ip', [...net.exec(ns).slice(1), exe, ...args], { stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, RUST_LOG: process.env.JOURNEY_LOG || 'info' } });
+    cwd: opts.cwd, detached: !!opts.detached,
+    env: { ...process.env, RUST_LOG: process.env.JOURNEY_LOG || 'info', ...(opts.env || {}) } });
   const st = { p, out: '', err: '', name };
   p.stdout.on('data', (d) => { st.out += d.toString(); });
   p.stderr.on('data', (d) => { st.err += d.toString(); });
@@ -103,13 +111,11 @@ const api = (p, path, body) => p.evaluate(async ([path, body]) => {
 }, [path, body]);
 
 let failed = null;
+let rv = null;
 try {
   net.setup();
-  const RV_ARGS = ['--listen', net.INET_IP + ':8080', '--stun', net.INET_IP + ':3478',
-    '--client', VERSION + '=' + dist];
-  let rv = start(net.NS.inet, RV_EXE, RV_ARGS, 'rendezvous');
-  await waitFor(() => rv.out.match(/RENDEZVOUS_READY/), 'rendezvous ready', 20000);
-  const RV = 'http://' + net.INET_IP + ':8080';
+  rv = await world.rendezvous({ start, ns: net.NS.inet, ip: net.INET_IP, port: 8080, stunPort: 3478, dist, version: VERSION });
+  const RV = rv.http;
   const host = (ns, who, room) => start(ns, HOST_EXE, ['--dist', dist, '--library', join(RESULTS, 'library-' + who),
     '--room', room, '--rendezvous', RV], 'host-' + who);
   const hd = host(net.NS.d, 'D', 'Show');
@@ -117,7 +123,7 @@ try {
   const HD = (await line(hd, /HOST_READY http=(\S+)/, 'D host ready'))[1];
   const HE = (await line(he, /HOST_READY http=(\S+)/, 'E host ready'))[1];
   await waitFor(() => hd.err.includes('registered with the rendezvous') && he.err.includes('registered with the rendezvous'), 'both registered', 30000);
-  console.log('two homes up behind their routers; rendezvous at ' + RV);
+  console.log('two homes up behind their routers; rendezvous (' + rv.kind + ') at ' + RV);
 
   const dctx = await person(net.NS.d, 'D');
   const ectx = await person(net.NS.e, 'E');
@@ -157,10 +163,7 @@ try {
   const flows = [...hd.err.matchAll(/registered with the rendezvous.*observed=(\S+):(\d+)/g)];
   const [, dIp, dPort] = flows[flows.length - 1];
   net.blackhole(dIp, dPort);
-  rv.p.kill('SIGKILL');
-  await waitFor(() => rv.exited !== undefined, 'the old rendezvous gone', 10000);
-  rv = start(net.NS.inet, RV_EXE, RV_ARGS, 'rendezvous-2');
-  await waitFor(() => rv.out.match(/RENDEZVOUS_READY/), 'the redeployed rendezvous ready', 20000);
+  await rv.restart();
   await waitFor(() => registrations(he) > eBefore, 'Eli registers with the redeployed rendezvous', 40000);
   const back = await waitFor(() => registrations(hd) > dBefore, 'Dana notices the dead connection and registers again', 90000).catch(() => false);
   check(!!back, 'after a redeploy Dana\x27s install registers again by itself (it pings a rendezvous that never pings)');
@@ -287,6 +290,7 @@ try {
   console.log('FAIL test did not complete: ' + String(e && e.stack || e));
 } finally {
   for (const b of browsers) await b.close().catch(() => {});
+  if (rv) await rv.stop().catch(() => {});
   for (const st of procs) { try { st.p.kill('SIGTERM'); } catch { /* gone */ } }
   await sleep(500);
   for (const st of procs) {
