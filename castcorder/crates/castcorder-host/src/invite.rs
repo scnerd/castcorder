@@ -21,8 +21,21 @@ use serde::Serialize;
 /// How long an invite stays (shown, or waiting to be delivered).
 pub const TTL_MS: u64 = 3 * 60 * 60 * 1000;
 
-/// How long a failed delivery to one install waits before it is tried again.
+/// How long a failed delivery to one install waits before it is tried
+/// again: [`RETRY_FIRST_MS`] after the first failure, doubling with each
+/// failure in a row up to [`RETRY_MS`]. A short outage (a router restart, a
+/// lost link) is retried within seconds; an install that stays unreachable is
+/// not asked more than twice a minute.
 pub const RETRY_MS: u64 = 30_000;
+
+/// The wait after the first failed delivery to an install.
+pub const RETRY_FIRST_MS: u64 = 2_000;
+
+/// The wait after `failures` failed deliveries in a row (at least 1).
+pub fn retry_after_ms(failures: u32) -> u64 {
+    let doublings = failures.saturating_sub(1).min(16);
+    (RETRY_FIRST_MS << doublings).min(RETRY_MS)
+}
 
 /// An invite this install received, as the home shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -67,8 +80,8 @@ struct Out {
     delivered: BTreeSet<String>,
     /// Installs it is being sent to now.
     sending: BTreeSet<String>,
-    /// Installs whose last try failed, and when.
-    failed: Vec<(String, u64)>,
+    /// Installs whose last try failed: when, and how many failed in a row.
+    failed: Vec<(String, u64, u32)>,
 }
 
 /// One delivery to make: `invite` to install `device` of `person`.
@@ -148,10 +161,9 @@ impl Invites {
         let mut out = Vec::new();
         for o in &mut self.outgoing {
             for device in online(&o.person) {
-                let failed_lately = o
-                    .failed
-                    .iter()
-                    .any(|(d, at)| *d == device && now_ms.saturating_sub(*at) < RETRY_MS);
+                let failed_lately = o.failed.iter().any(|(d, at, n)| {
+                    *d == device && now_ms.saturating_sub(*at) < retry_after_ms(*n)
+                });
                 if o.delivered.contains(&device) || o.sending.contains(&device) || failed_lately {
                     continue;
                 }
@@ -176,11 +188,17 @@ impl Invites {
             return;
         };
         o.sending.remove(&d.device);
-        o.failed.retain(|(dev, _)| *dev != d.device);
+        let before = o
+            .failed
+            .iter()
+            .find(|(dev, _, _)| *dev == d.device)
+            .map_or(0, |f| f.2);
+        o.failed.retain(|(dev, _, _)| *dev != d.device);
         if ok {
             o.delivered.insert(d.device.clone());
         } else {
-            o.failed.push((d.device.clone(), now_ms));
+            o.failed
+                .push((d.device.clone(), now_ms, before.saturating_add(1)));
         }
     }
 
@@ -282,7 +300,33 @@ mod tests {
         let due = i.due(1, |_| vec!["laptop".into()]);
         i.sent(&due[0], false, 1);
         assert!(i.due(2, |_| vec!["laptop".into()]).is_empty());
-        assert_eq!(i.due(1 + RETRY_MS, |_| vec!["laptop".into()]).len(), 1);
+        // Soon after a first failure (a short outage heals within seconds)...
+        let due = i.due(1 + RETRY_FIRST_MS, |_| vec!["laptop".into()]);
+        assert_eq!(
+            due.len(),
+            1,
+            "retried {RETRY_FIRST_MS} ms after the first failure"
+        );
+        // ...then backing off: each failure in a row doubles the wait, to RETRY_MS.
+        let at = 1 + RETRY_FIRST_MS;
+        i.sent(&due[0], false, at);
+        assert!(
+            i.due(at + RETRY_FIRST_MS, |_| vec!["laptop".into()])
+                .is_empty(),
+            "backed off"
+        );
+        assert_eq!(
+            i.due(at + 2 * RETRY_FIRST_MS, |_| vec!["laptop".into()])
+                .len(),
+            1
+        );
+        assert_eq!(retry_after_ms(1), RETRY_FIRST_MS);
+        assert_eq!(retry_after_ms(2), 2 * RETRY_FIRST_MS);
+        assert_eq!(
+            retry_after_ms(100),
+            RETRY_MS,
+            "never waits longer than RETRY_MS"
+        );
         assert!(i.outgoing(TTL_MS).is_empty(), "stale");
         assert!(i.due(TTL_MS, |_| vec!["desk".into()]).is_empty());
     }

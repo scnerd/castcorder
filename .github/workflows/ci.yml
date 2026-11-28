@@ -376,8 +376,14 @@ jobs:
       # Two people on two home networks behind their own routers (network
       # namespaces, so sudo): contacts, the rooms they share over a contact
       # link, and a call between their installs.
+      # With faults (browser-test/lib/world.mjs, nemesis): one seed per run, picked
+      # from the run id, so a re-run replays it; locally CASTCORDER_NEMESIS_SEED=N.
       - name: Journey test (two installs, two home networks)
-        run: task test:journey
+        run: |
+          sudo apt-get install -y --no-install-recommends conntrack
+          export CASTCORDER_NEMESIS_SEED=$(( GITHUB_RUN_ID % 1000000007 ))
+          echo "::notice::journey nemesis seed $CASTCORDER_NEMESIS_SEED (replay: CASTCORDER_NEMESIS_SEED=$CASTCORDER_NEMESIS_SEED task test:journey)"
+          task test:journey
 
       # The same system test against the Cloudflare Worker under `wrangler dev`
       # (ADR 0004): local only, no account. Builds worker-build and wrangler inside

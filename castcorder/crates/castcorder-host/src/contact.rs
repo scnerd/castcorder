@@ -1362,6 +1362,10 @@ impl Inner {
     }
 }
 
+/// How long [`request_contact`] keeps trying an exchange that fails in a
+/// row before it gives up.
+pub const EXCHANGE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Ask the app install that made `code` to make this install's person (its
 /// certificate `cert`, for key `me`) a contact of its person, until accepted,
 /// refused or `deadline` passes. The other person's key and what they sent.
@@ -1375,6 +1379,7 @@ pub fn request_contact(
 ) -> Result<([u8; 32], ContactGrant), String> {
     let audience = code.host.encode();
     let my_key = me.id().0;
+    let mut failing_since: Option<Instant> = None;
     loop {
         let nonce = b64(&crate::rendezvous::random::<16>().map_err(|e| e.to_string())?);
         let plain = OfferPlain {
@@ -1405,7 +1410,24 @@ pub fn request_contact(
         let eph = crate::rendezvous::random().map_err(|e| e.to_string())?;
         let (sealed, guest) = GuestSeal::seal(&code.host, eph, to_json(&plain).as_bytes())
             .map_err(|e| e.to_string())?;
-        let reply = exchange(&sealed)?;
+        // A failed exchange (the other install not registered for a moment,
+        // the rendezvous redeployed, a lost uplink) is tried again for up
+        // to EXCHANGE_PATIENCE in a row before adding fails.
+        let reply = match exchange(&sealed) {
+            Ok(r) => {
+                failing_since = None;
+                r
+            }
+            Err(e) => {
+                let since = *failing_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= EXCHANGE_PATIENCE || Instant::now() >= deadline {
+                    return Err(e);
+                }
+                debug!(error = %e, "contact request not delivered; trying again");
+                std::thread::sleep(POLL);
+                continue;
+            }
+        };
         let opened = guest
             .open_reply(&reply)
             .map_err(|e| format!("answer could not be opened: {e}"))?;

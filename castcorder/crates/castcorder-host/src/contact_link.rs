@@ -52,6 +52,14 @@ const INVITES_EVERY: Duration = Duration::from_millis(500);
 /// How long one request waits for its answer (opening the link included).
 pub const WAIT: Duration = Duration::from_secs(20);
 
+/// How long a patient ask ([`Links::ask_patiently`]) keeps trying: two
+/// [`WAIT`]s, so a link that was dialled while the network was down (and
+/// spent its whole connect timeout failing) still gets a full try after.
+pub const PATIENCE: Duration = Duration::from_secs(40);
+
+/// How long a patient ask waits before trying a failed link again.
+const RETRY_EVERY: Duration = Duration::from_secs(1);
+
 type Dial = Dialer<UdpDatagramSocket, SystemClock>;
 type Reply = mpsc::Sender<Result<Response, String>>;
 
@@ -91,23 +99,48 @@ impl Links {
     /// Ask the contact install `to` over its link (opened if need be),
     /// waiting at most [`WAIT`].
     pub fn ask(&self, to: HostId, request: Request) -> Result<Response, String> {
+        self.ask_by(to, request, Instant::now() + WAIT)
+    }
+
+    fn ask_by(&self, to: HostId, request: Request, end: Instant) -> Result<Response, String> {
         let (reply, rx) = mpsc::channel();
         self.tx
             .send(Ask { to, request, reply })
             .map_err(|_| "contact links are not running".to_string())?;
-        rx.recv_timeout(WAIT + Duration::from_secs(1))
+        let left = end.saturating_duration_since(Instant::now());
+        rx.recv_timeout(left + Duration::from_secs(1))
             .map_err(|_| "no answer over the contact link".to_string())?
     }
 
+    /// Ask as [`Links::ask`], but while the link itself fails (not opened,
+    /// closed, no answer) try again every [`RETRY_EVERY`] until
+    /// [`PATIENCE`] has passed; each try waits at most [`WAIT`]. Only for requests that are safe to repeat: a contact's
+    /// install that is unreachable for a few seconds (a lost uplink, its
+    /// restart, the rendezvous redeployed) is still heard. An answer, even
+    /// an error, is final.
+    pub fn ask_patiently(&self, to: HostId, request: Request) -> Result<Response, String> {
+        let end = Instant::now() + PATIENCE;
+        loop {
+            let by = end.min(Instant::now() + WAIT);
+            match self.ask_by(to, request.clone(), by) {
+                Err(why) if Instant::now() + RETRY_EVERY < end => {
+                    debug!(device = %to.short(), why = %why, "contact link failed; asking again");
+                    thread::sleep(RETRY_EVERY);
+                }
+                r => return r,
+            }
+        }
+    }
+
     /// The rooms contact `person` shares with this install, asked of each
-    /// of their installs shown online.
+    /// of their installs shown online (patiently: [`Links::ask_patiently`]).
     pub fn shared_rooms(&self, contacts: &crate::contact::Contacts, person: &str) -> SharedView {
         let installs = contacts.online_installs(person, crate::wall_ms());
         let asks: Vec<_> = installs
             .into_iter()
             .map(|(to, name)| {
                 let links = self.clone();
-                thread::spawn(move || (name, links.ask(to, Request::SharedRooms)))
+                thread::spawn(move || (name, links.ask_patiently(to, Request::SharedRooms)))
             })
             .collect();
         let mut out = SharedView::default();

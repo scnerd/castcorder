@@ -19,6 +19,7 @@
 //! Run with: task test:conformance
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
