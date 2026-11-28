@@ -13,6 +13,8 @@
 //!   her room's call link and is delivered; he dismisses it.
 //! - Bob appears offline: Ann has no install of his to ask, and a new invite
 //!   waits until he is back online.
+//! - The rendezvous is redeployed while Ann asks what they share: she still
+//!   hears once it is back within seconds (asked again, not "not reachable").
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -32,14 +34,29 @@ fn wait(what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
-/// The real rendezvous on a loopback port, on its own runtime.
-fn rendezvous() -> SocketAddr {
+/// The real rendezvous on a loopback port, on its own runtime, until
+/// [`Rv::kill`] (as a redeploy does: every connection dropped at once).
+struct Rv {
+    addr: SocketAddr,
+    stop: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Rv {
+    fn kill(self) {
+        let _ = self.stop.send(());
+        self.thread.join().expect("rendezvous thread");
+    }
+}
+
+fn rendezvous_on(listen: SocketAddr) -> Rv {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("runtime");
-        rt.block_on(async move {
-            let bound = bind(RvConfig {
-                listen: "127.0.0.1:0".parse().unwrap(),
+        let bound = rt
+            .block_on(bind(RvConfig {
+                listen,
                 stun: None,
                 clients: vec![],
                 limits: Limits::default(),
@@ -47,15 +64,21 @@ fn rendezvous() -> SocketAddr {
                 trust_forwarded_for: false,
                 turn: None,
                 metering: None,
-            })
-            .await
+            }))
             .expect("bind");
-            tx.send(bound.http).unwrap();
-            bound.run().await.expect("serve");
-        });
+        tx.send(bound.http).unwrap();
+        rt.spawn(bound.run());
+        let _ = stopped.recv();
+        // Dropping the runtime drops every connection and the listener.
     });
-    rx.recv_timeout(Duration::from_secs(10))
-        .expect("rendezvous up")
+    let addr = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("rendezvous up");
+    Rv { addr, stop, thread }
+}
+
+fn rendezvous() -> Rv {
+    rendezvous_on("127.0.0.1:0".parse().unwrap())
 }
 
 fn start(root: &Path, name: &str, rv: SocketAddr) -> Running {
@@ -101,8 +124,8 @@ fn contact_links_tell_shared_rooms_and_carry_invites() {
     ));
     let _ = std::fs::remove_dir_all(&root);
     let rv = rendezvous();
-    let a = start(&root, "a", rv);
-    let b = start(&root, "b", rv);
+    let a = start(&root, "a", rv.addr);
+    let b = start(&root, "b", rv.addr);
     a.set_person_names(Some("Ann"), Some("Desk")).unwrap();
     b.set_person_names(Some("Bob"), Some("Laptop")).unwrap();
     let (ann, bob) = (a.person().id, b.person().id);
@@ -193,5 +216,53 @@ fn contact_links_tell_shared_rooms_and_carry_invites() {
 
     a.stop();
     b.stop();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_contact_install_back_within_seconds_still_answers() {
+    let root = std::env::temp_dir().join(format!(
+        "castcorder-app-contact-link-back-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let rv = rendezvous();
+    let at = rv.addr;
+    let a = start(&root, "a", at);
+    let b = start(&root, "b", at);
+    a.set_person_names(Some("Ann"), Some("Desk")).unwrap();
+    b.set_person_names(Some("Bob"), Some("Laptop")).unwrap();
+    let (ann, bob) = (a.person().id, b.person().id);
+    wait("Ann's rendezvous link", || {
+        a.contact_code().unwrap().len() == 2
+    });
+    let links = a.contact_code().unwrap();
+    let lan = links.iter().find(|l| !l.contains("/v/")).unwrap();
+    b.add_contact(lan).unwrap();
+    wait("Ann to see Bob", || online(&a) == ["Laptop"]);
+    b.trust_person("show", &ann, true).unwrap();
+    wait("Bob's call link", || b.room_link("show").is_some());
+
+    // The rendezvous is redeployed (killed outright) and Ann asks while it
+    // is down; Bob still shows online (not yet stale). It is back on the
+    // same address two seconds later and Bob registers again.
+    rv.kill();
+    let (shared, rv) = std::thread::scope(|s| {
+        let asking = s.spawn(|| a.shared_rooms(&bob).unwrap());
+        sleep(Duration::from_secs(2));
+        let rv = rendezvous_on(at);
+        (asking.join().unwrap(), rv)
+    });
+    assert!(
+        shared.failed.is_empty(),
+        "asked again once Bob's install was back: {:?}",
+        shared.failed
+    );
+    assert_eq!(shared.installs.len(), 1);
+    assert_eq!(shared.installs[0].rooms[0].room, "show");
+
+    a.stop();
+    b.stop();
+    rv.kill();
     let _ = std::fs::remove_dir_all(&root);
 }

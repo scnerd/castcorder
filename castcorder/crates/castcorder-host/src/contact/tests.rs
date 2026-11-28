@@ -989,3 +989,46 @@ fn only_the_person_s_own_installs_sync_and_only_well_formed_contacts() {
     a.contacts.merge(&wrong);
     assert!(a.contacts.get(&c.persons.id()).unwrap().devices.is_empty());
 }
+
+#[test]
+fn a_contact_request_is_tried_again_while_the_other_install_is_briefly_unreachable() {
+    let (a, b) = (install("Ann", 30), install("Bob", 31));
+    let code = a.contacts.new_code(crate::wall_ms()).unwrap();
+    // Ann's install is not registered with the rendezvous for a moment (it
+    // was redeployed): the first two exchanges fail as the rendezvous says.
+    let mut calls = 0;
+    let mut exchange = |sealed: &[u8]| {
+        calls += 1;
+        if calls <= 2 {
+            return Err("host_offline: that host is not online".to_string());
+        }
+        let answer = a
+            .contacts
+            .answer_sealed(&b64(sealed), crate::wall_ms())
+            .ok_or("did not open")?;
+        unb64(&answer).ok_or_else(|| "not base64url".to_string())
+    };
+    let r = request_contact(
+        &code,
+        &b.host,
+        &b.persons.cert(),
+        &b.persons.name(),
+        &mut exchange,
+        Instant::now() + Duration::from_secs(10),
+    );
+    assert!(r.is_ok(), "tried again until Ann's install answered: {r:?}");
+    assert_eq!(calls, 3);
+    // An install that stays unreachable fails once the deadline passes.
+    let code = a.contacts.new_code(crate::wall_ms()).unwrap();
+    let mut never =
+        |_: &[u8]| Err::<Vec<u8>, _>("host_offline: that host is not online".to_string());
+    let r = request_contact(
+        &code,
+        &b.host,
+        &b.persons.cert(),
+        &b.persons.name(),
+        &mut never,
+        Instant::now() + Duration::from_secs(2),
+    );
+    assert!(matches!(r, Err(w) if w.contains("host_offline")));
+}
