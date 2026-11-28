@@ -38,7 +38,7 @@ export async function phoneLeaveChecks(page, n) {
     const label = el && (el.parentElement.querySelector('.dock-label') || el);
     return { sel, shown: !!r && r.width > 0 && r.height > 0, label: label ? label.innerText.trim() : '' };
   }));
-  const hidden = await page.evaluate(() => ['#self-view', '#devices', '#open-people', '#open-recordings', '#more-menu']
+  const hidden = await page.evaluate(() => ['#self-view', '#devices', '#open-people', '#open-recordings', '#open-transcript', '#transcript-side']
     .filter((sel) => { const el = document.querySelector(sel); return el && el.getBoundingClientRect().width > 0; }));
   check(dock.every((d) => d.shown && d.label.length > 0) && hidden.length === 0,
     'guest ' + n + ' phone dock: five labelled buttons ' + JSON.stringify(dock) + ', desktop-only controls shown: ' + JSON.stringify(hidden));

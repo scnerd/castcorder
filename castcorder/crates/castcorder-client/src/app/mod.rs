@@ -479,6 +479,12 @@ struct Ui {
     mute_tip: RwSignal<bool>,
     /// Which side panel is open.
     panel: RwSignal<Panel>,
+    /// Whether the Transcript panel is wanted (cast-2wqp): `None` until the
+    /// person picks, which means open wherever it is not a phone. It is its
+    /// own side panel, kept over People or Recordings when both do not fit.
+    transcript_open: RwSignal<Option<bool>>,
+    /// The page's width in CSS pixels, kept on resize.
+    width: RwSignal<f64>,
     /// Show this participant's own camera in its tile (others see it either way).
     self_view: RwSignal<bool>,
     /// The last `WAVE_LEN` microphone levels above the noise floor (0 to 1),
@@ -499,7 +505,6 @@ enum Panel {
     Closed,
     People,
     Recordings,
-    Transcript,
 }
 
 impl Ui {

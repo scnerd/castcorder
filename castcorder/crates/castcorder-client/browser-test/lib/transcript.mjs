@@ -70,10 +70,29 @@ export async function transcriptChecks() {
   await waitFor(async () => P.isEnabled('#take-start'), 'P can start a take', 30000);
   await waitFor(async () => (await text(G, '#participant')).length > 0, 'G joined', 30000);
 
-  // Open the panel (More, then Transcript): empty before any take.
-  await P.click('#more-menu');
-  await P.click('#open-transcript');
+  // The Transcript panel is open from the start beside People (cast-2wqp),
+  // with its own button on the top bar: empty before any take.
+  const shown = (sel) => P.locator(sel).isVisible();
+  check(await shown('#transcript-side') && await shown('#guest-count'),
+    'a wide page shows the Transcript panel and People side by side without asking');
   check((await text(P, '#transcript-count')).startsWith('Nothing yet'), 'the panel is empty before a take: ' + await text(P, '#transcript-count'));
+  await P.click('#open-transcript');
+  check(!(await shown('#transcript-side')), 'the top bar\'s Transcript button closes it');
+  await P.click('#open-transcript');
+  check(await shown('#transcript-side'), 'and opens it again');
+  // Where only one panel fits, the transcript is kept: People does not open
+  // by itself, opening it takes the place, and closing it brings the transcript back.
+  const wide = P.viewportSize();
+  await P.setViewportSize({ width: 1000, height: wide.height });
+  await waitFor(async () => !(await shown('#guest-count')) && await shown('#transcript-side'),
+    'on a narrower page the transcript stays and People steps aside', 5000);
+  check(true, 'where one panel fits, the transcript is the one shown');
+  await P.click('#open-people');
+  await waitFor(async () => await shown('#guest-count') && !(await shown('#transcript-side')), 'People opens in its place', 5000);
+  await P.click('#open-people');
+  await waitFor(async () => await shown('#transcript-side'), 'closing People brings the transcript back', 5000);
+  check(true, 'opening People takes the transcript\'s place, closing it brings the transcript back');
+  await P.setViewportSize(wide);
 
   await P.click('#take-start');
   const said = await waitFor(async () => {
